@@ -146,6 +146,8 @@ pub struct MistOperation {
     pub request_media_types: Vec<String>,
     /// Complete source request schemas keyed by media type.
     pub request_schemas: BTreeMap<String, serde_json::Value>,
+    /// Whether OpenAPI requires a request body for this operation.
+    pub request_body_required: bool,
     /// Source success-response media types.
     pub response_media_types: Vec<String>,
     /// Source response schemas keyed first by status and then media type.
@@ -404,6 +406,7 @@ fn validate_operation(
         || !method_allows_action(&operation.method, operation.action)
         || operation.target_selectors != targets_for_path(&operation.path)
         || operation.request_media_types != canonical_request_media(&operation.request_schemas)?
+        || (operation.request_body_required && operation.request_media_types.is_empty())
         || operation.transport != transport_for_media(&operation.request_media_types)?
         || operation.pagination != pagination_for_parameters(&operation.parameters)
         || response_media(&operation.responses) != operation.response_media_types

@@ -91,8 +91,19 @@ README will not restate a surface it has not verified.
 
 ## Status
 
-**Scaffold.** Repository, license, and branding only. No crates, no binary, no
-tool surface yet. Nothing here is usable against a real org.
+**Foundation in progress; no live Mist client.** The workspace has an audited
+operation catalog, strict profile metadata, authorization models, and a
+catalog-bound injectable `MistClient` contract. The contract validates Mist
+operation inputs and binds opaque cursors to a configured origin, but it has no
+concrete HTTP implementation.
+
+`mecmcp#90` remains the prerequisite for production outbound behavior. Until
+that shared foundation lands, this repository does not load tokens, construct
+HTTPS requests or URLs, expand paths, encode JSON or multipart payloads, stream
+or decode responses, parse rate-limit or pagination data, apply retry policy,
+or expose a live tool surface. `MistResponse` and `RateLimited` are DTOs that an
+injected test or future shared client can supply; they are not evidence of local
+transport support.
 
 Next, in order:
 

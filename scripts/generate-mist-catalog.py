@@ -125,8 +125,16 @@ def validate_schema(schema: Any, components: dict[str, Any], stack: tuple[str, .
             validate_schema(value, components, stack)
 
 
-def request_details(operation: dict[str, Any], components: dict[str, Any]) -> tuple[list[str], dict[str, Any], str]:
-    content = operation.get("requestBody", {}).get("content", {})
+def request_details(operation: dict[str, Any], components: dict[str, Any]) -> tuple[list[str], dict[str, Any], bool, str]:
+    request_body = operation.get("requestBody")
+    if request_body is None:
+        request_body = {}
+    if not isinstance(request_body, dict):
+        raise ValueError("requestBody must be an object")
+    required = request_body.get("required", False)
+    if not isinstance(required, bool):
+        raise ValueError("requestBody.required must be a boolean")
+    content = request_body.get("content", {})
     if not isinstance(content, dict):
         raise ValueError("requestBody.content must be an object")
     media = sorted(content)
@@ -150,7 +158,7 @@ def request_details(operation: dict[str, Any], components: dict[str, Any]) -> tu
         transport = "content_type_select"
     else:
         raise ValueError(f"unsupported request media combination: {media}")
-    return media, schemas, transport
+    return media, schemas, required, transport
 
 
 def response_details(operation: dict[str, Any], components: dict[str, Any]) -> tuple[list[str], dict[str, dict[str, Any]]]:
@@ -222,7 +230,7 @@ def operation_record(path: str, method: str, operation: dict[str, Any], path_par
     declared_path_parameters = {parameter["name"] for parameter in parameters if parameter["in"] == "path"}
     if set(PATH_PARAMETER.findall(path)) != declared_path_parameters:
         raise ValueError(f"path parameter mismatch on {method} {path}")
-    request_media, request_schemas, transport = request_details(operation, components)
+    request_media, request_schemas, request_body_required, transport = request_details(operation, components)
     response_media, responses = response_details(operation, components)
     action = classification["action"]
     if action not in {"ordinary_read", "privileged_read", "create", "update", "delete", "execute"}:
@@ -258,6 +266,7 @@ def operation_record(path: str, method: str, operation: dict[str, Any], path_par
         "target_selectors": target_selectors(path),
         "request_media_types": request_media,
         "request_schemas": request_schemas,
+        "request_body_required": request_body_required,
         "response_media_types": response_media,
         "responses": responses,
         "pagination": pagination(parameters),

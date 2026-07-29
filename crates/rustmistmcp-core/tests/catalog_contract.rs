@@ -231,6 +231,26 @@ fn catalog_preserves_resolvable_response_and_request_schema_contracts() {
 }
 
 #[test]
+fn catalog_preserves_openapi_request_body_requiredness() {
+    let catalog = Catalog::embedded().expect("catalog is valid");
+    assert!(
+        catalog
+            .operation("submitSiteMarvisConfigFeedback")
+            .expect("required JSON operation is catalogued")
+            .request_body_required
+    );
+    for operation_id in ["importOrgUserMacs", "importOrgAssets"] {
+        assert!(
+            !catalog
+                .operation(operation_id)
+                .expect("optional request-body operation is catalogued")
+                .request_body_required,
+            "{operation_id} request body remains optional"
+        );
+    }
+}
+
+#[test]
 fn catalog_uses_exact_reviewed_security_actions_and_verification_policies() {
     let catalog: serde_json::Value = serde_json::from_str(CATALOG_JSON).expect("catalog is JSON");
     let operation = |operation_id: &str| {

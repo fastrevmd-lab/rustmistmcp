@@ -11,6 +11,7 @@ async-trait.workspace = true
 futures.workspace = true
 hex.workspace = true
 http.workspace = true
+jsonschema.workspace = true
 reqwest.workspace = true
 schemars.workspace = true
 serde.workspace = true
