@@ -1,6 +1,7 @@
 /target
 **/*.rs.bk
 .worktrees/
+.superpowers/
 
 # Never commit real authentication material, even hashed.
 tokens.json
