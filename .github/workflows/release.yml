@@ -1,0 +1,163 @@
+name: release-pre-release-artifacts
+
+on:
+  push:
+    # Production-version tags are prohibited until the runtime prerequisites close.
+    tags: ['v*-rc*']
+
+permissions: {}
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+      - name: Validate RC tag against Cargo version
+        run: scripts/verify-rc-tag.sh "$GITHUB_REF_NAME"
+      - name: Verify clean checkout
+        run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Full source and packaging verification
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace --locked
+          cargo doc --workspace --no-deps --locked
+          cargo build --release --locked --bin rustmistmcp
+          RUSTMISTMCP_BINARY=target/release/rustmistmcp scripts/verify-packaging.sh
+          scripts/test-lxc-installer.sh
+          scripts/test-release-policy.sh
+          shellcheck scripts/*.sh packaging/lxc/install.sh
+      - name: Verify MSRV
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          cargo +1.88.0 check --workspace --locked
+      - name: Supply-chain checks
+        run: |
+          cargo install --locked cargo-audit cargo-deny
+          cargo audit
+          cargo deny check
+      - name: Validate YAML and compose
+        run: |
+          for file in .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/security.yml .github/dependabot.yml packaging/container/compose.example.yaml; do
+            npm exec --yes --package=yaml@2.8.1 yaml -- valid "$file"
+          done
+          RUSTMISTMCP_IMAGE=ghcr.io/fastrevmd-lab/rustmistmcp@sha256:0000000000000000000000000000000000000000000000000000000000000000 docker compose -f packaging/container/compose.example.yaml config
+      - name: Verify deterministic release archive
+        run: scripts/verify-reproducible-build.sh
+      - name: Verify systemd, archive, and OCI
+        run: |
+          stage=$(mktemp -d)
+          install -D -m 0755 target/release/rustmistmcp "$stage/usr/local/bin/rustmistmcp"
+          sed "s|ExecStart=/usr/local/bin/rustmistmcp|ExecStart=$stage/usr/local/bin/rustmistmcp|" packaging/systemd/rustmistmcp.service > "$stage/rustmistmcp.service"
+          systemd-analyze verify "$stage/rustmistmcp.service"
+          RUSTMISTMCP_RELEASE_VERSION="${GITHUB_REF_NAME#v}" scripts/build-release.sh
+          archive=$(find dist -name '*.tar.gz' -print -quit)
+          scripts/smoke-release-archive.sh "$archive" "$archive.sha256"
+          docker build --build-arg VERSION="$GITHUB_REF_NAME" --build-arg REVISION="$GITHUB_SHA" -t rustmistmcp:release-verify .
+          docker run --rm --read-only --network none --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m rustmistmcp:release-verify --help
+          scripts/smoke-oci.sh rustmistmcp:release-verify
+
+  image:
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+      - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: type=semver,pattern={{version}}
+      - id: push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            REVISION=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+      - name: Record immutable image digest
+        run: printf '%s@%s\n' 'ghcr.io/${{ github.repository }}' '${{ steps.push.outputs.digest }}' | tee image-digest.txt
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: immutable-image-digest
+          path: image-digest.txt
+
+  archive:
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Build archive in exact digest-pinned builder
+        run: |
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          source_date_epoch=$(git log -1 --format=%ct)
+          release_version=${GITHUB_REF_NAME#v}
+          mkdir -p dist
+          docker run --rm \
+            -e GIT_CONFIG_COUNT=1 \
+            -e GIT_CONFIG_KEY_0=safe.directory \
+            -e GIT_CONFIG_VALUE_0=/workspace \
+            -e RUSTMISTMCP_CI_SOURCE_VERIFIED=1 \
+            -e RUSTMISTMCP_COMMIT="$GITHUB_SHA" \
+            -e SOURCE_DATE_EPOCH="$source_date_epoch" \
+            -e RUSTMISTMCP_RELEASE_VERSION="$release_version" \
+            -e CARGO_TARGET_DIR=/tmp/rustmistmcp-target \
+            -e RUSTMISTMCP_DIST_DIR=/output \
+            -v "$PWD:/workspace:ro" \
+            -v "$PWD/dist:/output" \
+            -w /workspace \
+            rust:1.97.0-slim-bookworm@sha256:6d220bf85c74e842a79da63997af8d2e74455c0b8847d8bb3a5888572334991d \
+            scripts/build-release.sh
+      - name: Verify checksum, extraction, executable, hash, and glibc floor
+        run: |
+          archive=$(find dist -name '*.tar.gz' -print -quit)
+          scripts/smoke-release-archive.sh "$archive" "$archive.sha256"
+      - name: Generate archive SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          path: dist
+          format: spdx-json
+          output-file: dist/rustmistmcp-archive.spdx.json
+      - name: Attest archive provenance
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/*.spdx.json
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: rustmistmcp-archive
+          path: dist/

@@ -1,0 +1,60 @@
+[Unit]
+Description=rustmistmcp MCP server
+Documentation=https://github.com/fastrevmd-lab/rustmistmcp
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/rustmistmcp/mist.json
+ConditionPathExists=/etc/rustmistmcp/tokens.json
+ConditionPathExists=/etc/rustmistmcp/audit-hmac.key
+
+[Service]
+Type=exec
+User=rustmistmcp
+Group=rustmistmcp
+UMask=0077
+ExecStart=/usr/local/bin/rustmistmcp \
+    --device-mapping /etc/rustmistmcp/mist.json \
+    --transport streamable-http \
+    --host 127.0.0.1 \
+    --port 30030 \
+    --tokens-file /etc/rustmistmcp/tokens.json \
+    --audit-format json \
+    --audit-journald \
+    --audit-redact devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac \
+    --audit-hmac-key-file /etc/rustmistmcp/audit-hmac.key
+StandardOutput=journal
+StandardError=journal
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+StateDirectory=rustmistmcp
+StateDirectoryMode=0700
+RuntimeDirectory=rustmistmcp
+RuntimeDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/rustmistmcp
+ReadWritePaths=/var/lib/rustmistmcp
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TasksMax=128
+LimitNOFILE=32768
+
+[Install]
+WantedBy=multi-user.target

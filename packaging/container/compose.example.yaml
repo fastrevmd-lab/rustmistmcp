@@ -1,0 +1,18 @@
+# Linux-only loopback example. Set RUSTMISTMCP_IMAGE to the verified
+# ghcr.io/...@sha256:<64-hex> release reference; never use a mutable tag.
+services:
+  rustmistmcp:
+    image: ${RUSTMISTMCP_IMAGE:?set an immutable rustmistmcp image digest}
+    user: "65532:65532"
+    network_mode: host
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    volumes:
+      - ./runtime:/etc/rustmistmcp:ro
+      - ./state:/var/lib/rustmistmcp:rw
