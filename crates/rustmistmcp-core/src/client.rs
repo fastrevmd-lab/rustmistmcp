@@ -18,6 +18,19 @@ pub trait MistClient: Send + Sync {
     async fn execute(&self, request: MistRequest) -> Result<MistResponse, MistError>;
 }
 
+/// Deliberately unavailable default client used while mecmcp#90 is open.
+///
+/// This implementation performs no I/O and never loads a credential.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BlockedMistClient;
+
+#[async_trait]
+impl MistClient for BlockedMistClient {
+    async fn execute(&self, _request: MistRequest) -> Result<MistResponse, MistError> {
+        Err(MistError::TransportUnavailable)
+    }
+}
+
 /// Stable errors exchanged across the Mist dispatch seam.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum MistError {

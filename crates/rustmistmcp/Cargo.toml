@@ -13,6 +13,7 @@ path = "src/lib.rs"
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
+hex.workspace = true
 rmcp.workspace = true
 rustls.workspace = true
 schemars.workspace = true
@@ -23,6 +24,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+url.workspace = true
 rustmistmcp-core = { version = "0.1.0", path = "../rustmistmcp-core" }
 mecmcp-audit.workspace = true
 mecmcp-auth.workspace = true
@@ -30,6 +32,12 @@ mecmcp-changeset.workspace = true
 mecmcp-runtime.workspace = true
 mecmcp-server.workspace = true
 mecmcp-transport.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+http.workspace = true
+mecmcp-audit = { workspace = true, features = ["test-util"] }
+rmcp = { workspace = true, features = ["client"] }
 
 [lints]
 workspace = true

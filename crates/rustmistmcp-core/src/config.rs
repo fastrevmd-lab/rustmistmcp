@@ -72,32 +72,40 @@ impl MistConfig {
 
     /// Parse the configured HTTPS root for later Mist-specific request joining.
     pub(crate) fn base_url(&self) -> Result<Url, ConfigError> {
-        let url = Url::parse(&self.endpoint)
-            .map_err(|_| ConfigError::Invalid("endpoint must be a valid URL"))?;
-        if url.scheme() != "https"
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || url.path() != "/"
-            || url.port().is_some()
-        {
-            return Err(ConfigError::Invalid(
-                "endpoint must be an HTTPS Mist API root",
-            ));
-        }
-        let Some(Host::Domain(host)) = url.host() else {
-            return Err(ConfigError::Invalid(
-                "endpoint host must be a Mist API domain",
-            ));
-        };
-        if !is_mist_regional_host(host) {
-            return Err(ConfigError::Invalid(
-                "endpoint host must be a Mist API regional domain",
-            ));
-        }
-        Ok(url)
+        validate_mist_endpoint(&self.endpoint)
     }
+}
+
+/// Validate and parse one HTTPS Mist regional API root.
+///
+/// This is the single endpoint validator shared by configuration loading and
+/// public handler construction.
+pub fn validate_mist_endpoint(endpoint: &str) -> Result<Url, ConfigError> {
+    let url =
+        Url::parse(endpoint).map_err(|_| ConfigError::Invalid("endpoint must be a valid URL"))?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+        || url.port().is_some()
+    {
+        return Err(ConfigError::Invalid(
+            "endpoint must be an HTTPS Mist API root",
+        ));
+    }
+    let Some(Host::Domain(host)) = url.host() else {
+        return Err(ConfigError::Invalid(
+            "endpoint host must be a Mist API domain",
+        ));
+    };
+    if !is_mist_regional_host(host) {
+        return Err(ConfigError::Invalid(
+            "endpoint host must be a Mist API regional domain",
+        ));
+    }
+    Ok(url)
 }
 
 fn is_mist_regional_host(host: &str) -> bool {

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use futures::executor::block_on;
 use rustmistmcp_core::{
     Catalog, MistClient, MistCursor, MistError, MistRequest, MistResponse, MistResponseBody,
-    PaginationMode,
+    MistTarget, PaginationMode,
 };
 use serde_json::json;
 use url::Url;
@@ -207,6 +207,32 @@ fn cursors_are_opaque_but_bound_to_origin_operation_and_pagination_mode() {
         ),
         Err(MistError::InvalidCursor(_))
     ));
+}
+
+#[test]
+fn continuation_context_round_trips_for_revalidation_and_reauthorization() {
+    let path = BTreeMap::from([("org_id".to_owned(), ORG.to_owned())]);
+    let query = BTreeMap::from([
+        ("limit".to_owned(), json!(25)),
+        ("page".to_owned(), json!(2)),
+    ]);
+    let target = MistTarget::org(ORG).expect("target");
+    let cursor = MistCursor::new(
+        "listOrgSites".to_owned(),
+        &origin(),
+        PaginationMode::PageLimit,
+        "opaque-next-page".to_owned(),
+    )
+    .expect("cursor")
+    .with_request_context(path.clone(), query.clone(), Some(target.clone()))
+    .expect("bounded request context");
+    let decoded: MistCursor =
+        serde_json::from_slice(&serde_json::to_vec(&cursor).expect("encode")).expect("decode");
+    let (decoded_path, decoded_query, decoded_target) =
+        decoded.request_context().expect("request context");
+    assert_eq!(decoded_path, &path);
+    assert_eq!(decoded_query, &query);
+    assert_eq!(decoded_target, Some(&target));
 }
 
 #[test]
