@@ -696,7 +696,7 @@ fn authorize_grant(
         return Ok(());
     };
     let Some(grant) = &caller.grant else {
-        return Err(MistCallError::Grant);
+        return Ok(());
     };
     if !grant.allows_operation(operation_id)
         || !grant.actions.contains(&action)
@@ -1599,6 +1599,28 @@ mod tests {
         let mut extensions = rmcp::model::Extensions::new();
         extensions.insert(parts);
         extensions
+    }
+
+    #[tokio::test]
+    async fn authenticated_ordinary_read_does_not_require_a_mutation_grant() {
+        let target = "org/11111111-1111-1111-1111-111111111111";
+        let client = Arc::new(RecordingClient::default());
+        let handler = MistHandler::with_client(
+            "https://api.mist.com/",
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
+            client.clone(),
+        )
+        .expect("handler");
+        let mut caller = caller(target);
+        caller.grant = None;
+
+        let result = handler
+            .dispatch_catalogued_read(org_read("getOrg"), &extensions(caller))
+            .await;
+
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        assert_eq!(client.0.lock().expect("recorder").len(), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]

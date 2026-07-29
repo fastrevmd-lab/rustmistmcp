@@ -38,6 +38,9 @@ async-trait.workspace = true
 http.workspace = true
 mecmcp-audit = { workspace = true, features = ["test-util"] }
 rmcp = { workspace = true, features = ["client"] }
+rustix = { version = "1", features = ["process"] }
+tempfile = "3"
+tower.workspace = true
 
 [lints]
 workspace = true
