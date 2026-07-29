@@ -561,12 +561,14 @@ impl MistHandler {
         if !caller.tools.allows_tool(dispatcher, RESTRICTED_TOOLS) {
             return false;
         }
-        let Some(grant) = &caller.grant else {
+        let grant = caller.grant.as_ref();
+        if operation.capability == MistCapability::PrivilegedRead && grant.is_none() {
             return false;
-        };
-        if !grant.allows_operation(&operation.operation_id)
-            || !grant.actions.contains(&operation.capability)
-        {
+        }
+        if grant.is_some_and(|grant| {
+            !grant.allows_operation(&operation.operation_id)
+                || !grant.actions.contains(&operation.capability)
+        }) {
             return false;
         }
         operation
@@ -576,12 +578,14 @@ impl MistHandler {
                 TargetSelector::None => true,
                 TargetSelector::Org => self.allowed_orgs.iter().any(|org_id| {
                     let target = MistTarget::org(org_id).expect("validated organization");
-                    caller.devices.allows(&target.subject()) && grant.allows_target(&target)
+                    caller.devices.allows(&target.subject())
+                        && grant.is_none_or(|grant| grant.allows_target(&target))
                 }),
                 TargetSelector::Site => self.sites.iter().any(|(site_id, org_id)| {
                     self.allowed_orgs.iter().any(|allowed| allowed == org_id)
                         && MistTarget::site(site_id).is_ok_and(|target| {
-                            caller.devices.allows(&target.subject()) && grant.allows_target(&target)
+                            caller.devices.allows(&target.subject())
+                                && grant.is_none_or(|grant| grant.allows_target(&target))
                         })
                 }),
                 TargetSelector::Msp => false,
@@ -693,10 +697,18 @@ fn authorize_grant(
     target: Option<&MistTarget>,
 ) -> Result<(), MistCallError> {
     let Some(caller) = caller else {
-        return Ok(());
+        return if action == MistCapability::OrdinaryRead {
+            Ok(())
+        } else {
+            Err(MistCallError::Grant)
+        };
     };
     let Some(grant) = &caller.grant else {
-        return Ok(());
+        return if action == MistCapability::OrdinaryRead {
+            Ok(())
+        } else {
+            Err(MistCallError::Grant)
+        };
     };
     if !grant.allows_operation(operation_id)
         || !grant.actions.contains(&action)
@@ -1623,6 +1635,48 @@ mod tests {
         assert_eq!(client.0.lock().expect("recorder").len(), 1);
     }
 
+    #[tokio::test]
+    async fn authenticated_privileged_dispatch_requires_an_exact_mist_grant() {
+        let client = Arc::new(RecordingClient::default());
+        let handler = MistHandler::with_client(
+            "https://api.mist.com/",
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
+            client.clone(),
+        )
+        .expect("handler");
+        let caller = CallerCtx {
+            token_name: "privileged-without-grant".to_owned(),
+            devices: ScopeSet::Wildcard,
+            tools: ScopeSet::Allowlist(vec!["invoke_mist_privileged_read".to_owned()]),
+            grant: None::<MistGrant>,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: ActorType::Human,
+        };
+
+        let result = handler
+            .dispatch_catalogued_read(
+                CatalogRead {
+                    tool: "invoke_mist_privileged_read",
+                    operation_id: "getSelf".to_owned(),
+                    path: BTreeMap::new(),
+                    query: BTreeMap::new(),
+                    cursor: None,
+                    capability: MistCapability::PrivilegedRead,
+                },
+                &extensions(caller),
+            )
+            .await;
+
+        assert_eq!(result.is_error, Some(true), "{result:?}");
+        assert!(
+            client.0.lock().expect("recorder").is_empty(),
+            "privileged request must be denied before client dispatch"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn malformed_dispatch_cursor_emits_a_failed_audit_outcome() {
         let handler = MistHandler::blocked(
@@ -1970,7 +2024,66 @@ mod tests {
         )
         .expect("handler");
         let get_org = handler.catalog.operation("getOrg").expect("getOrg");
+        let get_site = handler
+            .catalog
+            .operation("getSiteInfo")
+            .expect("getSiteInfo");
         let get_self = handler.catalog.operation("getSelf").expect("getSelf");
+
+        let grantless_org = CallerCtx {
+            token_name: "grantless-org".to_owned(),
+            devices: ScopeSet::Allowlist(vec![format!("org/{org_id}")]),
+            tools: ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]),
+            grant: None::<MistGrant>,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: ActorType::Human,
+        };
+        assert!(
+            handler.operation_visible(Some(&grantless_org), get_org),
+            "grantless scoped ordinary read must be discoverable when executable"
+        );
+        assert!(
+            !handler.operation_visible(Some(&grantless_org), get_site),
+            "configured inventory still intersects caller target scope"
+        );
+        let grantless_site = CallerCtx {
+            token_name: "grantless-site".to_owned(),
+            devices: ScopeSet::Allowlist(vec![format!("site/{site_id}")]),
+            tools: ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]),
+            grant: None::<MistGrant>,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: ActorType::Human,
+        };
+        assert!(handler.operation_visible(Some(&grantless_site), get_site));
+        let missing_dispatcher_scope = CallerCtx {
+            tools: ScopeSet::Allowlist(vec!["search_mist_operations".to_owned()]),
+            ..grantless_org.clone()
+        };
+        assert!(!handler.operation_visible(Some(&missing_dispatcher_scope), get_org));
+        let grantless_privileged = CallerCtx {
+            tools: ScopeSet::Allowlist(vec!["invoke_mist_privileged_read".to_owned()]),
+            ..grantless_org.clone()
+        };
+        assert!(
+            !handler.operation_visible(Some(&grantless_privileged), get_self),
+            "privileged metadata remains hidden without an exact grant"
+        );
+        let privileged_exact = CallerCtx {
+            grant: Some(MistGrant {
+                allowed_operations: vec!["getSelf".to_owned()],
+                actions: vec![MistCapability::PrivilegedRead],
+                subjects: vec![MistTarget::org(org_id).expect("target")],
+            }),
+            ..grantless_privileged
+        };
+        assert!(
+            handler.operation_visible(Some(&privileged_exact), get_self),
+            "privileged metadata is visible only with exact tool and grant authority"
+        );
 
         let ordinary_wildcard = CallerCtx {
             token_name: "ordinary".to_owned(),

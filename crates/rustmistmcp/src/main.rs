@@ -6,8 +6,8 @@ use mecmcp_auth::TokenStoreFile;
 use mecmcp_runtime::cli::{Cli, Command, TokenAction, Transport};
 use rmcp::ServiceExt as _;
 use rustmistmcp::{
-    KNOWN_TOOLS, LIVE_MIST_BLOCKER, MistHandler, install_token_reload_handler, serve_http,
-    validate_runtime_serve,
+    GRANT_TOKEN_LIFECYCLE_BLOCKER, KNOWN_TOOLS, LIVE_MIST_BLOCKER, MistHandler,
+    install_token_reload_handler, serve_http, validate_runtime_serve,
 };
 use rustmistmcp_core::{MistConfig, MistGrant};
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
         mecmcp_runtime::cli_validate::require_absolute(token_store_path(&action), "--tokens-file")
             .map_err(|error| anyhow::anyhow!("{error}"))?;
         return mecmcp_runtime::token_cmd::run(action, &[], KNOWN_TOOLS)
-            .map_err(anyhow::Error::from);
+            .map_err(|error| anyhow::anyhow!("{error}; {GRANT_TOKEN_LIFECYCLE_BLOCKER}"));
     }
 
     // The shared CLI retains the historic `device_mapping` spelling. Here it

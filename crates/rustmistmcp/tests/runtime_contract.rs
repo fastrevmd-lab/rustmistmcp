@@ -1,8 +1,9 @@
 //! Runtime composition contracts for the Mist MCP binary.
 
 use axum::{
-    body::Body,
-    http::{Request, StatusCode, header},
+    Router,
+    body::{Body, to_bytes},
+    http::{HeaderValue, Request, Response, StatusCode, header},
 };
 use clap::Parser as _;
 use mecmcp_auth::{KnownNames, ScopeSet, TokenStoreFile};
@@ -15,7 +16,7 @@ use rustmistmcp::{
     KNOWN_TOOLS, LIVE_MIST_BLOCKER, MistHandler, MistScopePreflight, RESTRICTED_TOOLS,
     build_http_router, install_token_reload_handler, validate_runtime_serve,
 };
-use rustmistmcp_core::{MistConfig, MistGrant};
+use rustmistmcp_core::{MistAction, MistConfig, MistGrant, MistTarget};
 use std::{collections::BTreeMap, fs, process::Command, sync::Arc, time::Duration};
 use tower::ServiceExt as _;
 
@@ -33,6 +34,80 @@ fn handler() -> MistHandler {
         BTreeMap::new(),
     )
     .expect("valid blocked handler")
+}
+
+async fn post_mcp(
+    router: &Router,
+    session: Option<&HeaderValue>,
+    body: serde_json::Value,
+) -> Response<Body> {
+    let mut request = Request::post("/mcp")
+        .header(header::HOST, "localhost")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header("Mcp-Protocol-Version", "2025-06-18");
+    if let Some(session) = session {
+        request = request.header("mcp-session-id", session);
+    }
+    router
+        .clone()
+        .oneshot(
+            request
+                .body(Body::from(body.to_string()))
+                .expect("protocol request"),
+        )
+        .await
+        .expect("protocol response")
+}
+
+async fn response_json(response: Response<Body>) -> serde_json::Value {
+    let bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("bounded response body");
+    let text = String::from_utf8(bytes.to_vec()).expect("UTF-8 response");
+    text.lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .filter_map(|data| serde_json::from_str(data.trim()).ok())
+        .find(|value: &serde_json::Value| value.get("id").is_some())
+        .unwrap_or_else(|| panic!("missing JSON-RPC response in {text}"))
+}
+
+async fn initialize_no_auth_session(router: &Router) -> HeaderValue {
+    let response = post_mcp(
+        router,
+        None,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "runtime-contract", "version": "1"}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let session = response
+        .headers()
+        .get("mcp-session-id")
+        .expect("session id")
+        .clone();
+    let initialized = response_json(response).await;
+    assert_eq!(initialized["id"], 1);
+
+    let notification = post_mcp(
+        router,
+        Some(&session),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }),
+    )
+    .await;
+    assert_eq!(notification.status(), StatusCode::ACCEPTED);
+    session
 }
 
 #[test]
@@ -152,6 +227,46 @@ fn mist_preflight_translates_org_and_site_arguments_to_canonical_targets() {
         Err("insufficient_scope".to_owned())
     );
 
+    let site_devices =
+        ScopeSet::Allowlist(vec!["site/22222222-2222-2222-2222-222222222222".to_owned()]);
+    let site_tools = ScopeSet::Allowlist(vec!["get_mist_site".to_owned()]);
+    let site_caller = CallerScopes {
+        token_name: "site-operator",
+        devices: &site_devices,
+        tools: &site_tools,
+    };
+    let permitted_site = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "get_mist_site",
+            "arguments": {"site_id": "22222222-2222-2222-2222-222222222222"}
+        }
+    });
+    preflight
+        .check(
+            &serde_json::to_vec(&permitted_site).expect("request"),
+            site_caller,
+        )
+        .expect("canonical site scope permits raw site argument");
+    let denied_site = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "get_mist_site",
+            "arguments": {"site_id": "33333333-3333-3333-3333-333333333333"}
+        }
+    });
+    assert_eq!(
+        preflight.check(
+            &serde_json::to_vec(&denied_site).expect("request"),
+            site_caller
+        ),
+        Err("insufficient_scope".to_owned())
+    );
+
     let dispatcher_tools = ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]);
     let dispatcher_caller = CallerScopes {
         token_name: "dispatcher",
@@ -160,7 +275,7 @@ fn mist_preflight_translates_org_and_site_arguments_to_canonical_targets() {
     };
     let nested_path_denied = serde_json::json!({
         "jsonrpc": "2.0",
-        "id": 3,
+        "id": 5,
         "method": "tools/call",
         "params": {
             "name": "invoke_mist_read",
@@ -200,6 +315,45 @@ fn wildcard_tool_scope_excludes_restricted_reads_at_preflight() {
         preflight.check(&serde_json::to_vec(&restricted).expect("request"), caller),
         Err("insufficient_scope".to_owned())
     );
+}
+
+#[test]
+fn mist_preflight_denies_every_malformed_org_and_site_shape() {
+    let preflight = MistScopePreflight::new(RESTRICTED_TOOLS);
+    let devices = ScopeSet::Allowlist(vec!["site/22222222-2222-2222-2222-222222222222".to_owned()]);
+    let tools = ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]);
+    let caller = CallerScopes {
+        token_name: "malformed-targets",
+        devices: &devices,
+        tools: &tools,
+    };
+    let malformed_arguments = [
+        serde_json::json!([]),
+        serde_json::json!({"path": []}),
+        serde_json::json!({"query": 7}),
+        serde_json::json!({"org_id": 7}),
+        serde_json::json!({"org_id": "not-a-uuid"}),
+        serde_json::json!({"site_id": false}),
+        serde_json::json!({"site_id": "33333333-3333-3333-3333-333333333333"}),
+        serde_json::json!({"path": {"site_id": "not-a-uuid"}}),
+        serde_json::json!({"query": {"site_id": ["not", "scalar"]}}),
+    ];
+    for arguments in malformed_arguments {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "invoke_mist_read",
+                "arguments": arguments
+            }
+        });
+        assert_eq!(
+            preflight.check(&serde_json::to_vec(&request).expect("request"), caller),
+            Err("insufficient_scope".to_owned()),
+            "{request}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -291,7 +445,7 @@ async fn authenticated_router_uses_strict_bearer_syntax_and_scope_preflight() {
 }
 
 #[tokio::test]
-async fn unauthenticated_loopback_router_has_no_bearer_boundary() {
+async fn unauthenticated_loopback_http_exposes_only_ordinary_tools_and_denies_restricted_calls() {
     let router = build_http_router(
         handler(),
         None,
@@ -301,16 +455,73 @@ async fn unauthenticated_loopback_router_has_no_bearer_boundary() {
         false,
     )
     .expect("HTTP router");
-    let response = router
-        .oneshot(
-            Request::post("/mcp")
-                .header(header::HOST, "localhost")
-                .body(Body::from("{}"))
-                .expect("request"),
+    let session = initialize_no_auth_session(&router).await;
+
+    let list = response_json(
+        post_mcp(
+            &router,
+            Some(&session),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {}
+            }),
         )
-        .await
-        .expect("response");
-    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+        .await,
+    )
+    .await;
+    let names = list["result"]["tools"]
+        .as_array()
+        .expect("tool list")
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"invoke_mist_read"));
+    for restricted in RESTRICTED_TOOLS {
+        assert!(!names.contains(restricted), "{restricted} must be hidden");
+    }
+
+    let ordinary = response_json(
+        post_mcp(
+            &router,
+            Some(&session),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_mist_operations",
+                    "arguments": {"query": "org", "limit": 1}
+                }
+            }),
+        )
+        .await,
+    )
+    .await;
+    assert_ne!(ordinary["result"]["isError"], true, "{ordinary}");
+
+    let restricted = response_json(
+        post_mcp(
+            &router,
+            Some(&session),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "get_mist_self", "arguments": {}}
+            }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(restricted["result"]["isError"], true, "{restricted}");
+    assert!(
+        restricted
+            .to_string()
+            .contains("authenticated caller context"),
+        "{restricted}"
+    );
 }
 
 #[test]
@@ -349,6 +560,22 @@ fn token_add_is_local_and_its_file_loads_as_a_mist_grant_store() {
         store.store().entries()[0].devices,
         ScopeSet::Allowlist(vec![format!("org/{ORG_ID}")])
     );
+
+    let listed = Command::new(env!("CARGO_BIN_EXE_rustmistmcp"))
+        .args([
+            "token",
+            "list",
+            "--tokens-file",
+            tokens.to_str().expect("UTF-8 path"),
+        ])
+        .output()
+        .expect("list grantless store");
+    assert!(
+        listed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("local-operator"));
 }
 
 #[test]
@@ -375,6 +602,48 @@ fn token_management_requires_an_absolute_store_path() {
         String::from_utf8_lossy(&output.stderr).contains("--tokens-file path must be absolute")
     );
     assert!(!dir.path().join("tokens.json").exists());
+}
+
+#[test]
+fn grant_bearing_token_lifecycle_reports_the_upstream_blocker() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let tokens = dir.path().join("tokens.json");
+    let known = KnownNames {
+        devices: None,
+        tools: KNOWN_TOOLS,
+    };
+    TokenStoreFile::<MistGrant>::add_with_options(
+        &tokens,
+        "privileged",
+        ScopeSet::Allowlist(vec![format!("org/{ORG_ID}")]),
+        ScopeSet::Allowlist(vec!["get_mist_self".to_owned()]),
+        None,
+        Some(MistGrant {
+            allowed_operations: vec!["getSelf".to_owned()],
+            actions: vec![MistAction::PrivilegedRead],
+            subjects: vec![MistTarget::org(ORG_ID).expect("target")],
+        }),
+        None,
+        None,
+        None,
+        None,
+        &known,
+    )
+    .expect("grant-bearing store");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rustmistmcp"))
+        .args([
+            "token",
+            "list",
+            "--tokens-file",
+            tokens.to_str().expect("UTF-8 path"),
+        ])
+        .output()
+        .expect("run token list");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("mecmcp#160"), "{stderr}");
+    assert!(stderr.contains("grant-bearing"), "{stderr}");
 }
 
 #[cfg(unix)]
