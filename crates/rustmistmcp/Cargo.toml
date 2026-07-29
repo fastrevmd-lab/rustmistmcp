@@ -1,0 +1,35 @@
+[package]
+name = "rustmistmcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+rmcp.workspace = true
+rustls.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rustmistmcp-core = { version = "0.1.0", path = "../rustmistmcp-core" }
+mecmcp-audit.workspace = true
+mecmcp-auth.workspace = true
+mecmcp-changeset.workspace = true
+mecmcp-runtime.workspace = true
+mecmcp-server.workspace = true
+mecmcp-transport.workspace = true
+
+[lints]
+workspace = true
