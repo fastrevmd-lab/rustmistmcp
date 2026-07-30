@@ -1,13 +1,15 @@
 //! HPE Juniper Mist MCP server executable.
 
+mod mist_token_cmd;
+
 use anyhow::{Context as _, Result};
 use clap::Parser as _;
 use mecmcp_auth::TokenStoreFile;
 use mecmcp_runtime::cli::{Cli, Command, TokenAction, Transport};
 use rmcp::ServiceExt as _;
 use rustmistmcp::{
-    GRANT_TOKEN_LIFECYCLE_BLOCKER, KNOWN_TOOLS, LIVE_MIST_BLOCKER, MistHandler,
-    install_token_reload_handler, serve_http, validate_runtime_serve,
+    KNOWN_TOOLS, LIVE_MIST_BLOCKER, MistHandler, install_token_reload_handler, serve_http,
+    validate_runtime_serve,
 };
 use rustmistmcp_core::{MistConfig, MistGrant};
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
@@ -24,8 +26,8 @@ async fn main() -> Result<()> {
         // contacts the Mist service.
         mecmcp_runtime::cli_validate::require_absolute(token_store_path(&action), "--tokens-file")
             .map_err(|error| anyhow::anyhow!("{error}"))?;
-        return mecmcp_runtime::token_cmd::run(action, &[], KNOWN_TOOLS)
-            .map_err(|error| anyhow::anyhow!("{error}; {GRANT_TOKEN_LIFECYCLE_BLOCKER}"));
+        return mist_token_cmd::run(action, KNOWN_TOOLS)
+            .map_err(|error| anyhow::anyhow!("{error}"));
     }
 
     // The shared CLI retains the historic `device_mapping` spelling. Here it

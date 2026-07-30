@@ -16,6 +16,7 @@ clap.workspace = true
 hex.workspace = true
 rmcp.workspace = true
 rustls.workspace = true
+rustix = { version = "1", features = ["process"] }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -38,7 +39,6 @@ async-trait.workspace = true
 http.workspace = true
 mecmcp-audit = { workspace = true, features = ["test-util"] }
 rmcp = { workspace = true, features = ["client"] }
-rustix = { version = "1", features = ["process"] }
 tempfile = "3"
 tower.workspace = true
 

@@ -17,7 +17,7 @@ use rustmistmcp::{
     build_http_router, install_token_reload_handler, validate_runtime_serve,
 };
 use rustmistmcp_core::{MistAction, MistConfig, MistGrant, MistTarget};
-use std::{collections::BTreeMap, fs, process::Command, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, fs, path::Path, process::Command, sync::Arc, time::Duration};
 use tower::ServiceExt as _;
 
 const ORG_ID: &str = "11111111-1111-1111-1111-111111111111";
@@ -34,6 +34,35 @@ fn handler() -> MistHandler {
         BTreeMap::new(),
     )
     .expect("valid blocked handler")
+}
+
+fn privileged_grant() -> MistGrant {
+    MistGrant {
+        allowed_operations: vec!["getSelf".to_owned()],
+        actions: vec![MistAction::PrivilegedRead],
+        subjects: vec![MistTarget::org(ORG_ID).expect("target")],
+    }
+}
+
+fn add_grant_bearing_token(path: &Path, name: &str, grant: MistGrant) {
+    let known = KnownNames {
+        devices: None,
+        tools: KNOWN_TOOLS,
+    };
+    TokenStoreFile::<MistGrant>::add_with_options(
+        path,
+        name,
+        ScopeSet::Allowlist(vec![format!("org/{ORG_ID}")]),
+        ScopeSet::Allowlist(vec!["get_mist_self".to_owned()]),
+        None,
+        Some(grant),
+        None,
+        None,
+        None,
+        None,
+        &known,
+    )
+    .expect("grant-bearing token");
 }
 
 async fn post_mcp(
@@ -605,31 +634,166 @@ fn token_management_requires_an_absolute_store_path() {
 }
 
 #[test]
-fn grant_bearing_token_lifecycle_reports_the_upstream_blocker() {
+fn grant_bearing_token_lifecycle_preserves_mist_authority() {
     let dir = tempfile::tempdir().expect("temporary directory");
     let tokens = dir.path().join("tokens.json");
-    let known = KnownNames {
-        devices: None,
-        tools: KNOWN_TOOLS,
-    };
-    TokenStoreFile::<MistGrant>::add_with_options(
-        &tokens,
-        "privileged",
-        ScopeSet::Allowlist(vec![format!("org/{ORG_ID}")]),
-        ScopeSet::Allowlist(vec!["get_mist_self".to_owned()]),
-        None,
-        Some(MistGrant {
-            allowed_operations: vec!["getSelf".to_owned()],
-            actions: vec![MistAction::PrivilegedRead],
-            subjects: vec![MistTarget::org(ORG_ID).expect("target")],
-        }),
-        None,
-        None,
-        None,
-        None,
-        &known,
-    )
-    .expect("grant-bearing store");
+    let grant = privileged_grant();
+    add_grant_bearing_token(&tokens, "privileged", grant.clone());
+    add_grant_bearing_token(&tokens, "survivor", grant.clone());
+
+    let listed = Command::new(env!("CARGO_BIN_EXE_rustmistmcp"))
+        .args([
+            "token",
+            "list",
+            "--tokens-file",
+            tokens.to_str().expect("UTF-8 path"),
+        ])
+        .output()
+        .expect("run token list");
+    assert!(
+        listed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(stdout.contains("privileged"), "{stdout}");
+    assert!(stdout.contains("survivor"), "{stdout}");
+    assert!(!stdout.contains("allowed_operations"), "{stdout}");
+
+    let before = TokenStoreFile::<MistGrant>::load(&tokens).expect("token store");
+    let before_digest = before
+        .store()
+        .entries()
+        .iter()
+        .find(|entry| entry.name == "privileged")
+        .expect("privileged token")
+        .digest
+        .clone();
+
+    let rotated = Command::new(env!("CARGO_BIN_EXE_rustmistmcp"))
+        .args([
+            "token",
+            "rotate",
+            "--tokens-file",
+            tokens.to_str().expect("UTF-8 path"),
+            "--name",
+            "privileged",
+        ])
+        .output()
+        .expect("run token rotate");
+    assert!(
+        rotated.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&rotated.stderr)
+    );
+    assert!(!rotated.stdout.is_empty(), "rotated secret is printed once");
+
+    let after_rotate = TokenStoreFile::<MistGrant>::load(&tokens).expect("rotated token store");
+    let after_rotate_store = after_rotate.store();
+    let privileged = after_rotate_store
+        .entries()
+        .iter()
+        .find(|entry| entry.name == "privileged")
+        .expect("privileged token");
+    assert_ne!(privileged.digest, before_digest);
+    assert_eq!(privileged.grant, Some(grant.clone()));
+
+    let revoked = Command::new(env!("CARGO_BIN_EXE_rustmistmcp"))
+        .args([
+            "token",
+            "revoke",
+            "--tokens-file",
+            tokens.to_str().expect("UTF-8 path"),
+            "--name",
+            "privileged",
+        ])
+        .output()
+        .expect("run token revoke");
+    assert!(
+        revoked.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+
+    let after_revoke = TokenStoreFile::<MistGrant>::load(&tokens).expect("revoked token store");
+    assert!(
+        after_revoke
+            .store()
+            .entries()
+            .iter()
+            .all(|entry| entry.name != "privileged")
+    );
+    let after_revoke_store = after_revoke.store();
+    let survivor = after_revoke_store
+        .entries()
+        .iter()
+        .find(|entry| entry.name == "survivor")
+        .expect("surviving token");
+    assert_eq!(survivor.grant, Some(grant));
+}
+
+#[test]
+fn token_add_to_grant_bearing_store_preserves_existing_grant() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let tokens = dir.path().join("tokens.json");
+    let grant = privileged_grant();
+    add_grant_bearing_token(&tokens, "privileged", grant.clone());
+
+    let added = Command::new(env!("CARGO_BIN_EXE_rustmistmcp"))
+        .args([
+            "token",
+            "add",
+            "--tokens-file",
+            tokens.to_str().expect("UTF-8 path"),
+            "--name",
+            "ordinary-reader",
+            "--devices",
+            &format!("org/{ORG_ID}"),
+            "--tools",
+            "get_mist_org",
+        ])
+        .output()
+        .expect("run token add");
+    assert!(
+        added.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    assert!(!added.stdout.is_empty(), "one-time secret is printed");
+
+    let store = TokenStoreFile::<MistGrant>::load(&tokens).expect("token store");
+    let token_store = store.store();
+    let privileged = token_store
+        .entries()
+        .iter()
+        .find(|entry| entry.name == "privileged")
+        .expect("privileged token");
+    let ordinary = token_store
+        .entries()
+        .iter()
+        .find(|entry| entry.name == "ordinary-reader")
+        .expect("ordinary token");
+    assert_eq!(privileged.grant, Some(grant));
+    assert_eq!(ordinary.grant, None);
+}
+
+#[test]
+fn unknown_mist_grant_field_is_refused_without_rewrite() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let tokens = dir.path().join("tokens.json");
+    add_grant_bearing_token(&tokens, "privileged", privileged_grant());
+
+    let raw = fs::read_to_string(&tokens).expect("token document");
+    let mut document: serde_json::Value = serde_json::from_str(&raw).expect("token document JSON");
+    document["tokens"][0]["grant"]
+        .as_object_mut()
+        .expect("grant object")
+        .insert(
+            "future_restriction".to_owned(),
+            serde_json::json!({"maximum_targets": 1}),
+        );
+    let doctored = serde_json::to_string_pretty(&document).expect("doctored JSON");
+    fs::write(&tokens, &doctored).expect("write doctored token document");
 
     let output = Command::new(env!("CARGO_BIN_EXE_rustmistmcp"))
         .args([
@@ -642,8 +806,78 @@ fn grant_bearing_token_lifecycle_reports_the_upstream_blocker() {
         .expect("run token list");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("mecmcp#160"), "{stderr}");
-    assert!(stderr.contains("grant-bearing"), "{stderr}");
+    assert!(stderr.contains("unknown field"), "{stderr}");
+    assert!(stderr.contains("future_restriction"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(&tokens).expect("unchanged token document"),
+        doctored
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn invalid_token_reload_pid_preserves_shared_post_write_behavior() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let tokens = dir.path().join("tokens.json");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rustmistmcp"))
+        .args([
+            "token",
+            "add",
+            "--tokens-file",
+            tokens.to_str().expect("UTF-8 path"),
+            "--name",
+            "written-before-signal",
+            "--devices",
+            &format!("org/{ORG_ID}"),
+            "--tools",
+            "get_mist_org",
+            "--server-pid",
+            "0",
+        ])
+        .output()
+        .expect("run token add");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("server PID must be positive"));
+
+    let store = TokenStoreFile::<MistGrant>::load(&tokens).expect("written token store");
+    assert!(
+        store
+            .store()
+            .entries()
+            .iter()
+            .any(|entry| entry.name == "written-before-signal"),
+        "the shared contract writes atomically before requesting reload"
+    );
+}
+
+#[test]
+fn token_adapter_preserves_shared_wildcard_scope_refusal() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let tokens = dir.path().join("tokens.json");
+    let mixed = format!("*,org/{ORG_ID}");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rustmistmcp"))
+        .args([
+            "token",
+            "add",
+            "--tokens-file",
+            tokens.to_str().expect("UTF-8 path"),
+            "--name",
+            "mixed-scope",
+            "--devices",
+            &mixed,
+            "--tools",
+            "get_mist_org",
+        ])
+        .output()
+        .expect("run token add");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("invalid devices scope: '*' cannot be mixed with exact names")
+    );
+    assert!(!tokens.exists());
 }
 
 #[cfg(unix)]
