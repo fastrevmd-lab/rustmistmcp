@@ -1538,7 +1538,76 @@ mod tests {
     use async_trait::async_trait;
     use mecmcp_audit::testutil::CapturingWriter;
     use mecmcp_auth::{ActorType, ScopeSet};
-    use std::sync::Mutex;
+    use std::{
+        cell::RefCell,
+        io::Write,
+        sync::{Mutex, OnceLock},
+    };
+
+    thread_local! {
+        static ACTIVE_AUDIT_CAPTURE: RefCell<Option<CapturingWriter>> = const { RefCell::new(None) };
+    }
+
+    static AUDIT_SUBSCRIBER: OnceLock<()> = OnceLock::new();
+
+    struct ThreadLocalAuditWriter(Option<CapturingWriter>);
+
+    impl Write for ThreadLocalAuditWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            match &mut self.0 {
+                Some(capture) => capture.write(buf),
+                None => std::io::sink().write(buf),
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            match &mut self.0 {
+                Some(capture) => capture.flush(),
+                None => std::io::sink().flush(),
+            }
+        }
+    }
+
+    struct ThreadLocalAuditMakeWriter;
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLocalAuditMakeWriter {
+        type Writer = ThreadLocalAuditWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            ThreadLocalAuditWriter(ACTIVE_AUDIT_CAPTURE.with(|capture| capture.borrow().clone()))
+        }
+    }
+
+    struct AuditCaptureGuard;
+
+    impl Drop for AuditCaptureGuard {
+        fn drop(&mut self) {
+            ACTIVE_AUDIT_CAPTURE.with(|capture| {
+                capture.borrow_mut().take();
+            });
+        }
+    }
+
+    fn install_audit_capture(capture: CapturingWriter) -> AuditCaptureGuard {
+        AUDIT_SUBSCRIBER.get_or_init(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(ThreadLocalAuditMakeWriter)
+                .with_ansi(false)
+                .with_target(true)
+                .with_max_level(tracing::Level::INFO)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("test audit subscriber is installed once");
+        });
+        ACTIVE_AUDIT_CAPTURE.with(|active| {
+            assert!(
+                active.borrow().is_none(),
+                "nested audit capture on one test thread"
+            );
+            *active.borrow_mut() = Some(capture);
+        });
+        AuditCaptureGuard
+    }
 
     #[derive(Default)]
     struct RecordingClient(Mutex<Vec<MistRequest>>);
@@ -1686,13 +1755,7 @@ mod tests {
         )
         .expect("handler");
         let capture = CapturingWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(capture.clone())
-            .with_ansi(false)
-            .with_target(true)
-            .with_max_level(tracing::Level::INFO)
-            .finish();
-        let guard = tracing::subscriber::set_default(subscriber);
+        let _capture_guard = install_audit_capture(capture.clone());
         let result = handler
             .invoke_dispatcher(
                 "invoke_mist_read",
@@ -1706,7 +1769,6 @@ mod tests {
                 &rmcp::model::Extensions::new(),
             )
             .await;
-        drop(guard);
         assert_eq!(result.is_error, Some(true));
         let output = String::from_utf8(capture.0.lock().expect("capture").clone()).expect("UTF-8");
         assert!(output.contains("tool=invoke_mist_read"), "{output}");
@@ -1801,13 +1863,7 @@ mod tests {
         )
         .expect("handler");
         let capture = CapturingWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(capture.clone())
-            .with_ansi(false)
-            .with_target(true)
-            .with_max_level(tracing::Level::INFO)
-            .finish();
-        let guard = tracing::subscriber::set_default(subscriber);
+        let _capture_guard = install_audit_capture(capture.clone());
         let path = BTreeMap::from([(
             "org_id".to_owned(),
             "11111111-1111-1111-1111-111111111111".to_owned(),
@@ -1843,7 +1899,6 @@ mod tests {
             .await;
         assert_eq!(denied.is_error, Some(true));
         assert_eq!(recorder.0.lock().expect("recorder").len(), 1);
-        drop(guard);
 
         let output = String::from_utf8(capture.0.lock().expect("capture").clone()).expect("UTF-8");
         assert!(output.contains("result=ok"), "{output}");
@@ -1925,17 +1980,10 @@ mod tests {
             )
             .expect("handler");
             let capture = CapturingWriter::default();
-            let subscriber = tracing_subscriber::fmt()
-                .with_writer(capture.clone())
-                .with_ansi(false)
-                .with_target(true)
-                .with_max_level(tracing::Level::INFO)
-                .finish();
-            let guard = tracing::subscriber::set_default(subscriber);
+            let _capture_guard = install_audit_capture(capture.clone());
             let result = handler
                 .dispatch_catalogued_read(org_read("getOrg"), &rmcp::model::Extensions::new())
                 .await;
-            drop(guard);
             assert_eq!(result.is_error, Some(true), "{result:?}");
             let output =
                 String::from_utf8(capture.0.lock().expect("capture").clone()).expect("UTF-8");
@@ -1964,17 +2012,10 @@ mod tests {
         )
         .expect("handler");
         let capture = CapturingWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(capture.clone())
-            .with_ansi(false)
-            .with_target(true)
-            .with_max_level(tracing::Level::INFO)
-            .finish();
-        let guard = tracing::subscriber::set_default(subscriber);
+        let _capture_guard = install_audit_capture(capture.clone());
         let result = handler
             .dispatch_catalogued_read(org_read("listOrgSites"), &rmcp::model::Extensions::new())
             .await;
-        drop(guard);
         assert_eq!(result.is_error, Some(true), "{result:?}");
         let output = String::from_utf8(capture.0.lock().expect("capture").clone()).expect("UTF-8");
         assert!(output.contains("result=error"), "{output}");
