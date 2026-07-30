@@ -22,8 +22,7 @@ use tower::ServiceExt as _;
 
 const ORG_ID: &str = "11111111-1111-1111-1111-111111111111";
 const OTHER_ORG_ID: &str = "99999999-9999-9999-9999-999999999999";
-const UPSTREAM_COMPATIBILITY: &str =
-    include_str!("../../../docs/UPSTREAM_COMPATIBILITY.md");
+const UPSTREAM_COMPATIBILITY: &str = include_str!("../../../docs/UPSTREAM_COMPATIBILITY.md");
 
 #[test]
 fn temporary_token_adapter_has_an_exact_upstream_removal_contract() {
