@@ -142,6 +142,11 @@ distroless OCI.
 
 ### Task 6: Changeset-backed mutation parity
 
+**Upstream sequencing update (2026-07-30):** `mecmcp#90` now places the
+multi-target preview extension in phase 5, after shared secret, HTTP, response
+limit, job, and OpenAPI helpers. Keep this task blocked until phase 5 is
+published; do not add a second Mist-local change envelope.
+
 **Files:**
 - Create: `crates/rustmistmcp-core/src/change.rs`
 - Create: `crates/rustmistmcp/src/server/changes.rs`
@@ -163,6 +168,11 @@ distroless OCI.
 - [ ] Commit as `feat: add controlled Mist changes`.
 
 ### Task 7: Runtime and transports
+
+**Upstream sequencing update (2026-07-30):** consume `mecmcp#90` phases 1,
+2a, 2b, 3, and 4 in order for the live client and startup identity probe.
+`mecmcp#160` is implemented on main, but adoption also waits for a coherent
+revision containing the shared server crate already used here.
 
 **Files:**
 - Create: `crates/rustmistmcp/src/main.rs`

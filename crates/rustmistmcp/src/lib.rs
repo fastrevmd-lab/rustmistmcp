@@ -9,9 +9,11 @@ pub use http_transport::{
 };
 pub use server::{KNOWN_TOOLS, MistHandler, MistServerError, RESTRICTED_TOOLS};
 
-/// The pinned shared token CLI can manage only grantless token documents.
+/// The pinned coherent shared-server revision can manage only grantless tokens.
 ///
-/// HTTP intentionally loads `TokenStoreFile<MistGrant>`, but grant-generic
-/// add/list/revoke/rotate support remains tracked by `mecmcp#160`.
-pub const GRANT_TOKEN_LIFECYCLE_BLOCKER: &str = "mecmcp#160: shared token commands support \
-grantless stores only; grant-bearing Mist token add/list/revoke/rotate is unavailable";
+/// `mecmcp#160` has merged the grant-generic command API onto `mecmcp` main,
+/// but that revision does not contain the shared server crate this process
+/// requires alongside the rest of the shared foundation. Keep one revision and
+/// fail closed until upstream publishes the complete foundation together.
+pub const GRANT_TOKEN_LIFECYCLE_BLOCKER: &str = "mecmcp#160 is merged, but the pinned coherent \
+mecmcp server revision predates it; grant-bearing Mist token add/list/revoke/rotate is unavailable";

@@ -105,6 +105,24 @@ or expose a live tool surface. `MistResponse` and `RateLimited` are DTOs that an
 injected test or future shared client can supply; they are not evidence of local
 transport support.
 
+The accepted `mecmcp#90` plan now gives this consumer a concrete adoption
+sequence. Rustmistmcp will consume each upstream phase only after it is
+published in one coherent immutable revision:
+
+| `mecmcp#90` phase | Rustmistmcp adoption |
+|---|---|
+| 1: `mecmcp-secret` | Load the Mist API token through the shared secret boundary. |
+| 2a: bounded pooled HTTPS client | Construct the live Mist client with HTTPS-only, no-redirect, concurrency, and deadline policy. |
+| 2b: streamed response limits | Enforce response byte ceilings before decoding Mist payloads. |
+| 3: cancellable job polling | Implement Mist asynchronous job polling with product-owned terminal states and retry semantics. |
+| 4: bounded OpenAPI path/query helpers | Expand whole path segments and validate bounded Mist pagination. |
+| 5: extended `mecmcp-changeset` | Implement multi-target preview-bound Mist mutations; this phase remains last. |
+
+Existing `TokenSecret`, cancellation, and changeset primitives will be reused,
+not rebuilt. Mist header names, catalog policy, request/response schemas,
+terminal states, retry classification, and deployment remain in this
+repository.
+
 ## Pre-release packaging and deployment boundary
 
 The checked-in Docker, archive, systemd, and LXC assets are **pre-release
@@ -158,10 +176,12 @@ RUSTMISTMCP_IMAGE='ghcr.io/fastrevmd-lab/rustmistmcp@sha256:<verified-64-hex-dig
 
 Populate the two empty secret files without placing their values in an
 environment variable, command argument, image layer, or Compose file.
-Grant-bearing MCP bearer-token add/list/revoke/rotate remains unavailable while
-`mecmcp#160` is open; an empty token store can start the pre-release listener
-but cannot authenticate an operator. This bearer-token store is separate from
-the Mist API token used by the outbound client.
+Grant-bearing MCP bearer-token add/list/revoke/rotate remains unavailable:
+`mecmcp#160` has merged the required API, but the published revision containing
+it does not also contain the shared server crate required by this process. An
+empty token store can start the pre-release listener but cannot authenticate an
+operator. This bearer-token store is separate from the Mist API token used by
+the outbound client.
 
 ### LXC operator prerequisites
 
@@ -216,13 +236,15 @@ before any separate deployment acceptance.
 
 Next, in order:
 
-1. Resolve `mecmcp#90` and implement the production outbound Mist client plus
-   `/self` identity probe.
-2. Resolve `mecmcp#160` so grant-bearing MCP bearer-token lifecycle works
-   through the shared CLI, and `mecmcp#159` for a shared version surface.
+1. Consume `mecmcp#90` phases 1 through 4 and implement the production outbound
+   Mist client plus `/self` identity probe.
+2. Adopt merged `mecmcp#160` once it is published in the same coherent revision
+   as the complete shared server foundation; resolve `mecmcp#159` for a shared
+   version surface.
 3. Complete read-only live-tenant acceptance only after the RC reference refresh
    and zero-gap parity review.
-4. Add mutations only behind `mecmcp-changeset`, never as direct writes.
+4. Consume `mecmcp#90` phase 5 and add mutations only behind
+   `mecmcp-changeset`, never as direct writes.
 
 ## Design commitments
 

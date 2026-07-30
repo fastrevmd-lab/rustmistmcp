@@ -31,8 +31,9 @@ or VMID has been queried or changed by packaging work.
 - [ ] No mutating Mist tool is used for packaging acceptance; change-set state
   stays inactive and its history/hash is preserved.
 
-Grant-bearing MCP bearer-token lifecycle must not be claimed while `mecmcp#160`
-is open. It is separate from the outbound Mist API-token credential.
+Grant-bearing MCP bearer-token lifecycle must not be claimed until merged
+`mecmcp#160` is published in the same coherent revision as the shared
+server crate. It is separate from the outbound Mist API-token credential.
 
 Do not fill this record until the upstream-reference refresh/regeneration has
 been reviewed with zero parity gaps and the runtime/outbound blockers are closed.
