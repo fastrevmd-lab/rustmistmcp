@@ -73,6 +73,7 @@ require_before() {
 
 required_files=(
     .dockerignore
+    .gitleaksignore
     Dockerfile
     .github/dependabot.yml
     packaging/container/compose.example.yaml
@@ -276,6 +277,32 @@ require_contains .github/workflows/security.yml 'gitleaks/gitleaks-action@e0c47f
 require_contains .github/workflows/security.yml 'pull-requests: read'
 require_contains .github/workflows/security.yml 'GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}'
 require_contains .github/workflows/security.yml 'GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}'
+require_contains .github/workflows/security.yml 'GITLEAKS_ENABLE_COMMENTS: false'
+gitleaks_ignored_findings=(
+    '058842e607e5dfbbc88c82330cfb72abda4d8aca:docs/mist-api/catalog.json:azure-ad-client-secret:1'
+    '058842e607e5dfbbc88c82330cfb72abda4d8aca:docs/mist-api/catalog.json:generic-api-key:1'
+    '058842e607e5dfbbc88c82330cfb72abda4d8aca:docs/mist-api/catalog.json:jwt:1'
+    '058842e607e5dfbbc88c82330cfb72abda4d8aca:docs/mist-api/catalog.json:private-key:1'
+    'aaf7838b6443e53dc0a3aacb99b160d2f1071dbb:docs/mist-api/catalog.json:azure-ad-client-secret:1'
+    'aaf7838b6443e53dc0a3aacb99b160d2f1071dbb:docs/mist-api/catalog.json:generic-api-key:1'
+    'aaf7838b6443e53dc0a3aacb99b160d2f1071dbb:docs/mist-api/catalog.json:jwt:1'
+    'aaf7838b6443e53dc0a3aacb99b160d2f1071dbb:docs/mist-api/catalog.json:private-key:1'
+    'aaf7838b6443e53dc0a3aacb99b160d2f1071dbb:docs/mist-api/mist-openapi.json:azure-ad-client-secret:1'
+    'aaf7838b6443e53dc0a3aacb99b160d2f1071dbb:docs/mist-api/mist-openapi.json:generic-api-key:1'
+    'aaf7838b6443e53dc0a3aacb99b160d2f1071dbb:docs/mist-api/mist-openapi.json:jwt:1'
+    'aaf7838b6443e53dc0a3aacb99b160d2f1071dbb:docs/mist-api/mist-openapi.json:private-key:1'
+)
+if [[ -f .gitleaksignore ]]; then
+    for finding in "${gitleaks_ignored_findings[@]}"; do
+        require_contains .gitleaksignore "$finding"
+    done
+    actual_ignored_findings=$(grep -Evc '^[[:space:]]*(#|$)' .gitleaksignore || true)
+    if [[ $actual_ignored_findings -ne ${#gitleaks_ignored_findings[@]} ]]; then
+        printf 'unexpected Gitleaks ignore count: expected %d, got %d\n' \
+            "${#gitleaks_ignored_findings[@]}" "$actual_ignored_findings" >&2
+        failures=$((failures + 1))
+    fi
+fi
 require_contains .github/workflows/release.yml 'actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f'
 require_contains .github/workflows/release.yml 'actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f'
 require_regex .github/workflows/release.yml '^permissions: \{\}$'
