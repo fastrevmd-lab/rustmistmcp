@@ -57,10 +57,11 @@ state flag exists. For an external bind, TLS and exact Host/Origin values are
 mandatory. No
 graceful HTTP drain/SIGTERM-completion claim is permitted while `mecmcp#156` is
 open, and file-audit startup is not fail-closed while `mecmcp#158` is open.
-Grant-bearing MCP bearer-token lifecycle remains unavailable. `mecmcp#160` has
-merged the required API, but no published coherent revision yet contains it
-together with the shared server crate consumed here. This operator-authentication
-store is separate from the outbound Mist API token.
+Grant-bearing MCP bearer-token lifecycle is provided temporarily by the
+Mist-typed adapter in `docs/UPSTREAM_COMPATIBILITY.md`. `token add` creates a
+grantless token; list, rotate, revoke, and subsequent adds preserve existing
+validated Mist grants. The operator-authentication store is separate from the
+outbound Mist API token.
 
 ## Repository security workflow prerequisite
 

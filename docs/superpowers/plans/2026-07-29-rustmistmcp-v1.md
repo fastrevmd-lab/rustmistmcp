@@ -171,8 +171,10 @@ published; do not add a second Mist-local change envelope.
 
 **Upstream sequencing update (2026-07-30):** consume `mecmcp#90` phases 1,
 2a, 2b, 3, and 4 in order for the live client and startup identity probe.
-`mecmcp#160` is implemented on main, but adoption also waits for a coherent
-revision containing the shared server crate already used here.
+Merged `mecmcp#160` is consumed temporarily through the private Mist-typed
+adapter and compatibility ledger approved on 2026-07-30. Delete that adapter
+when a coherent revision contains the required shared server surface and
+`run_with_grant`.
 
 **Files:**
 - Create: `crates/rustmistmcp/src/main.rs`

@@ -203,4 +203,4 @@ fi
 systemctl daemon-reload
 systemctl restart systemd-journald
 printf '%s\n' 'Installed rustmistmcp without enabling it.'
-printf '%s\n' 'Next: configure the live Mist profile/credentials, mint a supported token when merged mecmcp#160 is available with the complete shared server foundation, configure journal forwarding, then enable and start rustmistmcp.'
+printf '%s\n' 'Next: configure the live Mist profile/credentials, mint a grantless bearer token with rustmistmcp token add, configure journal forwarding, then enable and start rustmistmcp.'

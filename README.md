@@ -57,6 +57,11 @@ foundation shared by the mechub MCP server family. This repository is a
 
 Everything that is *not* specific to the Mist API is upstream. If you find
 yourself writing generic auth or transport code here, it belongs in `mecmcp`.
+The sole temporary exception is recorded in
+[`docs/UPSTREAM_COMPATIBILITY.md`](docs/UPSTREAM_COMPATIBILITY.md): a private,
+Mist-typed token lifecycle adapter needed because the current `mecmcp-server`
+revision predates merged `mecmcp#160`. It must be deleted at the ledger's
+objective removal condition.
 
 ## The API
 
@@ -176,12 +181,12 @@ RUSTMISTMCP_IMAGE='ghcr.io/fastrevmd-lab/rustmistmcp@sha256:<verified-64-hex-dig
 
 Populate the two empty secret files without placing their values in an
 environment variable, command argument, image layer, or Compose file.
-Grant-bearing MCP bearer-token add/list/revoke/rotate remains unavailable:
-`mecmcp#160` has merged the required API, but the published revision containing
-it does not also contain the shared server crate required by this process. An
-empty token store can start the pre-release listener but cannot authenticate an
-operator. This bearer-token store is separate from the Mist API token used by
-the outbound client.
+Grant-bearing MCP bearer-token add/list/revoke/rotate is temporarily supported
+by the private Mist-typed adapter recorded in
+[`docs/UPSTREAM_COMPATIBILITY.md`](docs/UPSTREAM_COMPATIBILITY.md). New tokens
+created by `token add` remain grantless; the adapter preserves and manages
+existing validated `MistGrant` values. This bearer-token store is separate from
+the Mist API token used by the outbound client.
 
 ### LXC operator prerequisites
 
@@ -238,9 +243,9 @@ Next, in order:
 
 1. Consume `mecmcp#90` phases 1 through 4 and implement the production outbound
    Mist client plus `/self` identity probe.
-2. Adopt merged `mecmcp#160` once it is published in the same coherent revision
-   as the complete shared server foundation; resolve `mecmcp#159` for a shared
-   version surface.
+2. Remove the temporary token adapter once merged `mecmcp#160` is published in
+   the same coherent revision as the complete shared server foundation; resolve
+   `mecmcp#159` for a shared version surface.
 3. Complete read-only live-tenant acceptance only after the RC reference refresh
    and zero-gap parity review.
 4. Consume `mecmcp#90` phase 5 and add mutations only behind

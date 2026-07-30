@@ -30,6 +30,12 @@ issues `mecmcp#90` and `mecmcp#91` are prerequisites.
 `rustsdcmcp`, VMID 612 (`foundry`), and all unrelated repositories and guests
 remain untouched.
 
+One narrow exception was approved on 2026-07-30: the private Mist-typed token
+lifecycle adapter specified in
+`2026-07-30-temporary-mist-token-lifecycle-compat-design.md`. Its upstream
+ledger and objective deletion condition are mandatory; it does not change the
+ownership of any `mecmcp#90` foundation.
+
 ## Architecture
 
 The Cargo workspace has two crates:

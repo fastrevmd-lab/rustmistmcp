@@ -22,6 +22,25 @@ use tower::ServiceExt as _;
 
 const ORG_ID: &str = "11111111-1111-1111-1111-111111111111";
 const OTHER_ORG_ID: &str = "99999999-9999-9999-9999-999999999999";
+const UPSTREAM_COMPATIBILITY: &str =
+    include_str!("../../../docs/UPSTREAM_COMPATIBILITY.md");
+
+#[test]
+fn temporary_token_adapter_has_an_exact_upstream_removal_contract() {
+    for required in [
+        "crates/rustmistmcp/src/mist_token_cmd.rs",
+        "mecmcp#160",
+        "mecmcp#170",
+        "mecmcp-server",
+        "token_cmd::run_with_grant",
+        "grant_bearing_token_lifecycle_preserves_mist_authority",
+    ] {
+        assert!(
+            UPSTREAM_COMPATIBILITY.contains(required),
+            "compatibility ledger is missing {required}"
+        );
+    }
+}
 
 fn parse_cli(args: &[&str]) -> Cli {
     Cli::parse_from(std::iter::once("rustmistmcp").chain(args.iter().copied()))
