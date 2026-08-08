@@ -30,6 +30,18 @@ async fn main() -> Result<()> {
         .map_err(|error| anyhow::anyhow!("{error}"));
     }
 
+    // mecmcp decision D4: the consumer installs the process-global rustls crypto
+    // provider, and it must be installed before ANYTHING builds a TLS-capable
+    // client. This used to live inside `load_listener_tls`, which only runs when
+    // --tls-cert/--tls-key are set — fine while the only TLS consumer was the
+    // listener, wrong the moment the outbound Mist client became real. Without
+    // it the server died at startup with "failed to construct HTTP client",
+    // which the OCI smoke test caught and no unit test could.
+    //
+    // `install_default` errors if a provider is already set; that is a benign
+    // race with anything else in-process, so it is deliberately ignored.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // The shared CLI retains the historic `device_mapping` spelling. Here it
     // selects the singleton Mist profile until mecmcp#91 lands.
     let config = MistConfig::from_path(&args.device_mapping)
@@ -168,11 +180,10 @@ fn load_listener_tls(args: &Cli) -> Result<Option<Arc<rustls::ServerConfig>>> {
     let (Some(cert), Some(key)) = (&args.tls_cert, &args.tls_key) else {
         return Ok(None);
     };
+    // The process-global provider is installed in `main`; do not install again —
+    // `install_default` returns Err when one is already set, and treating that
+    // as fatal would break every TLS start.
     let provider = rustls::crypto::ring::default_provider();
-    provider
-        .clone()
-        .install_default()
-        .map_err(|_| anyhow::anyhow!("failed to install the rustls ring crypto provider"))?;
     mecmcp_transport::load_tls(cert, key, Arc::new(provider))
         .context("loading listener TLS")
         .map(Some)
