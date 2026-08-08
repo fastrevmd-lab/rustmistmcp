@@ -382,3 +382,56 @@ async fn blocked_client_still_available_for_no_credential_mode() {
         body_text
     );
 }
+
+/// The production constructor must build a real client, not the blocked stub.
+///
+/// The other test in this file hands `MistHandler::with_client` an
+/// `HttpMistClient` it built itself, so it proves only that a handler given a
+/// real client reaches it — which was never in doubt. It cannot detect
+/// `from_config` being wired to `BlockedMistClient`, and it did not: pointing
+/// `from_config` at the stub left the whole suite green.
+///
+/// `HttpMistClient` refuses non-HTTPS at construction, so it cannot be aimed at
+/// a plaintext mock. Instead this aims `from_config` at a well-formed but
+/// unreachable HTTPS endpoint and discriminates on the error: a real client
+/// fails to connect, while `BlockedMistClient` returns `TransportUnavailable`
+/// for everything without touching the network.
+#[tokio::test]
+async fn from_config_constructs_a_real_client_not_the_blocked_stub() {
+    use rustmistmcp_core::MistConfig;
+
+    // The consumer installs the crypto provider (mecmcp decision D4); without
+    // one, HttpClient construction fails and this test cannot tell a real client
+    // from the stub.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let dir = TempDir::new().expect("tempdir");
+    let credential_file = dir.path().join("token");
+    std::fs::write(&credential_file, "test-token-value").expect("write credential");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&credential_file, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod 0600");
+    }
+
+    // A real Mist region: the endpoint allowlist admits only these, and this
+    // test must not make a network call, so the assertion below is on which
+    // client was built rather than on how a request fails.
+    let config = MistConfig {
+        version: 1,
+        endpoint: "https://api.mist.com".to_owned(),
+        credential_file,
+        allowed_orgs: vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+    };
+
+    let handler = MistHandler::from_config(&config, BTreeMap::new())
+        .expect("from_config should build a handler");
+
+    assert!(
+        !handler.client().is_blocked(),
+        "from_config built BlockedMistClient: every call returns \
+         TransportUnavailable regardless of configuration, so the server can \
+         never reach Mist"
+    );
+}

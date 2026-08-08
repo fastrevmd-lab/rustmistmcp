@@ -133,7 +133,6 @@ pub struct MistHandler {
     sites: Arc<BTreeMap<String, String>>,
     #[allow(dead_code)]
     catalog: Arc<Catalog>,
-    #[allow(dead_code)]
     client: Arc<dyn MistClient>,
     tool_router: ToolRouter<Self>,
 }
@@ -148,6 +147,15 @@ impl MistHandler {
         sites: BTreeMap<String, String>,
     ) -> Result<Self, MistServerError> {
         Self::with_client(endpoint, allowed_orgs, sites, Arc::new(BlockedMistClient))
+    }
+    /// The transport this handler will actually use.
+    ///
+    /// Exposed so a test can assert which client the *production* constructor
+    /// built. A test that constructs the handler itself cannot see the wiring
+    /// at all — which is how `from_config` shipped returning the stub.
+    #[must_use]
+    pub fn client(&self) -> &Arc<dyn MistClient> {
+        &self.client
     }
 
     /// Construct a production handler with real HTTPS client.

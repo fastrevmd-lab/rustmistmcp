@@ -16,6 +16,17 @@ use crate::{Catalog, MistCursor, MistRequest, MistResponse, MistResponseBody};
 pub trait MistClient: Send + Sync {
     /// Execute one catalog-bound request.
     async fn execute(&self, request: MistRequest) -> Result<MistResponse, MistError>;
+
+    /// Whether this transport refuses everything without touching the network.
+    ///
+    /// Exists so the production constructor's choice of client is assertable
+    /// without a live tenant. The endpoint allowlist only admits real Mist
+    /// regions, so "point it at an unreachable host and inspect the error" is
+    /// not available, and a test that builds its own client cannot see the
+    /// wiring at all — which is how `from_config` shipped returning the stub.
+    fn is_blocked(&self) -> bool {
+        false
+    }
 }
 
 /// Deliberately unavailable default client used while mecmcp#90 is open.
@@ -26,6 +37,10 @@ pub struct BlockedMistClient;
 
 #[async_trait]
 impl MistClient for BlockedMistClient {
+    fn is_blocked(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, _request: MistRequest) -> Result<MistResponse, MistError> {
         Err(MistError::TransportUnavailable)
     }
