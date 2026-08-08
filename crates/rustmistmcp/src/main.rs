@@ -6,8 +6,7 @@ use mecmcp_auth::TokenStoreFile;
 use mecmcp_runtime::cli::{Cli, Command, Transport};
 use rmcp::ServiceExt as _;
 use rustmistmcp::{
-    KNOWN_TOOLS, LIVE_MIST_BLOCKER, MistHandler, install_token_reload_handler, serve_http,
-    validate_runtime_serve,
+    KNOWN_TOOLS, MistHandler, install_token_reload_handler, serve_http, validate_runtime_serve,
 };
 use rustmistmcp_core::{MistConfig, MistGrant};
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
@@ -35,9 +34,14 @@ async fn main() -> Result<()> {
     // selects the singleton Mist profile until mecmcp#91 lands.
     let config = MistConfig::from_path(&args.device_mapping)
         .with_context(|| format!("loading {}", args.device_mapping.display()))?;
-    tracing::warn!("{LIVE_MIST_BLOCKER}; serving the blocked client seam");
-    let handler = MistHandler::blocked(&config.endpoint, config.allowed_orgs, BTreeMap::new())
-        .context("constructing blocked Mist handler")?;
+
+    // Construct real HTTP client when credential is available
+    let handler = MistHandler::from_config(&config, BTreeMap::new())
+        .context("constructing Mist handler with HTTP client")?;
+    tracing::info!(
+        "Mist handler constructed with HttpMistClient for endpoint {}",
+        config.endpoint
+    );
 
     match args.transport {
         Transport::Stdio => serve_stdio(handler).await,

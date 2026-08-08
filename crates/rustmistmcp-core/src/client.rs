@@ -139,8 +139,11 @@ impl HttpMistClient {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_test_parts(
+    /// Construct an [`HttpMistClient`] from explicit parts for integration tests.
+    ///
+    /// Bypasses endpoint validation and HTTPS enforcement, allowing tests to use
+    /// plain HTTP mock servers. Do not use in production code.
+    pub fn from_test_parts(
         base_url: Url,
         credential: String,
         catalog: Arc<Catalog>,
