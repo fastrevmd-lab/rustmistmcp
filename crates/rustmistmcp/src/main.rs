@@ -1,11 +1,9 @@
 //! HPE Juniper Mist MCP server executable.
 
-mod mist_token_cmd;
-
 use anyhow::{Context as _, Result};
 use clap::Parser as _;
 use mecmcp_auth::TokenStoreFile;
-use mecmcp_runtime::cli::{Cli, Command, TokenAction, Transport};
+use mecmcp_runtime::cli::{Cli, Command, Transport};
 use rmcp::ServiceExt as _;
 use rustmistmcp::{
     KNOWN_TOOLS, LIVE_MIST_BLOCKER, MistHandler, install_token_reload_handler, serve_http,
@@ -17,17 +15,20 @@ use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Cli::parse();
-    let validated = validate_runtime_serve(&args).map_err(|error| anyhow::anyhow!("{error}"))?;
+    validate_runtime_serve(&args).map_err(|error| anyhow::anyhow!("{error}"))?;
     init_audit(&args)?;
 
     if let Some(Command::Token { action }) = args.command {
         // Management is deliberately local: it validates against the fixed
         // tool registry and neither loads Mist profile/credential data nor
         // contacts the Mist service.
-        mecmcp_runtime::cli_validate::require_absolute(token_store_path(&action), "--tokens-file")
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-        return mist_token_cmd::run(action, KNOWN_TOOLS)
-            .map_err(|error| anyhow::anyhow!("{error}"));
+        return mecmcp_runtime::token_cmd::run_with_grant::<MistGrant>(
+            action,
+            &[], // No known devices - Mist uses org/site targets
+            KNOWN_TOOLS,
+            None, // No grant for basic token operations
+        )
+        .map_err(|error| anyhow::anyhow!("{error}"));
     }
 
     // The shared CLI retains the historic `device_mapping` spelling. Here it
@@ -47,7 +48,44 @@ async fn main() -> Result<()> {
                     .context("installing token snapshot reload handler")?;
             }
             let tls = load_listener_tls(&args)?;
-            let address = SocketAddr::new(validated.host, args.port);
+            let host = args
+                .host
+                .parse::<std::net::IpAddr>()
+                .context("invalid --host IP address")?;
+            let address = SocketAddr::new(host, args.port);
+            let shutdown = tokio_util::sync::CancellationToken::new();
+
+            // Install signal handlers
+            let signal_shutdown = shutdown.clone();
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{SignalKind, signal};
+                let mut sigterm =
+                    signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
+                let mut sigint =
+                    signal(SignalKind::interrupt()).context("installing SIGINT handler")?;
+                tokio::spawn(async move {
+                    tokio::select! {
+                        _ = sigterm.recv() => {
+                            tracing::info!("SIGTERM received");
+                        }
+                        _ = sigint.recv() => {
+                            tracing::info!("SIGINT received");
+                        }
+                    }
+                    signal_shutdown.cancel();
+                });
+            }
+            #[cfg(not(unix))]
+            {
+                tokio::spawn(async move {
+                    tokio::signal::ctrl_c().await.ok();
+                    tracing::info!("Ctrl+C received");
+                    signal_shutdown.cancel();
+                });
+            }
+
+            let shutdown_timeout = std::time::Duration::from_secs(10);
             serve_http(
                 handler,
                 address,
@@ -57,18 +95,12 @@ async fn main() -> Result<()> {
                 mecmcp_transport::LimitsConfig::default(),
                 false,
                 tls,
+                shutdown,
+                shutdown_timeout,
             )
             .await
+            .map_err(anyhow::Error::from)
         }
-    }
-}
-
-fn token_store_path(action: &TokenAction) -> &std::path::Path {
-    match action {
-        TokenAction::Add { tokens_file, .. }
-        | TokenAction::List { tokens_file }
-        | TokenAction::Revoke { tokens_file, .. }
-        | TokenAction::Rotate { tokens_file, .. } => tokens_file,
     }
 }
 
