@@ -71,7 +71,10 @@ async fn registry_contains_only_the_approved_read_tools() {
     let client = ().serve(client_transport).await.expect("client initialization");
 
     let info = client.peer_info().expect("server info");
-    assert_eq!(info.server_info.name, "rustmistmcp");
+    assert_eq!(
+        info.server_info.as_ref().expect("server info present").name,
+        "rustmistmcp"
+    );
     let tools = client.list_tools(None).await.expect("tool list");
     let names: Vec<_> = tools.tools.iter().map(|tool| tool.name.as_ref()).collect();
     let ordinary_names = EXPECTED
