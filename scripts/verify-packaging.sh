@@ -94,6 +94,28 @@ for file in "${required_files[@]}"; do
     require_file "$file"
 done
 
+# The Rust toolchain version appears in five places that must agree: the
+# Dockerfile builder stage, the release workflow's archive builder, two calls in
+# smoke-oci.sh, and rust-toolchain.toml. Dependabot bumps only the Dockerfile,
+# which would leave the container built with one toolchain and the archive with
+# another — a difference that shows up as a glibc or codegen mismatch at install
+# time, not at build time. This makes a partial bump fail here instead.
+rust_image_refs=$(grep -rhoE 'rust:[0-9]+\.[0-9]+\.[0-9]+-slim-bookworm@sha256:[0-9a-f]{64}' \
+    Dockerfile .github/workflows/release.yml scripts/smoke-oci.sh | sort -u)
+if [[ $(printf '%s\n' "$rust_image_refs" | grep -c .) -ne 1 ]]; then
+    printf 'rust builder image is not consistent across Dockerfile, release.yml and smoke-oci.sh:\n%s\n' \
+        "$rust_image_refs" >&2
+    failures=$((failures + 1))
+fi
+rust_image_version=$(printf '%s' "$rust_image_refs" | sed -E 's|^rust:([0-9]+\.[0-9]+\.[0-9]+).*|\1|')
+rust_channel=$(grep -oE '^channel[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' rust-toolchain.toml \
+    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+if [[ -n $rust_image_version && $rust_image_version != "$rust_channel" ]]; then
+    printf 'rust-toolchain.toml channel (%s) does not match the builder image (%s)\n' \
+        "$rust_channel" "$rust_image_version" >&2
+    failures=$((failures + 1))
+fi
+
 if (( failures > 0 )); then
     printf 'packaging policy: FAIL (%d violation(s))\n' "$failures" >&2
     exit 1
@@ -107,7 +129,11 @@ sysusers=packaging/systemd/rustmistmcp.sysusers
 tmpfiles=packaging/systemd/rustmistmcp.tmpfiles
 journald=packaging/journald/mecmcp.conf
 
-require_regex "$dockerfile" '^FROM rust:1\.97\.0-slim-bookworm@sha256:[0-9a-f]{64} AS builder$'
+# Digest-pinned, not frozen at one version — see the note on the workflow action
+# pins below. A Rust bump must still move all five references together
+# (Dockerfile, release.yml, smoke-oci.sh x2, rust-toolchain.toml), which the
+# consistency check right after this enforces.
+require_regex "$dockerfile" '^FROM rust:[0-9]+\.[0-9]+\.[0-9]+-slim-bookworm@sha256:[0-9a-f]{64} AS builder$'
 require_regex "$dockerfile" '^FROM gcr\.io/distroless/cc-debian13:nonroot@sha256:[0-9a-f]{64}$'
 require_absent "$dockerfile" '^# syntax='
 require_contains "$dockerfile" 'USER 65532:65532'
