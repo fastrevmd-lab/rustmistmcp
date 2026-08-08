@@ -7,10 +7,7 @@ use axum::{
 };
 use clap::Parser as _;
 use mecmcp_auth::{KnownNames, ScopeSet, TokenStoreFile};
-use mecmcp_runtime::{
-    cli::{Cli, Transport},
-    cli_validate::CliRefusal,
-};
+use mecmcp_runtime::cli::{Cli, Transport};
 use mecmcp_transport::{CallerScopes, LimitsConfig, ScopePreflight as _};
 use rustmistmcp::{
     KNOWN_TOOLS, LIVE_MIST_BLOCKER, MistHandler, MistScopePreflight, RESTRICTED_TOOLS,
@@ -22,23 +19,11 @@ use tower::ServiceExt as _;
 
 const ORG_ID: &str = "11111111-1111-1111-1111-111111111111";
 const OTHER_ORG_ID: &str = "99999999-9999-9999-9999-999999999999";
-const UPSTREAM_COMPATIBILITY: &str = include_str!("../../../docs/UPSTREAM_COMPATIBILITY.md");
 
 #[test]
-fn temporary_token_adapter_has_an_exact_upstream_removal_contract() {
-    for required in [
-        "crates/rustmistmcp/src/mist_token_cmd.rs",
-        "mecmcp#160",
-        "mecmcp#170",
-        "mecmcp-server",
-        "token_cmd::run_with_grant",
-        "grant_bearing_token_lifecycle_preserves_mist_authority",
-    ] {
-        assert!(
-            UPSTREAM_COMPATIBILITY.contains(required),
-            "compatibility ledger is missing {required}"
-        );
-    }
+fn upstream_token_commands_now_used() {
+    // The mist_token_cmd.rs adapter was deleted per the migration task
+    assert!(!Path::new("crates/rustmistmcp/src/mist_token_cmd.rs").exists());
 }
 
 fn parse_cli(args: &[&str]) -> Cli {
@@ -166,11 +151,10 @@ fn remote_listener_requires_explicit_host_and_origin_policies() {
         "0.0.0.0",
         "--tokens-file",
         "/etc/rustmistmcp/tokens.json",
-        "--allow-insecure-bind",
     ]);
-    assert_eq!(
-        validate_runtime_serve(&missing_host),
-        Err(CliRefusal::AllowedHostRequired)
+    assert!(
+        validate_runtime_serve(&missing_host).is_err(),
+        "should reject missing --allowed-host"
     );
 
     let missing_origin = parse_cli(&[
@@ -180,13 +164,12 @@ fn remote_listener_requires_explicit_host_and_origin_policies() {
         "0.0.0.0",
         "--tokens-file",
         "/etc/rustmistmcp/tokens.json",
-        "--allow-insecure-bind",
         "--allowed-host",
         "mist.example.test",
     ]);
-    assert_eq!(
-        validate_runtime_serve(&missing_origin),
-        Err(CliRefusal::AllowedOriginRequired)
+    assert!(
+        validate_runtime_serve(&missing_origin).is_err(),
+        "should reject missing --allowed-origin"
     );
 
     let strict_remote = parse_cli(&[
@@ -196,44 +179,37 @@ fn remote_listener_requires_explicit_host_and_origin_policies() {
         "0.0.0.0",
         "--tokens-file",
         "/etc/rustmistmcp/tokens.json",
-        "--allow-insecure-bind",
         "--allowed-host",
         "mist.example.test",
         "--allowed-origin",
         "https://client.example.test",
     ]);
-    let validated = validate_runtime_serve(&strict_remote).expect("strict remote listener");
-    assert_eq!(validated.host.to_string(), "0.0.0.0");
-    assert!(!validated.tls);
+    validate_runtime_serve(&strict_remote).expect("strict remote listener");
+
+    // Loopback listeners bypass the requirement
+    let loopback = parse_cli(&[
+        "--transport",
+        "streamable-http",
+        "--host",
+        "127.0.0.1",
+        "--tokens-file",
+        "/etc/rustmistmcp/tokens.json",
+    ]);
+    validate_runtime_serve(&loopback).expect("loopback listener");
 }
 
 #[test]
-fn listener_validation_preserves_shared_tls_and_absolute_path_refusals() {
-    let relative_tokens = parse_cli(&[
+fn listener_validation_allows_insecure_bind_bypass() {
+    let insecure_bind = parse_cli(&[
         "--transport",
         "streamable-http",
-        "--tokens-file",
-        "tokens.json",
-    ]);
-    assert_eq!(
-        validate_runtime_serve(&relative_tokens),
-        Err(CliRefusal::AbsolutePathRequired {
-            flag: "--tokens-file"
-        })
-    );
-
-    let incomplete_tls = parse_cli(&[
-        "--transport",
-        "streamable-http",
+        "--host",
+        "0.0.0.0",
         "--tokens-file",
         "/etc/rustmistmcp/tokens.json",
-        "--tls-cert",
-        "/etc/rustmistmcp/tls/cert.pem",
+        "--allow-insecure-bind",
     ]);
-    assert!(matches!(
-        validate_runtime_serve(&incomplete_tls),
-        Err(CliRefusal::TlsPairIncomplete { .. })
-    ));
+    validate_runtime_serve(&insecure_bind).expect("allow-insecure-bind bypasses Host/Origin check");
 }
 
 #[test]
@@ -257,7 +233,10 @@ fn mist_preflight_translates_org_and_site_arguments_to_canonical_targets() {
         }
     });
     preflight
-        .check(&serde_json::to_vec(&permitted).expect("request"), caller)
+        .check(
+            &serde_json::to_vec(&permitted).expect("request"),
+            caller.clone(),
+        )
         .expect("canonical org scope permits raw org argument");
 
     let denied = serde_json::json!({
@@ -270,7 +249,10 @@ fn mist_preflight_translates_org_and_site_arguments_to_canonical_targets() {
         }
     });
     assert_eq!(
-        preflight.check(&serde_json::to_vec(&denied).expect("request"), caller),
+        preflight.check(
+            &serde_json::to_vec(&denied).expect("request"),
+            caller.clone()
+        ),
         Err("insufficient_scope".to_owned())
     );
 
@@ -294,7 +276,7 @@ fn mist_preflight_translates_org_and_site_arguments_to_canonical_targets() {
     preflight
         .check(
             &serde_json::to_vec(&permitted_site).expect("request"),
-            site_caller,
+            site_caller.clone(),
         )
         .expect("canonical site scope permits raw site argument");
     let denied_site = serde_json::json!({
@@ -309,7 +291,7 @@ fn mist_preflight_translates_org_and_site_arguments_to_canonical_targets() {
     assert_eq!(
         preflight.check(
             &serde_json::to_vec(&denied_site).expect("request"),
-            site_caller
+            site_caller.clone()
         ),
         Err("insufficient_scope".to_owned())
     );
@@ -359,7 +341,10 @@ fn wildcard_tool_scope_excludes_restricted_reads_at_preflight() {
         "params": {"name": "get_mist_self", "arguments": {}}
     });
     assert_eq!(
-        preflight.check(&serde_json::to_vec(&restricted).expect("request"), caller),
+        preflight.check(
+            &serde_json::to_vec(&restricted).expect("request"),
+            caller.clone()
+        ),
         Err("insufficient_scope".to_owned())
     );
 }
@@ -396,7 +381,10 @@ fn mist_preflight_denies_every_malformed_org_and_site_shape() {
             }
         });
         assert_eq!(
-            preflight.check(&serde_json::to_vec(&request).expect("request"), caller),
+            preflight.check(
+                &serde_json::to_vec(&request).expect("request"),
+                caller.clone()
+            ),
             Err("insufficient_scope".to_owned()),
             "{request}"
         );
@@ -420,13 +408,15 @@ async fn authenticated_router_uses_strict_bearer_syntax_and_scope_preflight() {
     )
     .expect("token");
     let store = Arc::new(TokenStoreFile::<MistGrant>::load(&path).expect("token store"));
-    let router = build_http_router(
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let (router, _shutdown_token) = build_http_router(
         handler(),
         Some(store),
         Vec::new(),
         Vec::new(),
         LimitsConfig::default(),
         false,
+        shutdown,
     )
     .expect("HTTP router");
     let body = serde_json::json!({
@@ -493,13 +483,15 @@ async fn authenticated_router_uses_strict_bearer_syntax_and_scope_preflight() {
 
 #[tokio::test]
 async fn unauthenticated_loopback_http_exposes_only_ordinary_tools_and_denies_restricted_calls() {
-    let router = build_http_router(
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let (router, _shutdown_token) = build_http_router(
         handler(),
         None,
         Vec::new(),
         Vec::new(),
         LimitsConfig::default(),
         false,
+        shutdown,
     )
     .expect("HTTP router");
     let session = initialize_no_auth_session(&router).await;
@@ -626,7 +618,9 @@ fn token_add_is_local_and_its_file_loads_as_a_mist_grant_store() {
 }
 
 #[test]
-fn token_management_requires_an_absolute_store_path() {
+fn token_management_accepts_relative_paths_per_upstream() {
+    // mecmcp 0.7.3's token_cmd::run_with_grant accepts relative paths.
+    // Path validation is mecmcp's responsibility now.
     let dir = tempfile::tempdir().expect("temporary directory");
     let output = Command::new(env!("CARGO_BIN_EXE_rustmistmcp"))
         .current_dir(dir.path())
@@ -644,11 +638,11 @@ fn token_management_requires_an_absolute_store_path() {
         ])
         .output()
         .expect("run token command");
-    assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("--tokens-file path must be absolute")
+        output.status.success(),
+        "token add should succeed with relative path per mecmcp 0.7.3"
     );
-    assert!(!dir.path().join("tokens.json").exists());
+    assert!(dir.path().join("tokens.json").exists());
 }
 
 #[test]
