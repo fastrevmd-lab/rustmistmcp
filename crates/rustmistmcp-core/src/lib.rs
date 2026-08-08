@@ -12,7 +12,10 @@ mod grant;
 mod target;
 
 pub use catalog::{Catalog, MistAction, PaginationMode};
-pub use client::{BlockedMistClient, MistClient, MistError};
+pub use client::{
+    BlockedMistClient, HttpMistClient, HttpMistClientConfig, HttpMistClientError, MistClient,
+    MistError,
+};
 pub use config::{ConfigError, MistConfig, validate_mist_endpoint};
 pub use grant::MistGrant;
 pub use pagination::{MAX_ENCODED_CURSOR_BYTES, MistCursor, MistCursorRequestContext};

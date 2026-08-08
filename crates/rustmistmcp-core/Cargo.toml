@@ -25,7 +25,9 @@ zeroize.workspace = true
 mecmcp-audit.workspace = true
 mecmcp-auth.workspace = true
 mecmcp-changeset.workspace = true
+mecmcp-http.workspace = true
 mecmcp-inventory.workspace = true
+mecmcp-secret.workspace = true
 mecmcp-server.workspace = true
 
 [dev-dependencies]
@@ -33,6 +35,7 @@ axum.workspace = true
 rustls.workspace = true
 tempfile = "3"
 toml = "0.8"
+tower.workspace = true
 
 [lints]
 workspace = true

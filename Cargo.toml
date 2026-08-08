@@ -31,7 +31,7 @@ hex = "0.4"
 http = "1"
 jsonschema = { version = "0.37.4", default-features = false }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls-no-provider"] }
-rmcp = { version = "2", features = ["server", "transport-io", "transport-streamable-http-server", "transport-streamable-http-server-session"] }
+rmcp = { version = "3.1", features = ["server", "transport-io", "transport-streamable-http-server", "transport-streamable-http-server-session"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
@@ -46,17 +46,19 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 zeroize = "1"
 
-# mecmcp#90 and mecmcp#91 remain open prerequisites. This consumer records the
-# constraint and must not replace their missing generic APIs locally.
 # Every shared crate is pinned to one immutable revision so extension TypeIds
-# cannot diverge across the server process.
-mecmcp-audit = { version = "0.3.8", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "75a1e9db10a21a85876f337313ba47bc0329d74d" }
-mecmcp-auth = { version = "0.3.8", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "75a1e9db10a21a85876f337313ba47bc0329d74d" }
-mecmcp-changeset = { version = "0.3.8", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "75a1e9db10a21a85876f337313ba47bc0329d74d" }
-mecmcp-inventory = { version = "0.3.8", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "75a1e9db10a21a85876f337313ba47bc0329d74d" }
-mecmcp-runtime = { version = "0.3.8", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "75a1e9db10a21a85876f337313ba47bc0329d74d" }
-mecmcp-server = { version = "0.3.8", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "75a1e9db10a21a85876f337313ba47bc0329d74d" }
-mecmcp-transport = { version = "0.3.8", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "75a1e9db10a21a85876f337313ba47bc0329d74d" }
+# cannot diverge across the server process. mecmcp#90 and mecmcp#91 remain open prerequisites
+# for live Mist integration.
+mecmcp-audit = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
+mecmcp-auth = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
+mecmcp-changeset = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
+mecmcp-http = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
+mecmcp-inventory = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
+mecmcp-job = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
+mecmcp-runtime = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
+mecmcp-secret = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
+mecmcp-server = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
+mecmcp-transport = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
 
 [profile.release]
 lto = "thin"

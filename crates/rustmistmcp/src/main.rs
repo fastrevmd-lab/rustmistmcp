@@ -1,15 +1,12 @@
 //! HPE Juniper Mist MCP server executable.
 
-mod mist_token_cmd;
-
 use anyhow::{Context as _, Result};
 use clap::Parser as _;
 use mecmcp_auth::TokenStoreFile;
-use mecmcp_runtime::cli::{Cli, Command, TokenAction, Transport};
+use mecmcp_runtime::cli::{Cli, Command, Transport};
 use rmcp::ServiceExt as _;
 use rustmistmcp::{
-    KNOWN_TOOLS, LIVE_MIST_BLOCKER, MistHandler, install_token_reload_handler, serve_http,
-    validate_runtime_serve,
+    KNOWN_TOOLS, MistHandler, install_token_reload_handler, serve_http, validate_runtime_serve,
 };
 use rustmistmcp_core::{MistConfig, MistGrant};
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
@@ -17,26 +14,46 @@ use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Cli::parse();
-    let validated = validate_runtime_serve(&args).map_err(|error| anyhow::anyhow!("{error}"))?;
+    validate_runtime_serve(&args).map_err(|error| anyhow::anyhow!("{error}"))?;
     init_audit(&args)?;
 
     if let Some(Command::Token { action }) = args.command {
         // Management is deliberately local: it validates against the fixed
         // tool registry and neither loads Mist profile/credential data nor
         // contacts the Mist service.
-        mecmcp_runtime::cli_validate::require_absolute(token_store_path(&action), "--tokens-file")
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-        return mist_token_cmd::run(action, KNOWN_TOOLS)
-            .map_err(|error| anyhow::anyhow!("{error}"));
+        return mecmcp_runtime::token_cmd::run_with_grant::<MistGrant>(
+            action,
+            &[], // No known devices - Mist uses org/site targets
+            KNOWN_TOOLS,
+            None, // No grant for basic token operations
+        )
+        .map_err(|error| anyhow::anyhow!("{error}"));
     }
+
+    // mecmcp decision D4: the consumer installs the process-global rustls crypto
+    // provider, and it must be installed before ANYTHING builds a TLS-capable
+    // client. This used to live inside `load_listener_tls`, which only runs when
+    // --tls-cert/--tls-key are set — fine while the only TLS consumer was the
+    // listener, wrong the moment the outbound Mist client became real. Without
+    // it the server died at startup with "failed to construct HTTP client",
+    // which the OCI smoke test caught and no unit test could.
+    //
+    // `install_default` errors if a provider is already set; that is a benign
+    // race with anything else in-process, so it is deliberately ignored.
+    let _ = rustls::crypto::ring::default_provider().install_default();
 
     // The shared CLI retains the historic `device_mapping` spelling. Here it
     // selects the singleton Mist profile until mecmcp#91 lands.
     let config = MistConfig::from_path(&args.device_mapping)
         .with_context(|| format!("loading {}", args.device_mapping.display()))?;
-    tracing::warn!("{LIVE_MIST_BLOCKER}; serving the blocked client seam");
-    let handler = MistHandler::blocked(&config.endpoint, config.allowed_orgs, BTreeMap::new())
-        .context("constructing blocked Mist handler")?;
+
+    // Construct real HTTP client when credential is available
+    let handler = MistHandler::from_config(&config, BTreeMap::new())
+        .context("constructing Mist handler with HTTP client")?;
+    tracing::info!(
+        "Mist handler constructed with HttpMistClient for endpoint {}",
+        config.endpoint
+    );
 
     match args.transport {
         Transport::Stdio => serve_stdio(handler).await,
@@ -47,7 +64,44 @@ async fn main() -> Result<()> {
                     .context("installing token snapshot reload handler")?;
             }
             let tls = load_listener_tls(&args)?;
-            let address = SocketAddr::new(validated.host, args.port);
+            let host = args
+                .host
+                .parse::<std::net::IpAddr>()
+                .context("invalid --host IP address")?;
+            let address = SocketAddr::new(host, args.port);
+            let shutdown = tokio_util::sync::CancellationToken::new();
+
+            // Install signal handlers
+            let signal_shutdown = shutdown.clone();
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{SignalKind, signal};
+                let mut sigterm =
+                    signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
+                let mut sigint =
+                    signal(SignalKind::interrupt()).context("installing SIGINT handler")?;
+                tokio::spawn(async move {
+                    tokio::select! {
+                        _ = sigterm.recv() => {
+                            tracing::info!("SIGTERM received");
+                        }
+                        _ = sigint.recv() => {
+                            tracing::info!("SIGINT received");
+                        }
+                    }
+                    signal_shutdown.cancel();
+                });
+            }
+            #[cfg(not(unix))]
+            {
+                tokio::spawn(async move {
+                    tokio::signal::ctrl_c().await.ok();
+                    tracing::info!("Ctrl+C received");
+                    signal_shutdown.cancel();
+                });
+            }
+
+            let shutdown_timeout = std::time::Duration::from_secs(10);
             serve_http(
                 handler,
                 address,
@@ -57,18 +111,12 @@ async fn main() -> Result<()> {
                 mecmcp_transport::LimitsConfig::default(),
                 false,
                 tls,
+                shutdown,
+                shutdown_timeout,
             )
             .await
+            .map_err(anyhow::Error::from)
         }
-    }
-}
-
-fn token_store_path(action: &TokenAction) -> &std::path::Path {
-    match action {
-        TokenAction::Add { tokens_file, .. }
-        | TokenAction::List { tokens_file }
-        | TokenAction::Revoke { tokens_file, .. }
-        | TokenAction::Rotate { tokens_file, .. } => tokens_file,
     }
 }
 
@@ -132,11 +180,10 @@ fn load_listener_tls(args: &Cli) -> Result<Option<Arc<rustls::ServerConfig>>> {
     let (Some(cert), Some(key)) = (&args.tls_cert, &args.tls_key) else {
         return Ok(None);
     };
+    // The process-global provider is installed in `main`; do not install again —
+    // `install_default` returns Err when one is already set, and treating that
+    // as fatal would break every TLS start.
     let provider = rustls::crypto::ring::default_provider();
-    provider
-        .clone()
-        .install_default()
-        .map_err(|_| anyhow::anyhow!("failed to install the rustls ring crypto provider"))?;
     mecmcp_transport::load_tls(cert, key, Arc::new(provider))
         .context("loading listener TLS")
         .map(Some)

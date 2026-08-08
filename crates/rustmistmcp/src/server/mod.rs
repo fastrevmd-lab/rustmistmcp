@@ -114,6 +114,12 @@ pub enum MistServerError {
     /// The embedded catalog failed its integrity checks.
     #[error("invalid embedded Mist catalog: {0}")]
     Catalog(#[from] rustmistmcp_core::catalog::CatalogError),
+    /// Failed to load credential from file.
+    #[error("credential load failed: {0}")]
+    CredentialLoad(String),
+    /// Failed to construct HTTP client.
+    #[error("HTTP client construction failed: {0}")]
+    ClientConstruction(String),
 }
 
 /// Read-only Mist MCP handler with an injected catalog-bound client.
@@ -127,13 +133,12 @@ pub struct MistHandler {
     sites: Arc<BTreeMap<String, String>>,
     #[allow(dead_code)]
     catalog: Arc<Catalog>,
-    #[allow(dead_code)]
     client: Arc<dyn MistClient>,
     tool_router: ToolRouter<Self>,
 }
 
 impl MistHandler {
-    /// Construct the no-network default handler used until mecmcp#90 lands.
+    /// Construct the no-network default handler used when no credential is available.
     ///
     /// No credential is read and no socket is opened.
     pub fn blocked(
@@ -142,6 +147,53 @@ impl MistHandler {
         sites: BTreeMap<String, String>,
     ) -> Result<Self, MistServerError> {
         Self::with_client(endpoint, allowed_orgs, sites, Arc::new(BlockedMistClient))
+    }
+    /// The transport this handler will actually use.
+    ///
+    /// Exposed so a test can assert which client the *production* constructor
+    /// built. A test that constructs the handler itself cannot see the wiring
+    /// at all — which is how `from_config` shipped returning the stub.
+    #[must_use]
+    pub fn client(&self) -> &Arc<dyn MistClient> {
+        &self.client
+    }
+
+    /// Construct a production handler with real HTTPS client.
+    ///
+    /// Loads the credential from the config's credential_file and constructs
+    /// an HttpMistClient with mecmcp-http.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors for invalid config, credential load failure, or client
+    /// construction failure.
+    pub fn from_config(
+        config: &rustmistmcp_core::MistConfig,
+        sites: BTreeMap<String, String>,
+    ) -> Result<Self, MistServerError> {
+        // Load credential using mecmcp-secret (enforces mode 0600)
+        let credential = mecmcp_secret::load_from_file(
+            &config.credential_file,
+            mecmcp_secret::SecretLimits::default(),
+        )
+        .map_err(|error| MistServerError::CredentialLoad(error.to_string()))?;
+
+        // Build HttpMistClient
+        let catalog = Arc::new(rustmistmcp_core::Catalog::embedded()?);
+        let http_client = rustmistmcp_core::HttpMistClient::new(
+            &config.endpoint,
+            credential.expose().to_owned(),
+            catalog.clone(),
+            rustmistmcp_core::HttpMistClientConfig::default(),
+        )
+        .map_err(|error| MistServerError::ClientConstruction(error.to_string()))?;
+
+        Self::with_client(
+            &config.endpoint,
+            config.allowed_orgs.clone(),
+            sites,
+            Arc::new(http_client),
+        )
     }
 
     /// Construct a handler around an injected Mist client.

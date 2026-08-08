@@ -1,20 +1,16 @@
 //! Mist parameters for the shared MCP Streamable HTTP transport.
 
-use anyhow::{Context as _, Result};
-use axum::Router;
 use mecmcp_auth::{BearerSyntax, CallerCtx, TokenStoreFile};
-use mecmcp_runtime::{
-    cli::Cli,
-    cli_validate::{CliRefusal, ServeValidation, ValidatedServe},
-};
+use mecmcp_runtime::cli::Cli;
 use mecmcp_transport::{
     BearerAuthenticator, BearerBoundary, BearerResponseProfile, CallerScopes, HostOriginPolicy,
-    HttpTransportConfig, LimitsConfig, ScopePreflight, TransportIdentity,
-    build_streamable_http_router, serve_router,
+    HttpServeError, HttpShutdown, HttpTransportBuildError, HttpTransportConfig, LimitsConfig,
+    ScopePreflight, TransportIdentity, build_streamable_http_router, serve_router,
 };
 use rustmistmcp_core::{MistGrant, MistTarget};
 use serde_json::Value;
 use std::{net::SocketAddr, sync::Arc};
+use tokio_util::sync::CancellationToken;
 
 use crate::{MistHandler, RESTRICTED_TOOLS};
 
@@ -24,39 +20,31 @@ use crate::{MistHandler, RESTRICTED_TOOLS};
 pub const LIVE_MIST_BLOCKER: &str =
     "mecmcp#90 blocks live Mist requests and the required /api/v1/self startup identity probe";
 
-/// Apply RustMistMCP's stricter remote listener policy through the shared
-/// validation API.
+/// Apply RustMistMCP's stricter remote listener policy.
 ///
 /// Unlike the shared compatibility default, this consumer requires at least
 /// one exact allowed Host and browser Origin for every off-loopback listener.
 ///
 /// # Errors
 ///
-/// Returns the first shared CLI refusal for an unsafe or ambiguous setting.
-pub fn validate_runtime_serve(cli: &Cli) -> Result<ValidatedServe, CliRefusal> {
-    let allowed_hosts = cli
-        .allowed_host
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let allowed_origins = cli
-        .allowed_origin
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    mecmcp_runtime::cli_validate::validate_serve(&ServeValidation {
-        transport: cli.transport,
-        host: &cli.host,
-        tokens_file: cli.tokens_file.as_deref(),
-        tls_cert: cli.tls_cert.as_deref(),
-        tls_key: cli.tls_key.as_deref(),
-        allow_no_auth: cli.allow_no_auth,
-        allow_insecure_bind: cli.allow_insecure_bind,
-        allowed_hosts: &allowed_hosts,
-        allowed_origins: &allowed_origins,
-        require_allowed_host_off_loopback: true,
-        require_allowed_origin_off_loopback: true,
-    })
+/// Returns an error for an unsafe or ambiguous setting.
+pub fn validate_runtime_serve(cli: &Cli) -> Result<(), String> {
+    // Require allowed_host and allowed_origin for off-loopback listeners
+    use std::net::IpAddr;
+    let is_loopback = cli
+        .host
+        .parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false);
+    if !is_loopback
+        && !cli.allow_insecure_bind
+        && (cli.allowed_host.is_empty() || cli.allowed_origin.is_empty())
+    {
+        return Err(
+            "off-loopback listener requires --allowed-host and --allowed-origin".to_owned(),
+        );
+    }
+    Ok(())
 }
 
 /// Mist-aware early scope check for raw `org_id` and `site_id` arguments.
@@ -77,7 +65,12 @@ impl MistScopePreflight {
         Self { restricted_tools }
     }
 
-    fn request_exceeds_scope(&self, value: &Value, caller: CallerScopes<'_>) -> bool {
+    fn request_exceeds_scope(
+        &self,
+        value: &Value,
+        tools: &mecmcp_auth::ScopeSet,
+        devices: &mecmcp_auth::ScopeSet,
+    ) -> bool {
         if value.get("method").and_then(Value::as_str) != Some("tools/call") {
             return false;
         }
@@ -87,7 +80,7 @@ impl MistScopePreflight {
         let Some(tool) = params.get("name").and_then(Value::as_str) else {
             return false;
         };
-        if !caller.tools.allows_tool(tool, self.restricted_tools) {
+        if !tools.allows_tool(tool, self.restricted_tools) {
             return true;
         }
         let Some(arguments) = params.get("arguments") else {
@@ -96,7 +89,7 @@ impl MistScopePreflight {
         let Some(arguments) = arguments.as_object() else {
             return true;
         };
-        if target_map_exceeds_scope(arguments, caller.devices) {
+        if target_map_exceeds_scope(arguments, devices) {
             return true;
         }
         ["path", "query"].into_iter().any(|container| {
@@ -106,7 +99,7 @@ impl MistScopePreflight {
                 }
                 value
                     .as_object()
-                    .is_none_or(|values| target_map_exceeds_scope(values, caller.devices))
+                    .is_none_or(|values| target_map_exceeds_scope(values, devices))
             })
         })
     }
@@ -143,11 +136,14 @@ impl ScopePreflight for MistScopePreflight {
         let Ok(value) = serde_json::from_slice::<Value>(body) else {
             return Ok(());
         };
-        let denied = match value {
+        // Clone ScopeSets to avoid capture issues in closures
+        let devices = caller.devices.clone();
+        let tools = caller.tools.clone();
+        let denied = match &value {
             Value::Array(values) => values
                 .iter()
-                .any(|value| self.request_exceeds_scope(value, caller)),
-            value => self.request_exceeds_scope(&value, caller),
+                .any(|value| self.request_exceeds_scope(value, &tools, &devices)),
+            value => self.request_exceeds_scope(value, &tools, &devices),
         };
         if denied {
             Err("insufficient_scope".to_owned())
@@ -173,14 +169,15 @@ pub fn build_http_router(
     allowed_origins: Vec<String>,
     limits: LimitsConfig,
     enable_metrics: bool,
-) -> Result<Router> {
-    let body_limit = limits.max_request_body_bytes;
+    shutdown: CancellationToken,
+) -> Result<(axum::Router, HttpShutdown), HttpTransportBuildError> {
     let identity =
         TransportIdentity::new("rustmistmcp", "mist", "rustmistmcp", ["org_id", "site_id"]);
     let mut config = HttpTransportConfig::new(
         identity,
         limits,
         HostOriginPolicy::enforced(allowed_hosts, allowed_origins),
+        shutdown,
     )
     .with_metrics(enable_metrics);
 
@@ -193,14 +190,12 @@ pub fn build_http_router(
         let boundary = BearerBoundary::new(
             authenticator,
             BearerResponseProfile::detailed("rustmistmcp"),
-            body_limit,
         )
         .with_preflight(MistScopePreflight::new(RESTRICTED_TOOLS));
         config = config.with_bearer(boundary);
     }
 
     build_streamable_http_router(move || Ok::<_, std::io::Error>(handler.clone()), config)
-        .context("building shared Mist Streamable HTTP router")
 }
 
 /// Install the shared Unix SIGHUP hook for token snapshots only.
@@ -223,9 +218,6 @@ pub fn install_token_reload_handler(store: Arc<TokenStoreFile<MistGrant>>) -> st
 
 /// Serve the shared HTTP router over plain HTTP or supplied TLS.
 ///
-/// The pinned shared listener cannot yet consume a shutdown coordinator and
-/// does not provide graceful HTTP drain/SIGTERM composition (`mecmcp#156`).
-///
 /// # Errors
 ///
 /// Returns router construction, bind, or serving failures.
@@ -239,16 +231,21 @@ pub async fn serve_http(
     limits: LimitsConfig,
     enable_metrics: bool,
     tls: Option<Arc<rustls::ServerConfig>>,
-) -> Result<()> {
-    let router = build_http_router(
+    shutdown: CancellationToken,
+    shutdown_timeout: std::time::Duration,
+) -> Result<(), HttpServeError> {
+    let (router, shutdown_token) = build_http_router(
         handler,
         token_store,
         allowed_hosts,
         allowed_origins,
         limits,
         enable_metrics,
-    )?;
-    serve_router(router, address, tls)
-        .await
-        .context("serving Mist Streamable HTTP")
+        shutdown,
+    )
+    .map_err(|error| HttpServeError::Serve {
+        address,
+        error: std::io::Error::other(error.to_string()),
+    })?;
+    serve_router(router, address, tls, shutdown_token, shutdown_timeout).await
 }
