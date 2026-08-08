@@ -1,0 +1,2 @@
+d /etc/rustmistmcp 0750 root rustmistmcp -
+d /var/lib/rustmistmcp 0700 rustmistmcp rustmistmcp -

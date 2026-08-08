@@ -1,0 +1,2189 @@
+//! Curated read-only Mist MCP handler.
+
+use std::{collections::BTreeMap, sync::Arc};
+
+use mecmcp_auth::CallerCtx;
+use mecmcp_server::{
+    ResultFormat, ResultLimits, audit_scope, authorize_call, caller_from_extensions,
+    filter_tools_for_scope, tool_result,
+};
+use rmcp::{
+    RoleServer, ServerHandler,
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::{
+        CallToolResult, Implementation, ListToolsResult, PaginatedRequestParams,
+        ServerCapabilities, ServerInfo,
+    },
+    service::RequestContext,
+    tool, tool_handler, tool_router,
+};
+use rustmistmcp_core::{
+    BlockedMistClient, Catalog, MAX_ENCODED_CURSOR_BYTES, MistClient, MistError, MistGrant,
+    MistRequest, MistResponseBody, MistTarget,
+    catalog::{MistCapability, MistOperation, TargetSelector},
+    validate_mist_endpoint,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use url::Url;
+
+/// Exact MCP tool registry used for token validation and drift tests.
+pub const KNOWN_TOOLS: &[&str] = &[
+    "get_mist_device",
+    "get_mist_device_stats",
+    "get_mist_insight",
+    "get_mist_operation_schema",
+    "get_mist_org",
+    "get_mist_rrm",
+    "get_mist_self",
+    "get_mist_site",
+    "get_mist_sle",
+    "invoke_mist_privileged_read",
+    "invoke_mist_read",
+    "list_mist_orgs",
+    "list_mist_rogues",
+    "list_mist_sites",
+    "list_mist_sle_metrics",
+    "list_mist_upgrades",
+    "list_mist_wlans",
+    "search_mist_alarms",
+    "search_mist_audit_logs",
+    "search_mist_clients",
+    "search_mist_events",
+    "search_mist_inventory",
+    "search_mist_operations",
+    "troubleshoot_mist",
+];
+
+/// Privileged reads excluded from wildcard tool scope.
+pub const RESTRICTED_TOOLS: &[&str] = &[
+    "get_mist_device",
+    "get_mist_self",
+    "invoke_mist_privileged_read",
+    "list_mist_wlans",
+    "search_mist_audit_logs",
+];
+
+const RESULT_LIMITS: ResultLimits = ResultLimits {
+    max_text_bytes: 512 * 1024,
+    max_json_bytes: 512 * 1024,
+};
+
+fn audited_tool_result<T, E>(
+    audit: &mut mecmcp_audit::AuditScope,
+    result: Result<T, E>,
+) -> CallToolResult
+where
+    T: Serialize,
+    E: std::fmt::Display,
+{
+    let domain_error = result.as_ref().err().map(ToString::to_string);
+    let output = tool_result(result, ResultFormat::PrettyJson, RESULT_LIMITS);
+    if output.is_error == Some(true) {
+        audit.fail(domain_error.unwrap_or_else(|| {
+            "successful domain result failed bounded MCP result conversion".to_owned()
+        }));
+    } else {
+        audit.succeed();
+    }
+    output
+}
+
+type PathValues = BTreeMap<String, String>;
+type QueryValues = BTreeMap<String, serde_json::Value>;
+type NamedMaps = (PathValues, QueryValues);
+
+struct CatalogRead {
+    tool: &'static str,
+    operation_id: String,
+    path: PathValues,
+    query: QueryValues,
+    cursor: Option<rustmistmcp_core::MistCursor>,
+    capability: MistCapability,
+}
+
+/// Failure to construct the immutable Mist handler.
+#[derive(Debug, thiserror::Error)]
+pub enum MistServerError {
+    /// The configured endpoint is not an HTTPS origin.
+    #[error("invalid Mist handler endpoint")]
+    InvalidEndpoint,
+    /// An allowlisted organization is not a canonical UUID.
+    #[error("invalid Mist organization allowlist")]
+    InvalidOrganization,
+    /// The embedded catalog failed its integrity checks.
+    #[error("invalid embedded Mist catalog: {0}")]
+    Catalog(#[from] rustmistmcp_core::catalog::CatalogError),
+}
+
+/// Read-only Mist MCP handler with an injected catalog-bound client.
+#[derive(Clone)]
+pub struct MistHandler {
+    #[allow(dead_code)]
+    origin: Url,
+    #[allow(dead_code)]
+    allowed_orgs: Arc<[String]>,
+    /// Immutable site inventory discovered during startup, keyed by site UUID.
+    sites: Arc<BTreeMap<String, String>>,
+    #[allow(dead_code)]
+    catalog: Arc<Catalog>,
+    #[allow(dead_code)]
+    client: Arc<dyn MistClient>,
+    tool_router: ToolRouter<Self>,
+}
+
+impl MistHandler {
+    /// Construct the no-network default handler used until mecmcp#90 lands.
+    ///
+    /// No credential is read and no socket is opened.
+    pub fn blocked(
+        endpoint: &str,
+        allowed_orgs: Vec<String>,
+        sites: BTreeMap<String, String>,
+    ) -> Result<Self, MistServerError> {
+        Self::with_client(endpoint, allowed_orgs, sites, Arc::new(BlockedMistClient))
+    }
+
+    /// Construct a handler around an injected Mist client.
+    pub fn with_client(
+        endpoint: &str,
+        allowed_orgs: Vec<String>,
+        sites: BTreeMap<String, String>,
+        client: Arc<dyn MistClient>,
+    ) -> Result<Self, MistServerError> {
+        let origin =
+            validate_mist_endpoint(endpoint).map_err(|_| MistServerError::InvalidEndpoint)?;
+        if allowed_orgs.is_empty()
+            || allowed_orgs.len() > 256
+            || allowed_orgs
+                .iter()
+                .any(|org_id| MistTarget::org(org_id).is_err())
+            || allowed_orgs
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != allowed_orgs.len()
+        {
+            return Err(MistServerError::InvalidOrganization);
+        }
+        if sites.len() > 4096
+            || sites.iter().any(|(site_id, org_id)| {
+                MistTarget::site(site_id).is_err()
+                    || MistTarget::org(org_id).is_err()
+                    || !allowed_orgs.iter().any(|allowed| allowed == org_id)
+            })
+        {
+            return Err(MistServerError::InvalidOrganization);
+        }
+        Ok(Self {
+            origin,
+            allowed_orgs: allowed_orgs.into(),
+            sites: Arc::new(sites),
+            catalog: Arc::new(Catalog::embedded()?),
+            client,
+            tool_router: Self::mist_tool_router(),
+        })
+    }
+
+    async fn dispatch_catalogued_read(
+        &self,
+        read: CatalogRead,
+        extensions: &rmcp::model::Extensions,
+    ) -> CallToolResult {
+        let CatalogRead {
+            tool,
+            operation_id,
+            path,
+            query,
+            cursor,
+            capability: required_capability,
+        } = read;
+        let caller = caller_from_extensions::<MistGrant>(extensions);
+        let operation = match self.catalog.operation(&operation_id) {
+            Some(operation) => operation,
+            None => {
+                let mut audit = audit_scope(caller, tool, "read", Vec::new());
+                let error = MistCallError::UnknownOperation;
+                audit.fail(&error);
+                return tool_result::<ReadEnvelope, _>(
+                    Err(error),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                );
+            }
+        };
+        let target = match target_for(operation.target_selectors.as_slice(), &path) {
+            Ok(target) => target,
+            Err(error) => {
+                let mut audit = audit_scope(caller, tool, "read", Vec::new());
+                audit.deny("target");
+                return tool_result::<ReadEnvelope, _>(
+                    Err(error),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                );
+            }
+        };
+        let targets = target
+            .as_ref()
+            .map(|target| vec![target.subject()])
+            .unwrap_or_default();
+        let mut audit = audit_scope(caller, tool, "read", targets);
+        audit.meta("operation_id", operation_id.clone());
+
+        if operation.method != "GET" || operation.capability != required_capability {
+            let error = MistCallError::WrongCapability;
+            audit.deny("capability");
+            return tool_result::<ReadEnvelope, _>(
+                Err(error),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            );
+        }
+        if caller.is_none() && operation.capability == MistCapability::PrivilegedRead {
+            let error = MistCallError::Authorization(
+                "privileged Mist reads require authenticated caller context".to_owned(),
+            );
+            audit.deny("caller");
+            return tool_result::<ReadEnvelope, _>(
+                Err(error),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            );
+        }
+        if let Err(error) = authorize_call(
+            caller,
+            tool,
+            target.as_ref().map(|target| target.subject()).as_deref(),
+            RESTRICTED_TOOLS,
+        ) {
+            audit.deny("scope");
+            return tool_result::<ReadEnvelope, _>(
+                Err(MistCallError::Authorization(error.to_string())),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            );
+        }
+        if let Err(error) =
+            authorize_grant(caller, &operation_id, operation.capability, target.as_ref())
+        {
+            audit.deny("grant");
+            return tool_result::<ReadEnvelope, _>(
+                Err(error),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            );
+        }
+        if let Some(target) = &target {
+            let configured = if target.to_string().starts_with("org/") {
+                self.allowed_orgs.iter().any(|org| org == target.id())
+            } else if target.to_string().starts_with("site/") {
+                self.sites
+                    .get(target.id())
+                    .is_some_and(|org_id| self.allowed_orgs.iter().any(|org| org == org_id))
+            } else {
+                false
+            };
+            if !configured {
+                let error = MistCallError::OrganizationNotConfigured;
+                audit.deny("profile");
+                return tool_result::<ReadEnvelope, _>(
+                    Err(error),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                );
+            }
+        }
+        if let Err(error) = validate_page_limit(&query) {
+            audit.fail(&error);
+            return tool_result::<ReadEnvelope, _>(
+                Err(error),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            );
+        }
+
+        let request = MistRequest {
+            operation_id,
+            path,
+            query,
+            json: None,
+            cursor,
+        };
+        let request = match request.validate(&self.catalog, &self.origin) {
+            Ok(request) => request,
+            Err(error) => {
+                audit.fail(&error);
+                return tool_result::<ReadEnvelope, _>(
+                    Err(MistCallError::Mist(error)),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                );
+            }
+        };
+        let expected_operation_id = request.operation_id.clone();
+        let request_path = request.path.clone();
+        let request_query = request.query.clone();
+        let response = match self.client.execute(request).await {
+            Ok(response) => response,
+            Err(error) => {
+                audit.fail(&error);
+                return tool_result::<ReadEnvelope, _>(
+                    Err(MistCallError::Mist(error)),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                );
+            }
+        };
+        if response.operation_id != expected_operation_id {
+            let error = MistError::InvalidResponse {
+                operation_id: expected_operation_id,
+                reason: "response operation does not match request operation".to_owned(),
+            };
+            audit.fail(&error);
+            return tool_result::<ReadEnvelope, _>(
+                Err(MistCallError::Mist(error)),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            );
+        }
+        let mut response = match response.validate(&self.catalog, &self.origin) {
+            Ok(response) => response,
+            Err(error) => {
+                audit.fail(&error);
+                return tool_result::<ReadEnvelope, _>(
+                    Err(MistCallError::Mist(error)),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                );
+            }
+        };
+        if !(200..300).contains(&response.status) {
+            let error = if response.status == 429 {
+                MistError::RateLimited {
+                    retry_after_secs: None,
+                }
+            } else {
+                MistError::Service(format!("Mist API returned HTTP {}", response.status))
+            };
+            audit.fail(&error);
+            return tool_result::<ReadEnvelope, _>(
+                Err(MistCallError::Mist(error)),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            );
+        }
+        if let Some(cursor) = response.cursor.take() {
+            response.cursor =
+                match cursor.with_request_context(request_path, request_query, target.clone()) {
+                    Ok(cursor) => Some(cursor),
+                    Err(error) => {
+                        audit.fail(&error);
+                        return tool_result::<ReadEnvelope, _>(
+                            Err(MistCallError::Mist(error)),
+                            ResultFormat::PrettyJson,
+                            RESULT_LIMITS,
+                        );
+                    }
+                };
+        }
+        let envelope = ReadEnvelope::from_response(response, target.as_ref());
+        audited_tool_result(&mut audit, Ok::<_, MistCallError>(envelope))
+    }
+
+    async fn dispatch_named<T: Serialize>(
+        &self,
+        tool: &'static str,
+        operation_id: &'static str,
+        args: T,
+        path_names: &[&str],
+        capability: MistCapability,
+        extensions: &rmcp::model::Extensions,
+    ) -> CallToolResult {
+        let (path, query) = match named_maps(args, path_names) {
+            Ok(values) => values,
+            Err(error) => {
+                return tool_result::<ReadEnvelope, _>(
+                    Err(error),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                );
+            }
+        };
+        self.dispatch_catalogued_read(
+            CatalogRead {
+                tool,
+                operation_id: operation_id.to_owned(),
+                path,
+                query,
+                cursor: None,
+                capability,
+            },
+            extensions,
+        )
+        .await
+    }
+
+    async fn invoke_dispatcher(
+        &self,
+        tool: &'static str,
+        args: InvokeReadArgs,
+        capability: MistCapability,
+        extensions: &rmcp::model::Extensions,
+    ) -> CallToolResult {
+        if args.cursor.is_some() && (args.path.is_some() || args.query.is_some()) {
+            let error = MistCallError::Mist(MistError::InvalidCursor(
+                "cursor cannot be combined with path or query".to_owned(),
+            ));
+            let mut audit = audit_scope(
+                caller_from_extensions::<MistGrant>(extensions),
+                tool,
+                "read",
+                Vec::new(),
+            );
+            audit.fail(&error);
+            return tool_result::<ReadEnvelope, _>(
+                Err(error),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            );
+        }
+        let (path, query, cursor) = match args.cursor {
+            Some(encoded) => {
+                let malformed = encoded.is_empty()
+                    || encoded.len() > MAX_ENCODED_CURSOR_BYTES
+                    || encoded.len() % 2 != 0
+                    || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit());
+                let decoded = if malformed {
+                    None
+                } else {
+                    hex::decode(encoded)
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                };
+                let Some(cursor): Option<rustmistmcp_core::MistCursor> = decoded else {
+                    let error = MistCallError::Mist(MistError::InvalidCursor(
+                        "opaque cursor is malformed".to_owned(),
+                    ));
+                    let mut audit = audit_scope(
+                        caller_from_extensions::<MistGrant>(extensions),
+                        tool,
+                        "read",
+                        Vec::new(),
+                    );
+                    audit.fail(&error);
+                    return tool_result::<ReadEnvelope, _>(
+                        Err(error),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    );
+                };
+                let Some((path, query, stored_target)) = cursor.request_context() else {
+                    let error = MistCallError::Mist(MistError::InvalidCursor(
+                        "opaque cursor has no request context".to_owned(),
+                    ));
+                    let mut audit = audit_scope(
+                        caller_from_extensions::<MistGrant>(extensions),
+                        tool,
+                        "read",
+                        Vec::new(),
+                    );
+                    audit.fail(&error);
+                    return tool_result::<ReadEnvelope, _>(
+                        Err(error),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    );
+                };
+                let path = path.clone();
+                let query = query.clone();
+                let operation = self.catalog.operation(&args.operation_id);
+                let derived_target = operation
+                    .and_then(|operation| {
+                        target_for(operation.target_selectors.as_slice(), &path).ok()
+                    })
+                    .flatten();
+                if derived_target.as_ref() != stored_target {
+                    let error = MistCallError::Mist(MistError::InvalidCursor(
+                        "cursor target does not match its request context".to_owned(),
+                    ));
+                    let mut audit = audit_scope(
+                        caller_from_extensions::<MistGrant>(extensions),
+                        tool,
+                        "read",
+                        Vec::new(),
+                    );
+                    audit.fail(&error);
+                    return tool_result::<ReadEnvelope, _>(
+                        Err(error),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    );
+                }
+                (path, query, Some(cursor))
+            }
+            None => (
+                args.path.unwrap_or_default(),
+                args.query.unwrap_or_default(),
+                None,
+            ),
+        };
+        self.dispatch_catalogued_read(
+            CatalogRead {
+                tool,
+                operation_id: args.operation_id,
+                path,
+                query,
+                cursor,
+                capability,
+            },
+            extensions,
+        )
+        .await
+    }
+
+    fn operation_visible(
+        &self,
+        caller: Option<&CallerCtx<MistGrant>>,
+        operation: &MistOperation,
+    ) -> bool {
+        let dispatcher = match operation.capability {
+            MistCapability::OrdinaryRead => "invoke_mist_read",
+            MistCapability::PrivilegedRead => "invoke_mist_privileged_read",
+            _ => return false,
+        };
+        if operation.target_selectors.contains(&TargetSelector::Msp) {
+            return false;
+        }
+        let Some(caller) = caller else {
+            return operation.capability == MistCapability::OrdinaryRead;
+        };
+        if !caller.tools.allows_tool(dispatcher, RESTRICTED_TOOLS) {
+            return false;
+        }
+        let grant = caller.grant.as_ref();
+        if operation.capability == MistCapability::PrivilegedRead && grant.is_none() {
+            return false;
+        }
+        if grant.is_some_and(|grant| {
+            !grant.allows_operation(&operation.operation_id)
+                || !grant.actions.contains(&operation.capability)
+        }) {
+            return false;
+        }
+        operation
+            .target_selectors
+            .iter()
+            .all(|selector| match selector {
+                TargetSelector::None => true,
+                TargetSelector::Org => self.allowed_orgs.iter().any(|org_id| {
+                    let target = MistTarget::org(org_id).expect("validated organization");
+                    caller.devices.allows(&target.subject())
+                        && grant.is_none_or(|grant| grant.allows_target(&target))
+                }),
+                TargetSelector::Site => self.sites.iter().any(|(site_id, org_id)| {
+                    self.allowed_orgs.iter().any(|allowed| allowed == org_id)
+                        && MistTarget::site(site_id).is_ok_and(|target| {
+                            caller.devices.allows(&target.subject())
+                                && grant.is_none_or(|grant| grant.allows_target(&target))
+                        })
+                }),
+                TargetSelector::Msp => false,
+            })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum MistCallError {
+    #[error("unknown or unauthorized Mist operation")]
+    UnknownOperation,
+    #[error("operation is not permitted by this read dispatcher")]
+    WrongCapability,
+    #[error("{0}")]
+    Authorization(String),
+    #[error("the authenticated caller lacks the exact Mist operation/action/target grant")]
+    Grant,
+    #[error("MSP targets are not supported by the v1 authorization model")]
+    MspTarget,
+    #[error("the catalogued target is missing or malformed")]
+    InvalidTarget,
+    #[error("the organization is not configured or authorized")]
+    OrganizationNotConfigured,
+    #[error("query limit must be an integer from 1 through 100")]
+    InvalidLimit,
+    #[error("catalog search requires a 1-128 byte query and a result limit from 1 through 50")]
+    InvalidSearch,
+    #[error(transparent)]
+    Mist(#[from] MistError),
+}
+
+#[derive(serde::Serialize)]
+struct ReadEnvelope {
+    operation_id: String,
+    target: Option<String>,
+    status: u16,
+    content_type: &'static str,
+    data: serde_json::Value,
+    next_cursor: Option<String>,
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+struct LocalOrgView {
+    source: &'static str,
+    organizations: Vec<LocalOrg>,
+}
+
+#[derive(Serialize)]
+struct LocalOrg {
+    id: String,
+    target: String,
+}
+
+impl ReadEnvelope {
+    fn from_response(
+        response: rustmistmcp_core::MistResponse,
+        target: Option<&MistTarget>,
+    ) -> Self {
+        let (content_type, data) = match response.body {
+            MistResponseBody::Json(value) => ("application/json", value),
+            MistResponseBody::Text(value) => ("text/plain; charset=utf-8", value.into()),
+            MistResponseBody::Binary(value) => (
+                "application/octet-stream",
+                serde_json::Value::Array(value.into_iter().map(serde_json::Value::from).collect()),
+            ),
+            MistResponseBody::Empty => ("application/octet-stream", serde_json::Value::Null),
+        };
+        let next_cursor = response
+            .cursor
+            .and_then(|cursor| serde_json::to_vec(&cursor).ok().map(hex::encode));
+        Self {
+            operation_id: response.operation_id,
+            target: target.map(MistTarget::subject),
+            status: response.status,
+            content_type,
+            data,
+            next_cursor,
+            truncated: false,
+        }
+    }
+}
+
+fn target_for(
+    selectors: &[TargetSelector],
+    path: &BTreeMap<String, String>,
+) -> Result<Option<MistTarget>, MistCallError> {
+    match selectors {
+        [TargetSelector::None] => Ok(None),
+        [TargetSelector::Org] => path
+            .get("org_id")
+            .ok_or(MistCallError::InvalidTarget)
+            .and_then(|id| MistTarget::org(id).map_err(|_| MistCallError::InvalidTarget))
+            .map(Some),
+        [TargetSelector::Site] => path
+            .get("site_id")
+            .ok_or(MistCallError::InvalidTarget)
+            .and_then(|id| MistTarget::site(id).map_err(|_| MistCallError::InvalidTarget))
+            .map(Some),
+        selectors if selectors.contains(&TargetSelector::Msp) => Err(MistCallError::MspTarget),
+        _ => Err(MistCallError::InvalidTarget),
+    }
+}
+
+fn authorize_grant(
+    caller: Option<&CallerCtx<MistGrant>>,
+    operation_id: &str,
+    action: MistCapability,
+    target: Option<&MistTarget>,
+) -> Result<(), MistCallError> {
+    let Some(caller) = caller else {
+        return if action == MistCapability::OrdinaryRead {
+            Ok(())
+        } else {
+            Err(MistCallError::Grant)
+        };
+    };
+    let Some(grant) = &caller.grant else {
+        return if action == MistCapability::OrdinaryRead {
+            Ok(())
+        } else {
+            Err(MistCallError::Grant)
+        };
+    };
+    if !grant.allows_operation(operation_id)
+        || !grant.actions.contains(&action)
+        || target.is_some_and(|target| !grant.allows_target(target))
+    {
+        return Err(MistCallError::Grant);
+    }
+    Ok(())
+}
+
+fn validate_page_limit(query: &BTreeMap<String, serde_json::Value>) -> Result<(), MistCallError> {
+    let Some(limit) = query.get("limit") else {
+        return Ok(());
+    };
+    if limit
+        .as_u64()
+        .is_some_and(|limit| (1..=100).contains(&limit))
+    {
+        Ok(())
+    } else {
+        Err(MistCallError::InvalidLimit)
+    }
+}
+
+fn named_maps<T: Serialize>(args: T, path_names: &[&str]) -> Result<NamedMaps, MistCallError> {
+    let object = serde_json::to_value(args)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .ok_or(MistCallError::InvalidTarget)?;
+    let mut path = BTreeMap::new();
+    let mut query = BTreeMap::new();
+    for (name, value) in object {
+        if value.is_null() {
+            continue;
+        }
+        if path_names.contains(&name.as_str()) {
+            let value = value.as_str().ok_or(MistCallError::InvalidTarget)?;
+            path.insert(name, value.to_owned());
+        } else {
+            query.insert(name, value);
+        }
+    }
+    Ok((path, query))
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyArgs {}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GetOrgArgs {
+    /// Organization UUID.
+    org_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct InvokeReadArgs {
+    /// Exact catalog operation ID.
+    operation_id: String,
+    /// Catalogued path parameters.
+    #[serde(default)]
+    path: Option<BTreeMap<String, String>>,
+    /// Catalogued query parameters.
+    #[serde(default)]
+    query: Option<BTreeMap<String, serde_json::Value>>,
+    /// Opaque operation-bound continuation.
+    #[serde(default)]
+    #[schemars(length(min = 2, max = 262_144))]
+    cursor: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum SearchCapability {
+    OrdinaryRead,
+    PrivilegedRead,
+}
+
+impl From<SearchCapability> for MistCapability {
+    fn from(value: SearchCapability) -> Self {
+        match value {
+            SearchCapability::OrdinaryRead => Self::OrdinaryRead,
+            SearchCapability::PrivilegedRead => Self::PrivilegedRead,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum SearchTarget {
+    None,
+    Org,
+    Site,
+    Msp,
+}
+
+impl From<SearchTarget> for TargetSelector {
+    fn from(value: SearchTarget) -> Self {
+        match value {
+            SearchTarget::None => Self::None,
+            SearchTarget::Org => Self::Org,
+            SearchTarget::Site => Self::Site,
+            SearchTarget::Msp => Self::Msp,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SearchOperationsArgs {
+    #[schemars(length(min = 1, max = 128))]
+    query: String,
+    capability: Option<SearchCapability>,
+    target: Option<SearchTarget>,
+    #[schemars(range(min = 1, max = 50))]
+    limit: Option<u8>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct OperationSchemaArgs {
+    operation_id: String,
+}
+
+#[derive(Serialize)]
+struct OperationSummary<'a> {
+    operation_id: &'a str,
+    summary: &'a str,
+    method: &'a str,
+    path: &'a str,
+    capability: MistCapability,
+    target_selectors: &'a [TargetSelector],
+    pagination: rustmistmcp_core::PaginationMode,
+}
+
+macro_rules! read_args {
+    ($name:ident { $($(#[$meta:meta])* $field:ident : $ty:ty),* $(,)? }) => {
+        #[derive(Debug, Deserialize, JsonSchema, Serialize)]
+        #[serde(deny_unknown_fields)]
+        struct $name {
+            $(
+                $(#[$meta])*
+                $field: $ty,
+            )*
+        }
+    };
+}
+
+read_args!(OrgPageArgs {
+    org_id: String,
+    #[schemars(range(min = 1, max = 100))]
+    limit: Option<u32>,
+    #[schemars(range(min = 1))]
+    page: Option<u32>,
+});
+read_args!(SiteArgs { site_id: String });
+read_args!(InventoryArgs {
+    org_id: String, #[schemars(range(min = 1, max = 100))] limit: Option<u32>, mac: Option<String>, magic: Option<String>,
+    master: Option<String>, model: Option<String>, name: Option<String>,
+    search_after: Option<String>, serial: Option<String>, site_id: Option<String>,
+    sku: Option<String>, sort: Option<String>, status: Option<String>, text: Option<String>,
+    #[serde(rename = "type")] r#type: Option<String>, version: Option<String>,
+});
+read_args!(SiteDeviceArgs {
+    site_id: String,
+    device_id: String
+});
+read_args!(DeviceStatsArgs {
+    site_id: String, device_id: String, fields: Option<String>,
+});
+read_args!(SitePageArgs {
+    site_id: String,
+    #[schemars(range(min = 1, max = 100))] limit: Option<u32>,
+    #[schemars(range(min = 1))] page: Option<u32>,
+});
+read_args!(ClientSearchArgs {
+    site_id: String, ap: Option<String>, band: Option<String>, device: Option<String>,
+    duration: Option<String>, end: Option<String>, hostname: Option<String>, ip: Option<String>,
+    #[schemars(range(min = 1, max = 100))] limit: Option<u32>, mac: Option<String>, model: Option<String>, os: Option<String>,
+    psk_id: Option<String>, psk_name: Option<String>, search_after: Option<String>,
+    sort: Option<String>, ssid: Option<String>, start: Option<String>, text: Option<String>,
+    username: Option<String>, vlan: Option<String>,
+});
+read_args!(EventSearchArgs {
+    site_id: String, duration: Option<String>, end: Option<String>,
+    #[schemars(range(min = 1, max = 100))] limit: Option<u32>,
+    search_after: Option<String>, sort: Option<String>, start: Option<String>,
+    #[serde(rename = "type")] r#type: Option<String>,
+});
+read_args!(AlarmSearchArgs {
+    site_id: String, ack_admin_name: Option<String>, acked: Option<bool>,
+    duration: Option<String>, end: Option<String>, group: Option<String>,
+    #[schemars(range(min = 1, max = 100))] limit: Option<u32>,
+    search_after: Option<String>, severity: Option<String>, sort: Option<String>,
+    start: Option<String>, #[serde(rename = "type")] r#type: Option<String>,
+});
+read_args!(AuditSearchArgs {
+    org_id: String, admin_name: Option<String>, duration: Option<String>, end: Option<String>,
+    #[schemars(range(min = 1, max = 100))] limit: Option<u32>, message: Option<String>,
+    #[schemars(range(min = 1))] page: Option<u32>, site_id: Option<String>,
+    sort: Option<String>, start: Option<String>,
+});
+read_args!(SleMetricsArgs {
+    site_id: String,
+    scope: String,
+    scope_id: String,
+});
+read_args!(SleArgs {
+    site_id: String, scope: String, scope_id: String, metric: String,
+    duration: Option<String>, end: Option<String>, start: Option<String>,
+});
+read_args!(InsightArgs {
+    site_id: String, metrics: String, duration: Option<String>, end: Option<String>,
+    interval: Option<String>, #[schemars(range(min = 1, max = 100))] limit: Option<u32>,
+    #[schemars(range(min = 1))] page: Option<u32>, start: Option<String>,
+});
+read_args!(TroubleshootArgs {
+    site_id: String, ap: Option<String>, app: Option<String>, duration: Option<String>,
+    end: Option<String>, #[schemars(range(min = 1, max = 100))] limit: Option<u32>,
+    mac: Option<String>, meeting_id: Option<String>,
+    #[schemars(range(min = 1))] page: Option<u32>, start: Option<String>, wired: Option<bool>,
+});
+read_args!(RogueArgs {
+    site_id: String, duration: Option<String>, end: Option<String>, interval: Option<String>,
+    #[schemars(range(min = 1, max = 100))] limit: Option<u32>, start: Option<String>,
+    #[serde(rename = "type")] r#type: Option<String>,
+});
+read_args!(UpgradeArgs { site_id: String, status: Option<String> });
+
+#[tool_router(router = mist_tool_router, vis = "pub(crate)")]
+impl MistHandler {
+    #[tool(name = "get_mist_device", description = "Get one site device.")]
+    async fn get_mist_device(
+        &self,
+        Parameters(args): Parameters<SiteDeviceArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "get_mist_device",
+                "getSiteDevice",
+                args,
+                &["site_id", "device_id"],
+                MistCapability::PrivilegedRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "get_mist_device_stats",
+        description = "Get one site device's statistics."
+    )]
+    async fn get_mist_device_stats(
+        &self,
+        Parameters(args): Parameters<DeviceStatsArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "get_mist_device_stats",
+                "getSiteDeviceStats",
+                args,
+                &["site_id", "device_id"],
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(name = "get_mist_insight", description = "Get site insight metrics.")]
+    async fn get_mist_insight(
+        &self,
+        Parameters(args): Parameters<InsightArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "get_mist_insight",
+                "getSiteInsightMetrics",
+                args,
+                &["site_id"],
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "get_mist_operation_schema",
+        description = "Get locally catalogued Mist operation metadata."
+    )]
+    async fn get_mist_operation_schema(
+        &self,
+        Parameters(args): Parameters<OperationSchemaArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let caller = caller_from_extensions::<MistGrant>(&extensions);
+        let mut audit = audit_scope(
+            caller,
+            "get_mist_operation_schema",
+            "read_local",
+            Vec::new(),
+        );
+        if let Err(error) =
+            authorize_call(caller, "get_mist_operation_schema", None, RESTRICTED_TOOLS)
+        {
+            audit.deny("scope");
+            return Ok(tool_result::<&MistOperation, _>(
+                Err(MistCallError::Authorization(error.to_string())),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+        let operation = self
+            .catalog
+            .operation(&args.operation_id)
+            .filter(|operation| self.operation_visible(caller, operation));
+        match operation {
+            Some(operation) => Ok(audited_tool_result(
+                &mut audit,
+                Ok::<_, MistCallError>(operation),
+            )),
+            None => {
+                audit.deny("visibility");
+                Ok(tool_result::<&MistOperation, _>(
+                    Err(MistCallError::UnknownOperation),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ))
+            }
+        }
+    }
+    #[tool(name = "get_mist_org", description = "Get one Mist organization.")]
+    async fn get_mist_org(
+        &self,
+        Parameters(args): Parameters<GetOrgArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_catalogued_read(
+                CatalogRead {
+                    tool: "get_mist_org",
+                    operation_id: "getOrg".to_owned(),
+                    path: BTreeMap::from([("org_id".to_owned(), args.org_id)]),
+                    query: BTreeMap::new(),
+                    cursor: None,
+                    capability: MistCapability::OrdinaryRead,
+                },
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "get_mist_rrm",
+        description = "Get current site channel planning."
+    )]
+    async fn get_mist_rrm(
+        &self,
+        Parameters(args): Parameters<SiteArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "get_mist_rrm",
+                "getSiteCurrentChannelPlanning",
+                args,
+                &["site_id"],
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "get_mist_self",
+        description = "Get the privileged Mist caller profile."
+    )]
+    async fn get_mist_self(
+        &self,
+        Parameters(args): Parameters<EmptyArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "get_mist_self",
+                "getSelf",
+                args,
+                &[],
+                MistCapability::PrivilegedRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(name = "get_mist_site", description = "Get one Mist site.")]
+    async fn get_mist_site(
+        &self,
+        Parameters(args): Parameters<SiteArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "get_mist_site",
+                "getSiteInfo",
+                args,
+                &["site_id"],
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(name = "get_mist_sle", description = "Get one site SLE summary.")]
+    async fn get_mist_sle(
+        &self,
+        Parameters(args): Parameters<SleArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "get_mist_sle",
+                "getSiteSleSummary",
+                args,
+                &["site_id", "scope", "scope_id", "metric"],
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "invoke_mist_privileged_read",
+        description = "Invoke one privileged read selected only by catalog operation ID."
+    )]
+    async fn invoke_mist_privileged_read(
+        &self,
+        Parameters(args): Parameters<InvokeReadArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .invoke_dispatcher(
+                "invoke_mist_privileged_read",
+                args,
+                MistCapability::PrivilegedRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "invoke_mist_read",
+        description = "Invoke one ordinary read selected only by catalog operation ID."
+    )]
+    async fn invoke_mist_read(
+        &self,
+        Parameters(args): Parameters<InvokeReadArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .invoke_dispatcher(
+                "invoke_mist_read",
+                args,
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "list_mist_orgs",
+        description = "List the bounded local configured organization view."
+    )]
+    async fn list_mist_orgs(
+        &self,
+        Parameters(_): Parameters<EmptyArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let caller = caller_from_extensions::<MistGrant>(&extensions);
+        let mut audit = audit_scope(caller, "list_mist_orgs", "read_local", Vec::new());
+        if let Err(error) = authorize_call(caller, "list_mist_orgs", None, RESTRICTED_TOOLS) {
+            audit.deny("scope");
+            return Ok(tool_result::<LocalOrgView, _>(
+                Err(MistCallError::Authorization(error.to_string())),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+        let organizations = self
+            .allowed_orgs
+            .iter()
+            .filter_map(|id| {
+                let target = format!("org/{id}");
+                caller
+                    .is_none_or(|caller| caller.devices.allows(&target))
+                    .then(|| LocalOrg {
+                        id: id.clone(),
+                        target,
+                    })
+            })
+            .collect();
+        Ok(audited_tool_result(
+            &mut audit,
+            Ok::<_, MistCallError>(LocalOrgView {
+                source: "local_configured_allowlist",
+                organizations,
+            }),
+        ))
+    }
+    #[tool(
+        name = "list_mist_rogues",
+        description = "List site rogue access points."
+    )]
+    async fn list_mist_rogues(
+        &self,
+        Parameters(args): Parameters<RogueArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "list_mist_rogues",
+                "listSiteRogueAPs",
+                args,
+                &["site_id"],
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "list_mist_sites",
+        description = "List sites in one organization."
+    )]
+    async fn list_mist_sites(
+        &self,
+        Parameters(args): Parameters<OrgPageArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "list_mist_sites",
+                "listOrgSites",
+                args,
+                &["org_id"],
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "list_mist_sle_metrics",
+        description = "List SLE metrics for one site scope."
+    )]
+    async fn list_mist_sle_metrics(
+        &self,
+        Parameters(args): Parameters<SleMetricsArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "list_mist_sle_metrics",
+                "listSiteSlesMetrics",
+                args,
+                &["site_id", "scope", "scope_id"],
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "list_mist_upgrades",
+        description = "List site device upgrades."
+    )]
+    async fn list_mist_upgrades(
+        &self,
+        Parameters(args): Parameters<UpgradeArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "list_mist_upgrades",
+                "listSiteDeviceUpgrades",
+                args,
+                &["site_id"],
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "list_mist_wlans",
+        description = "List privileged site WLAN configuration."
+    )]
+    async fn list_mist_wlans(
+        &self,
+        Parameters(args): Parameters<SitePageArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "list_mist_wlans",
+                "listSiteWlans",
+                args,
+                &["site_id"],
+                MistCapability::PrivilegedRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(name = "search_mist_alarms", description = "Search site alarms.")]
+    async fn search_mist_alarms(
+        &self,
+        Parameters(args): Parameters<AlarmSearchArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "search_mist_alarms",
+                "searchSiteAlarms",
+                args,
+                &["site_id"],
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "search_mist_audit_logs",
+        description = "Search privileged organization audit logs."
+    )]
+    async fn search_mist_audit_logs(
+        &self,
+        Parameters(args): Parameters<AuditSearchArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "search_mist_audit_logs",
+                "listOrgAuditLogs",
+                args,
+                &["org_id"],
+                MistCapability::PrivilegedRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "search_mist_clients",
+        description = "Search site wireless clients."
+    )]
+    async fn search_mist_clients(
+        &self,
+        Parameters(args): Parameters<ClientSearchArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "search_mist_clients",
+                "searchSiteWirelessClients",
+                args,
+                &["site_id"],
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "search_mist_events",
+        description = "Search site system events."
+    )]
+    async fn search_mist_events(
+        &self,
+        Parameters(args): Parameters<EventSearchArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "search_mist_events",
+                "searchSiteSystemEvents",
+                args,
+                &["site_id"],
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "search_mist_inventory",
+        description = "Search organization inventory."
+    )]
+    async fn search_mist_inventory(
+        &self,
+        Parameters(args): Parameters<InventoryArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "search_mist_inventory",
+                "searchOrgInventory",
+                args,
+                &["org_id"],
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "search_mist_operations",
+        description = "Search bounded locally catalogued Mist operation metadata."
+    )]
+    async fn search_mist_operations(
+        &self,
+        Parameters(args): Parameters<SearchOperationsArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let caller = caller_from_extensions::<MistGrant>(&extensions);
+        let mut audit = audit_scope(caller, "search_mist_operations", "read_local", Vec::new());
+        if let Err(error) = authorize_call(caller, "search_mist_operations", None, RESTRICTED_TOOLS)
+        {
+            audit.deny("scope");
+            return Ok(tool_result::<Vec<OperationSummary<'_>>, _>(
+                Err(MistCallError::Authorization(error.to_string())),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+        let limit = usize::from(args.limit.unwrap_or(20));
+        if args.query.is_empty() || args.query.len() > 128 || !(1..=50).contains(&limit) {
+            let error = MistCallError::InvalidSearch;
+            audit.fail(&error);
+            return Ok(tool_result::<Vec<OperationSummary<'_>>, _>(
+                Err(error),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+        let query = args.query.to_ascii_lowercase();
+        let capability = args.capability.map(MistCapability::from);
+        let target = args.target.map(TargetSelector::from);
+        let matches = self
+            .catalog
+            .operations
+            .iter()
+            .filter(|operation| self.operation_visible(caller, operation))
+            .filter(|operation| capability.is_none_or(|value| operation.capability == value))
+            .filter(|operation| {
+                target.is_none_or(|value| operation.target_selectors.contains(&value))
+            })
+            .filter(|operation| {
+                operation.operation_id.to_ascii_lowercase().contains(&query)
+                    || operation.summary.to_ascii_lowercase().contains(&query)
+                    || operation.path.to_ascii_lowercase().contains(&query)
+                    || operation
+                        .openapi_tags
+                        .iter()
+                        .any(|tag| tag.to_ascii_lowercase().contains(&query))
+            })
+            .take(limit)
+            .map(|operation| OperationSummary {
+                operation_id: &operation.operation_id,
+                summary: &operation.summary,
+                method: &operation.method,
+                path: &operation.path,
+                capability: operation.capability,
+                target_selectors: &operation.target_selectors,
+                pagination: operation.pagination,
+            })
+            .collect::<Vec<_>>();
+        Ok(audited_tool_result(
+            &mut audit,
+            Ok::<_, MistCallError>(matches),
+        ))
+    }
+    #[tool(
+        name = "troubleshoot_mist",
+        description = "List site troubleshoot calls."
+    )]
+    async fn troubleshoot_mist(
+        &self,
+        Parameters(args): Parameters<TroubleshootArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "troubleshoot_mist",
+                "listSiteTroubleshootCalls",
+                args,
+                &["site_id"],
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+}
+
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for MistHandler {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(
+                "rustmistmcp",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(
+                "Read-only HPE Juniper Mist MCP server. Use named workflows first; \
+                 catalog dispatchers accept operation IDs, never methods or URLs.",
+            )
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        let caller = mecmcp_server::caller_from_extensions::<rustmistmcp_core::MistGrant>(
+            &context.extensions,
+        );
+        let tools = self.tool_router.list_all();
+        let visible = if caller.is_some() {
+            filter_tools_for_scope(tools, caller, RESTRICTED_TOOLS)
+        } else {
+            tools
+                .into_iter()
+                .filter(|tool| !RESTRICTED_TOOLS.contains(&tool.name.as_ref()))
+                .collect()
+        };
+        Ok(ListToolsResult::with_all_items(visible))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use mecmcp_audit::testutil::CapturingWriter;
+    use mecmcp_auth::{ActorType, ScopeSet};
+    use std::{
+        cell::RefCell,
+        io::Write,
+        sync::{Mutex, OnceLock},
+    };
+
+    thread_local! {
+        static ACTIVE_AUDIT_CAPTURE: RefCell<Option<CapturingWriter>> = const { RefCell::new(None) };
+    }
+
+    static AUDIT_SUBSCRIBER: OnceLock<()> = OnceLock::new();
+
+    struct ThreadLocalAuditWriter(Option<CapturingWriter>);
+
+    impl Write for ThreadLocalAuditWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            match &mut self.0 {
+                Some(capture) => capture.write(buf),
+                None => std::io::sink().write(buf),
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            match &mut self.0 {
+                Some(capture) => capture.flush(),
+                None => std::io::sink().flush(),
+            }
+        }
+    }
+
+    struct ThreadLocalAuditMakeWriter;
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLocalAuditMakeWriter {
+        type Writer = ThreadLocalAuditWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            ThreadLocalAuditWriter(ACTIVE_AUDIT_CAPTURE.with(|capture| capture.borrow().clone()))
+        }
+    }
+
+    struct AuditCaptureGuard;
+
+    impl Drop for AuditCaptureGuard {
+        fn drop(&mut self) {
+            ACTIVE_AUDIT_CAPTURE.with(|capture| {
+                capture.borrow_mut().take();
+            });
+        }
+    }
+
+    fn install_audit_capture(capture: CapturingWriter) -> AuditCaptureGuard {
+        AUDIT_SUBSCRIBER.get_or_init(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(ThreadLocalAuditMakeWriter)
+                .with_ansi(false)
+                .with_target(true)
+                .with_max_level(tracing::Level::INFO)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("test audit subscriber is installed once");
+        });
+        ACTIVE_AUDIT_CAPTURE.with(|active| {
+            assert!(
+                active.borrow().is_none(),
+                "nested audit capture on one test thread"
+            );
+            *active.borrow_mut() = Some(capture);
+        });
+        AuditCaptureGuard
+    }
+
+    #[derive(Default)]
+    struct RecordingClient(Mutex<Vec<MistRequest>>);
+
+    struct FixedResponseClient {
+        response: rustmistmcp_core::MistResponse,
+    }
+
+    #[async_trait]
+    impl MistClient for RecordingClient {
+        async fn execute(
+            &self,
+            request: MistRequest,
+        ) -> Result<rustmistmcp_core::MistResponse, MistError> {
+            self.0.lock().expect("recorder").push(request.clone());
+            Ok(rustmistmcp_core::MistResponse {
+                operation_id: request.operation_id,
+                status: 200,
+                body: MistResponseBody::Json(serde_json::json!({"name": "authorized"})),
+                cursor: None,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl MistClient for FixedResponseClient {
+        async fn execute(
+            &self,
+            _request: MistRequest,
+        ) -> Result<rustmistmcp_core::MistResponse, MistError> {
+            Ok(self.response.clone())
+        }
+    }
+
+    fn org_read(operation_id: &str) -> CatalogRead {
+        CatalogRead {
+            tool: "invoke_mist_read",
+            operation_id: operation_id.to_owned(),
+            path: BTreeMap::from([(
+                "org_id".to_owned(),
+                "11111111-1111-1111-1111-111111111111".to_owned(),
+            )]),
+            query: BTreeMap::new(),
+            cursor: None,
+            capability: MistCapability::OrdinaryRead,
+        }
+    }
+
+    fn caller(target: &str) -> CallerCtx<MistGrant> {
+        CallerCtx {
+            token_name: "alice".to_owned(),
+            devices: ScopeSet::Allowlist(vec![target.to_owned()]),
+            tools: ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]),
+            grant: Some(MistGrant {
+                allowed_operations: vec!["getOrg".to_owned()],
+                actions: vec![MistCapability::OrdinaryRead],
+                subjects: vec![MistTarget::parse(target).expect("target")],
+            }),
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: ActorType::Human,
+        }
+    }
+
+    fn extensions(caller: CallerCtx<MistGrant>) -> rmcp::model::Extensions {
+        let request = http::Request::new(());
+        let (mut parts, _) = request.into_parts();
+        parts.extensions.insert(caller);
+        let mut extensions = rmcp::model::Extensions::new();
+        extensions.insert(parts);
+        extensions
+    }
+
+    #[tokio::test]
+    async fn authenticated_ordinary_read_does_not_require_a_mutation_grant() {
+        let target = "org/11111111-1111-1111-1111-111111111111";
+        let client = Arc::new(RecordingClient::default());
+        let handler = MistHandler::with_client(
+            "https://api.mist.com/",
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
+            client.clone(),
+        )
+        .expect("handler");
+        let mut caller = caller(target);
+        caller.grant = None;
+
+        let result = handler
+            .dispatch_catalogued_read(org_read("getOrg"), &extensions(caller))
+            .await;
+
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        assert_eq!(client.0.lock().expect("recorder").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn authenticated_privileged_dispatch_requires_an_exact_mist_grant() {
+        let client = Arc::new(RecordingClient::default());
+        let handler = MistHandler::with_client(
+            "https://api.mist.com/",
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
+            client.clone(),
+        )
+        .expect("handler");
+        let caller = CallerCtx {
+            token_name: "privileged-without-grant".to_owned(),
+            devices: ScopeSet::Wildcard,
+            tools: ScopeSet::Allowlist(vec!["invoke_mist_privileged_read".to_owned()]),
+            grant: None::<MistGrant>,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: ActorType::Human,
+        };
+
+        let result = handler
+            .dispatch_catalogued_read(
+                CatalogRead {
+                    tool: "invoke_mist_privileged_read",
+                    operation_id: "getSelf".to_owned(),
+                    path: BTreeMap::new(),
+                    query: BTreeMap::new(),
+                    cursor: None,
+                    capability: MistCapability::PrivilegedRead,
+                },
+                &extensions(caller),
+            )
+            .await;
+
+        assert_eq!(result.is_error, Some(true), "{result:?}");
+        assert!(
+            client.0.lock().expect("recorder").is_empty(),
+            "privileged request must be denied before client dispatch"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_dispatch_cursor_emits_a_failed_audit_outcome() {
+        let handler = MistHandler::blocked(
+            "https://api.mist.com/",
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
+        )
+        .expect("handler");
+        let capture = CapturingWriter::default();
+        let _capture_guard = install_audit_capture(capture.clone());
+        let result = handler
+            .invoke_dispatcher(
+                "invoke_mist_read",
+                InvokeReadArgs {
+                    operation_id: "getOrg".to_owned(),
+                    path: None,
+                    query: None,
+                    cursor: Some("not-hex".to_owned()),
+                },
+                MistCapability::OrdinaryRead,
+                &rmcp::model::Extensions::new(),
+            )
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        let output = String::from_utf8(capture.0.lock().expect("capture").clone()).expect("UTF-8");
+        assert!(output.contains("tool=invoke_mist_read"), "{output}");
+        assert!(output.contains("result=error"), "{output}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cursor_shape_bounds_are_enforced_before_client_dispatch() {
+        let recorder = Arc::new(RecordingClient::default());
+        let handler = MistHandler::with_client(
+            "https://api.mist.com/",
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
+            recorder.clone(),
+        )
+        .expect("handler");
+        for cursor in [
+            "0".to_owned(),
+            "gg".to_owned(),
+            "0".repeat(MAX_ENCODED_CURSOR_BYTES + 1),
+        ] {
+            let result = handler
+                .invoke_dispatcher(
+                    "invoke_mist_read",
+                    InvokeReadArgs {
+                        operation_id: "getOrg".to_owned(),
+                        path: None,
+                        query: None,
+                        cursor: Some(cursor),
+                    },
+                    MistCapability::OrdinaryRead,
+                    &rmcp::model::Extensions::new(),
+                )
+                .await;
+            assert_eq!(result.is_error, Some(true), "{result:?}");
+        }
+        assert!(recorder.0.lock().expect("recorder").is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cursor_context_is_reauthorized_on_every_continuation() {
+        let recorder = Arc::new(RecordingClient::default());
+        let requested_org = "11111111-1111-1111-1111-111111111111";
+        let other_org = "44444444-4444-4444-4444-444444444444";
+        let handler = MistHandler::with_client(
+            "https://api.mist.com/",
+            vec![requested_org.to_owned(), other_org.to_owned()],
+            BTreeMap::new(),
+            recorder.clone(),
+        )
+        .expect("handler");
+        let path = BTreeMap::from([("org_id".to_owned(), requested_org.to_owned())]);
+        let cursor = rustmistmcp_core::MistCursor::new(
+            "listOrgSites".to_owned(),
+            &Url::parse("https://api.mist.com/").expect("origin"),
+            rustmistmcp_core::PaginationMode::PageLimit,
+            "next".to_owned(),
+        )
+        .expect("cursor")
+        .with_request_context(
+            path,
+            BTreeMap::from([("limit".to_owned(), serde_json::json!(25))]),
+            Some(MistTarget::org(requested_org).expect("target")),
+        )
+        .expect("context");
+        let encoded = hex::encode(serde_json::to_vec(&cursor).expect("serialize"));
+        let result = handler
+            .invoke_dispatcher(
+                "invoke_mist_read",
+                InvokeReadArgs {
+                    operation_id: "listOrgSites".to_owned(),
+                    path: None,
+                    query: None,
+                    cursor: Some(encoded),
+                },
+                MistCapability::OrdinaryRead,
+                &extensions(caller(&format!("org/{other_org}"))),
+            )
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        assert!(recorder.0.lock().expect("recorder").is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exact_tool_target_and_grant_authority_is_audited_before_client_dispatch() {
+        let recorder = Arc::new(RecordingClient::default());
+        let handler = MistHandler::with_client(
+            "https://api.mist.com/",
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
+            recorder.clone(),
+        )
+        .expect("handler");
+        let capture = CapturingWriter::default();
+        let _capture_guard = install_audit_capture(capture.clone());
+        let path = BTreeMap::from([(
+            "org_id".to_owned(),
+            "11111111-1111-1111-1111-111111111111".to_owned(),
+        )]);
+        let allowed = handler
+            .dispatch_catalogued_read(
+                CatalogRead {
+                    tool: "invoke_mist_read",
+                    operation_id: "getOrg".to_owned(),
+                    path: path.clone(),
+                    query: BTreeMap::new(),
+                    cursor: None,
+                    capability: MistCapability::OrdinaryRead,
+                },
+                &extensions(caller("org/11111111-1111-1111-1111-111111111111")),
+            )
+            .await;
+        assert_ne!(allowed.is_error, Some(true), "{allowed:?}");
+        assert_eq!(recorder.0.lock().expect("recorder").len(), 1);
+
+        let denied = handler
+            .dispatch_catalogued_read(
+                CatalogRead {
+                    tool: "invoke_mist_read",
+                    operation_id: "getOrg".to_owned(),
+                    path,
+                    query: BTreeMap::new(),
+                    cursor: None,
+                    capability: MistCapability::OrdinaryRead,
+                },
+                &extensions(caller("org/44444444-4444-4444-4444-444444444444")),
+            )
+            .await;
+        assert_eq!(denied.is_error, Some(true));
+        assert_eq!(recorder.0.lock().expect("recorder").len(), 1);
+
+        let output = String::from_utf8(capture.0.lock().expect("capture").clone()).expect("UTF-8");
+        assert!(output.contains("result=ok"), "{output}");
+        assert!(output.contains("result=denied"), "{output}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exact_grant_cannot_dispatch_an_undiscovered_site() {
+        let recorder = Arc::new(RecordingClient::default());
+        let org_id = "11111111-1111-1111-1111-111111111111";
+        let site_id = "44444444-4444-4444-4444-444444444444";
+        let handler = MistHandler::with_client(
+            "https://api.mist.com/",
+            vec![org_id.to_owned()],
+            BTreeMap::new(),
+            recorder.clone(),
+        )
+        .expect("handler");
+        let target = format!("site/{site_id}");
+        let caller = CallerCtx {
+            token_name: "alice".to_owned(),
+            devices: ScopeSet::Allowlist(vec![target.clone()]),
+            tools: ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]),
+            grant: Some(MistGrant {
+                allowed_operations: vec!["getSiteInfo".to_owned()],
+                actions: vec![MistCapability::OrdinaryRead],
+                subjects: vec![MistTarget::parse(&target).expect("target")],
+            }),
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: ActorType::Human,
+        };
+        let result = handler
+            .dispatch_catalogued_read(
+                CatalogRead {
+                    tool: "invoke_mist_read",
+                    operation_id: "getSiteInfo".to_owned(),
+                    path: BTreeMap::from([("site_id".to_owned(), site_id.to_owned())]),
+                    query: BTreeMap::new(),
+                    cursor: None,
+                    capability: MistCapability::OrdinaryRead,
+                },
+                &extensions(caller),
+            )
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        assert!(recorder.0.lock().expect("recorder").is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mismatched_and_non_success_responses_are_failed_audits() {
+        let cases = [
+            rustmistmcp_core::MistResponse {
+                operation_id: "getSiteInfo".to_owned(),
+                status: 200,
+                body: MistResponseBody::Json(serde_json::json!({"name": "wrong operation"})),
+                cursor: None,
+            },
+            rustmistmcp_core::MistResponse {
+                operation_id: "getOrg".to_owned(),
+                status: 403,
+                body: MistResponseBody::Json(serde_json::json!({"detail": "forbidden"})),
+                cursor: None,
+            },
+            rustmistmcp_core::MistResponse {
+                operation_id: "getOrg".to_owned(),
+                status: 429,
+                body: MistResponseBody::Json(serde_json::json!({"detail": "slow down"})),
+                cursor: None,
+            },
+        ];
+        for response in cases {
+            let handler = MistHandler::with_client(
+                "https://api.mist.com/",
+                vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+                BTreeMap::new(),
+                Arc::new(FixedResponseClient { response }),
+            )
+            .expect("handler");
+            let capture = CapturingWriter::default();
+            let _capture_guard = install_audit_capture(capture.clone());
+            let result = handler
+                .dispatch_catalogued_read(org_read("getOrg"), &rmcp::model::Extensions::new())
+                .await;
+            assert_eq!(result.is_error, Some(true), "{result:?}");
+            let output =
+                String::from_utf8(capture.0.lock().expect("capture").clone()).expect("UTF-8");
+            assert!(output.contains("result=error"), "{output}");
+            assert!(!output.contains("result=ok"), "{output}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bounded_result_refusal_is_a_failed_audit() {
+        let sites = (0..32)
+            .map(|_| serde_json::json!({"name": "x".repeat(20_000)}))
+            .collect();
+        let handler = MistHandler::with_client(
+            "https://api.mist.com/",
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
+            Arc::new(FixedResponseClient {
+                response: rustmistmcp_core::MistResponse {
+                    operation_id: "listOrgSites".to_owned(),
+                    status: 200,
+                    body: MistResponseBody::Json(serde_json::Value::Array(sites)),
+                    cursor: None,
+                },
+            }),
+        )
+        .expect("handler");
+        let capture = CapturingWriter::default();
+        let _capture_guard = install_audit_capture(capture.clone());
+        let result = handler
+            .dispatch_catalogued_read(org_read("listOrgSites"), &rmcp::model::Extensions::new())
+            .await;
+        assert_eq!(result.is_error, Some(true), "{result:?}");
+        let output = String::from_utf8(capture.0.lock().expect("capture").clone()).expect("UTF-8");
+        assert!(output.contains("result=error"), "{output}");
+        assert!(!output.contains("result=ok"), "{output}");
+    }
+
+    #[test]
+    fn wildcard_tool_scope_excludes_every_restricted_read() {
+        let handler = MistHandler::blocked(
+            "https://api.mist.com/",
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
+        )
+        .expect("handler");
+        let caller = CallerCtx {
+            token_name: "wildcard".to_owned(),
+            devices: ScopeSet::Wildcard,
+            tools: ScopeSet::Wildcard,
+            grant: None::<MistGrant>,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: ActorType::Human,
+        };
+        let visible = filter_tools_for_scope(
+            handler.tool_router.list_all(),
+            Some(&caller),
+            RESTRICTED_TOOLS,
+        );
+        let names = visible
+            .iter()
+            .map(|tool| tool.name.as_ref())
+            .collect::<Vec<_>>();
+        for restricted in RESTRICTED_TOOLS {
+            assert!(!names.contains(restricted), "{restricted}");
+        }
+    }
+
+    #[test]
+    fn metadata_visibility_requires_an_invocable_configured_target_intersection() {
+        let org_id = "11111111-1111-1111-1111-111111111111";
+        let site_id = "22222222-2222-2222-2222-222222222222";
+        let handler = MistHandler::blocked(
+            "https://api.mist.com/",
+            vec![org_id.to_owned()],
+            BTreeMap::from([(site_id.to_owned(), org_id.to_owned())]),
+        )
+        .expect("handler");
+        let get_org = handler.catalog.operation("getOrg").expect("getOrg");
+        let get_site = handler
+            .catalog
+            .operation("getSiteInfo")
+            .expect("getSiteInfo");
+        let get_self = handler.catalog.operation("getSelf").expect("getSelf");
+
+        let grantless_org = CallerCtx {
+            token_name: "grantless-org".to_owned(),
+            devices: ScopeSet::Allowlist(vec![format!("org/{org_id}")]),
+            tools: ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]),
+            grant: None::<MistGrant>,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: ActorType::Human,
+        };
+        assert!(
+            handler.operation_visible(Some(&grantless_org), get_org),
+            "grantless scoped ordinary read must be discoverable when executable"
+        );
+        assert!(
+            !handler.operation_visible(Some(&grantless_org), get_site),
+            "configured inventory still intersects caller target scope"
+        );
+        let grantless_site = CallerCtx {
+            token_name: "grantless-site".to_owned(),
+            devices: ScopeSet::Allowlist(vec![format!("site/{site_id}")]),
+            tools: ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]),
+            grant: None::<MistGrant>,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: ActorType::Human,
+        };
+        assert!(handler.operation_visible(Some(&grantless_site), get_site));
+        let missing_dispatcher_scope = CallerCtx {
+            tools: ScopeSet::Allowlist(vec!["search_mist_operations".to_owned()]),
+            ..grantless_org.clone()
+        };
+        assert!(!handler.operation_visible(Some(&missing_dispatcher_scope), get_org));
+        let grantless_privileged = CallerCtx {
+            tools: ScopeSet::Allowlist(vec!["invoke_mist_privileged_read".to_owned()]),
+            ..grantless_org.clone()
+        };
+        assert!(
+            !handler.operation_visible(Some(&grantless_privileged), get_self),
+            "privileged metadata remains hidden without an exact grant"
+        );
+        let privileged_exact = CallerCtx {
+            grant: Some(MistGrant {
+                allowed_operations: vec!["getSelf".to_owned()],
+                actions: vec![MistCapability::PrivilegedRead],
+                subjects: vec![MistTarget::org(org_id).expect("target")],
+            }),
+            ..grantless_privileged
+        };
+        assert!(
+            handler.operation_visible(Some(&privileged_exact), get_self),
+            "privileged metadata is visible only with exact tool and grant authority"
+        );
+
+        let ordinary_wildcard = CallerCtx {
+            token_name: "ordinary".to_owned(),
+            devices: ScopeSet::Wildcard,
+            tools: ScopeSet::Wildcard,
+            grant: Some(MistGrant {
+                allowed_operations: vec!["getOrg".to_owned(), "getSelf".to_owned()],
+                actions: vec![MistCapability::OrdinaryRead, MistCapability::PrivilegedRead],
+                subjects: vec![MistTarget::org(org_id).expect("target")],
+            }),
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: ActorType::Human,
+        };
+        assert!(handler.operation_visible(Some(&ordinary_wildcard), get_org));
+        assert!(
+            !handler.operation_visible(Some(&ordinary_wildcard), get_self),
+            "wildcard tool scope must not expose the restricted dispatcher"
+        );
+
+        let out_of_scope = CallerCtx {
+            devices: ScopeSet::Allowlist(vec![
+                "org/44444444-4444-4444-4444-444444444444".to_owned(),
+            ]),
+            tools: ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]),
+            ..ordinary_wildcard
+        };
+        assert!(
+            !handler.operation_visible(Some(&out_of_scope), get_org),
+            "grant subjects without caller.devices intersection are not invocable"
+        );
+    }
+
+    #[test]
+    fn handler_reuses_strict_mist_regional_endpoint_validation() {
+        for endpoint in [
+            "https://evil.example/",
+            "https://127.0.0.1/",
+            "https://api.mist.com:8443/",
+            "https://api.mist.com/api/v1/",
+        ] {
+            assert!(
+                MistHandler::blocked(
+                    endpoint,
+                    vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+                    BTreeMap::new(),
+                )
+                .is_err(),
+                "{endpoint}"
+            );
+        }
+        assert!(
+            MistHandler::blocked(
+                "https://api.eu.mist.com/",
+                vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+                BTreeMap::new(),
+            )
+            .is_ok()
+        );
+    }
+}

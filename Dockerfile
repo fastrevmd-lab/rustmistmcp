@@ -1,0 +1,26 @@
+# The builder digest is an OCI index supporting the release architectures.
+FROM rust:1.97.0-slim-bookworm@sha256:6d220bf85c74e842a79da63997af8d2e74455c0b8847d8bb3a5888572334991d AS builder
+WORKDIR /workspace
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+COPY docs/mist-api/catalog.json ./docs/mist-api/catalog.json
+RUN cargo build --release --locked --bin rustmistmcp
+
+# This distroless Debian 13 image supplies the required CA trust store.
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:d97bc0a941b8d4be647dc0ee75b264ddbb772f1ac5ba690a4309c00723b23775
+ARG VERSION=0.0.0-pre-release
+ARG REVISION=unknown
+ARG CREATED=unknown
+LABEL org.opencontainers.image.title="rustmistmcp" \
+      org.opencontainers.image.description="Pre-release MCP server for HPE Juniper Mist" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.revision="$REVISION" \
+      org.opencontainers.image.created="$CREATED" \
+      org.opencontainers.image.source="https://github.com/fastrevmd-lab/rustmistmcp" \
+      org.opencontainers.image.licenses="MIT"
+COPY --from=builder /workspace/target/release/rustmistmcp /usr/local/bin/rustmistmcp
+USER 65532:65532
+EXPOSE 30030
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/rustmistmcp"]
+CMD ["--device-mapping", "/etc/rustmistmcp/mist.json", "--transport", "streamable-http", "--host", "127.0.0.1", "--port", "30030", "--tokens-file", "/etc/rustmistmcp/tokens.json", "--audit-format", "json", "--audit-redact", "devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac", "--audit-hmac-key-file", "/etc/rustmistmcp/audit-hmac.key"]

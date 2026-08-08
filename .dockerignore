@@ -1,0 +1,26 @@
+# Deny by default. Only the Rust workspace inputs below enter the build context.
+**
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!crates/
+!crates/**
+!docs/
+!docs/mist-api/
+!docs/mist-api/catalog.json
+
+# Defense in depth: never re-include repository metadata, outputs, or secrets.
+.git
+.git/**
+.worktrees
+.worktrees/**
+target
+target/**
+dist
+dist/**
+**/tokens.json
+**/*.tokens.json
+**/.env
+**/.env.*
+**/*.pem
+**/*.key

@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality-and-packaging:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Format, lint, test, and document
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace --locked
+          cargo doc --workspace --no-deps --locked
+          cargo build --release --locked --bin rustmistmcp
+      - name: Verify MSRV
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          cargo +1.88.0 check --workspace --locked
+      - name: Supply-chain checks
+        run: |
+          cargo install --locked cargo-audit cargo-deny
+          cargo audit
+          cargo deny check
+      - name: Validate packaging behavior and shell
+        run: |
+          RUSTMISTMCP_BINARY=target/release/rustmistmcp scripts/verify-packaging.sh
+          scripts/test-lxc-installer.sh
+          scripts/test-release-policy.sh
+          shellcheck scripts/*.sh packaging/lxc/install.sh
+      - name: Verify systemd unit with staged executable
+        run: |
+          stage=$(mktemp -d)
+          install -D -m 0755 target/release/rustmistmcp "$stage/usr/local/bin/rustmistmcp"
+          sed "s|ExecStart=/usr/local/bin/rustmistmcp|ExecStart=$stage/usr/local/bin/rustmistmcp|" packaging/systemd/rustmistmcp.service > "$stage/rustmistmcp.service"
+          systemd-analyze verify "$stage/rustmistmcp.service"
+      - name: Validate YAML and compose
+        run: |
+          for file in .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/security.yml .github/dependabot.yml packaging/container/compose.example.yaml; do
+            npm exec --yes --package=yaml@2.8.1 yaml -- valid "$file"
+          done
+          RUSTMISTMCP_IMAGE=ghcr.io/fastrevmd-lab/rustmistmcp@sha256:0000000000000000000000000000000000000000000000000000000000000000 docker compose -f packaging/container/compose.example.yaml config
+      - name: Verify deterministic release archive
+        run: scripts/verify-reproducible-build.sh
+      - name: Verify, extract, hash, and execute archive
+        run: |
+          scripts/build-release.sh
+          archive=$(find dist -name '*.tar.gz' -print -quit)
+          scripts/smoke-release-archive.sh "$archive" "$archive.sha256"
+      - name: OCI build and hardened help smoke
+        run: |
+          docker build --build-arg VERSION=ci --build-arg REVISION="$GITHUB_SHA" -t rustmistmcp:ci .
+          docker run --rm --read-only --network none --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m rustmistmcp:ci --help
+          scripts/smoke-oci.sh rustmistmcp:ci

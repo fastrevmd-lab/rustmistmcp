@@ -4,11 +4,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-`rustmistmcp` is an MCP server for the **HPE Juniper Mist cloud**. The
-repository is currently a **scaffold** — README, LICENSE, branding, and
-toolchain pin only. There is no Cargo workspace, no crates, and no build/test
-commands yet. Do not invent build instructions; add them here when the workspace
-actually lands.
+`rustmistmcp` is an MCP server for the **HPE Juniper Mist cloud**. It has a Rust
+workspace and pre-release packaging; it does **not** have a production outbound
+Mist client while `mecmcp#90` is open. Do not characterize local contract tests,
+an image build, or packaging as live-Mist readiness or a v1 release.
+
+## Packaging boundary
+
+Packaging uses the `rustmistmcp` binary/service identity, Debian 13, and exact
+paths `/usr/local/bin/rustmistmcp`, `/etc/rustmistmcp/mist.json`,
+`/etc/rustmistmcp/tokens.json`, `/etc/rustmistmcp/audit-hmac.key`, and
+`/var/lib/rustmistmcp/changeset-state.json`. The OCI runtime is digest-pinned
+distroless Debian 13, non-root UID/GID 65532, and must contain no shell, package
+manager, runtime fetcher, or extra executables. The LXC target is unprivileged
+Debian 13 with `nesting=1`; never contact Proxmox, Mist, VMID 612, or VMID 613
+from packaging work.
+
+Task 7's shared CLI is checked in. Packaging uses `--device-mapping
+/etc/rustmistmcp/mist.json`, `--transport streamable-http`, loopback
+`--host 127.0.0.1`, `--port 30030`, the absolute `--tokens-file`, and exact
+audit flags. Systemd uses journald; OCI emits JSON audit to stderr and must not
+mount the host journal socket. Do not advertise a mutation-state flag,
+live-Mist readiness, graceful HTTP draining (`mecmcp#156`), or fail-closed file
+audit (`mecmcp#158`). External HTTP requires TLS plus exact Host/Origin policy.
+The CLI has no `--version` while `mecmcp#159` is open; use `--help`,
+`BUILD-INFO`, and hashes. Grant-bearing MCP bearer-token lifecycle is blocked by
+`mecmcp#160`. Run `scripts/verify-packaging.sh` after delivery edits and build
+archives only from a completely clean tree by default.
 
 ## The one architectural rule
 
@@ -20,8 +42,8 @@ across the mechub MCP server family. The split is not negotiable:
   redaction (`mecmcp-audit`), streamable-HTTP transport and limits
   (`mecmcp-transport`), CLI/TLS/shutdown (`mecmcp-runtime`), change-control
   state machine (`mecmcp-changeset`), inventory (`mecmcp-inventory`).
-- **Here:** the Mist REST client, its API-token / OAuth 2.0 auth flow, response
-  models, and the MCP tool surface built on them.
+- **Here:** the Mist REST client, its v1 API-token auth flow, response models,
+  and the MCP tool surface built on them.
 
 If you are about to write generic auth, transport, rate-limiting, or
 change-control code in this repo, stop — it belongs in `mecmcp`. `mecmcp` is
@@ -83,7 +105,7 @@ Verified so far:
 - Auth header is literally `Authorization: Token <token>` (the word `Token`,
   a space, then the token). Tokens are user- or org-scoped and inherit the
   creating account's privileges.
-- External OAuth 2.0 providers are supported.
+- Mist supports API tokens and external OAuth 2.0, but rustmistmcp v1 intentionally implements API-token authentication only.
 - HTTP Basic auth with Mist login credentials is deprecated as of September
   2026 — do not implement it.
 
