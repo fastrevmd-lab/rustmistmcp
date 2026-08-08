@@ -217,12 +217,17 @@ require_contains scripts/smoke-release-archive.sh '[[ -f $archive && ! -L $archi
 require_contains scripts/smoke-release-archive.sh '[[ -f $sidecar && ! -L $sidecar && -r $sidecar ]]'
 require_absent scripts/smoke-release-archive.sh 'tar[[:space:]]+--absolute-names[[:space:]]+-x'
 
+# Uses grep, not ripgrep. `rg` is not installed on the GitHub runner, and both
+# call sites failed *open*: the loop below simply read nothing, so the check that
+# every workflow action is pinned to a 40-hex SHA silently passed on every CI run
+# it has ever made. The Command::new check below had the same shape — a missing
+# binary makes the `if` false, so no violation is reported.
 while IFS= read -r action_line; do
     if [[ ! $action_line =~ uses:[[:space:]]+[^[:space:]@]+@[0-9a-f]{40}[[:space:]]*$ ]]; then
         printf 'workflow action is not pinned to exactly 40 hex: %s\n' "$action_line" >&2
         failures=$((failures + 1))
     fi
-done < <(rg '^[[:space:]]*-[[:space:]]+uses:' .github/workflows -g '*.yml' -g '*.yaml' | cut -d: -f2-)
+done < <(grep -rE '^[[:space:]]*-[[:space:]]+uses:' .github/workflows --include='*.yml' --include='*.yaml' | cut -d: -f2-)
 require_contains .github/workflows/ci.yml 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
 require_contains .github/workflows/release.yml 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
 require_contains .github/workflows/security.yml 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
@@ -371,7 +376,7 @@ elif ! "$runtime_binary" \
     failures=$((failures + 1))
 fi
 
-if rg -n 'Command::new' --glob '*.rs' crates/*/src; then
+if grep -rn 'Command::new' --include='*.rs' crates/*/src; then
     printf '%s\n' 'runtime process spawning is incompatible with the distroless contract' >&2
     failures=$((failures + 1))
 fi
