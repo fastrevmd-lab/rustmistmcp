@@ -2101,7 +2101,9 @@ dependencies = [
  "mecmcp-audit",
  "mecmcp-auth",
  "mecmcp-changeset",
+ "mecmcp-http",
  "mecmcp-inventory",
+ "mecmcp-secret",
  "mecmcp-server",
  "reqwest",
  "rustls",
@@ -2114,6 +2116,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "tower",
  "url",
  "zeroize",
 ]
