@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -56,7 +58,51 @@ jobs:
           scripts/build-release.sh
           archive=$(find dist -name '*.tar.gz' -print -quit)
           scripts/smoke-release-archive.sh "$archive" "$archive.sha256"
+
+  # The OCI smoke is the only gate that actually *runs the built binary*, so it
+  # is the only thing that can catch a startup-ordering fault. It found one: the
+  # rustls crypto provider was installed after the HTTP client was constructed,
+  # so the server died on boot while every unit test passed, because the test
+  # harness installs a provider itself.
+  #
+  # It also takes ~35-40 minutes, which is too slow to sit on the critical path
+  # of every push. So it runs when it can actually earn its keep:
+  #
+  #   - release tags, always
+  #   - pushes to main, so a source change that breaks startup is caught at merge
+  #     rather than at release
+  #   - PRs that touch the container, the packaging scripts, the dependency
+  #     graph, or the startup path itself
+  #   - on demand via workflow_dispatch
+  #
+  # Deliberately NOT gated on Dockerfile changes alone: the bug above was in
+  # main.rs, and a Dockerfile-only filter would have sailed past it.
+  oci-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Decide whether the OCI smoke must run
+        id: gate
+        run: |
+          if [[ $GITHUB_REF == refs/tags/v* || $GITHUB_EVENT_NAME == workflow_dispatch ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [[ $GITHUB_EVENT_NAME == push ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          base="origin/${GITHUB_BASE_REF:-main}"
+          git fetch --quiet origin "${GITHUB_BASE_REF:-main}"
+          if git diff --name-only "$base"...HEAD | grep -qE '^(Dockerfile|scripts/|packaging/|Cargo\.lock|\.github/workflows/ci\.yml|crates/rustmistmcp/src/main\.rs)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "No container, packaging, dependency or startup-path changes; skipping the OCI smoke." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: OCI build and hardened help smoke
+        if: steps.gate.outputs.run == 'true'
         run: |
           docker build --build-arg VERSION=ci --build-arg REVISION="$GITHUB_SHA" -t rustmistmcp:ci .
           docker run --rm --read-only --network none --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m rustmistmcp:ci --help
