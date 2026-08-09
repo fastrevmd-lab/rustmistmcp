@@ -94,6 +94,28 @@ for file in "${required_files[@]}"; do
     require_file "$file"
 done
 
+# The Rust toolchain version appears in five places that must agree: the
+# Dockerfile builder stage, the release workflow's archive builder, two calls in
+# smoke-oci.sh, and rust-toolchain.toml. Dependabot bumps only the Dockerfile,
+# which would leave the container built with one toolchain and the archive with
+# another — a difference that shows up as a glibc or codegen mismatch at install
+# time, not at build time. This makes a partial bump fail here instead.
+rust_image_refs=$(grep -rhoE 'rust:[0-9]+\.[0-9]+\.[0-9]+-slim-bookworm@sha256:[0-9a-f]{64}' \
+    Dockerfile .github/workflows/release.yml scripts/smoke-oci.sh | sort -u)
+if [[ $(printf '%s\n' "$rust_image_refs" | grep -c .) -ne 1 ]]; then
+    printf 'rust builder image is not consistent across Dockerfile, release.yml and smoke-oci.sh:\n%s\n' \
+        "$rust_image_refs" >&2
+    failures=$((failures + 1))
+fi
+rust_image_version=$(printf '%s' "$rust_image_refs" | sed -E 's|^rust:([0-9]+\.[0-9]+\.[0-9]+).*|\1|')
+rust_channel=$(grep -oE '^channel[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' rust-toolchain.toml \
+    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+if [[ -n $rust_image_version && $rust_image_version != "$rust_channel" ]]; then
+    printf 'rust-toolchain.toml channel (%s) does not match the builder image (%s)\n' \
+        "$rust_channel" "$rust_image_version" >&2
+    failures=$((failures + 1))
+fi
+
 if (( failures > 0 )); then
     printf 'packaging policy: FAIL (%d violation(s))\n' "$failures" >&2
     exit 1
@@ -107,7 +129,11 @@ sysusers=packaging/systemd/rustmistmcp.sysusers
 tmpfiles=packaging/systemd/rustmistmcp.tmpfiles
 journald=packaging/journald/mecmcp.conf
 
-require_regex "$dockerfile" '^FROM rust:1\.97\.0-slim-bookworm@sha256:[0-9a-f]{64} AS builder$'
+# Digest-pinned, not frozen at one version — see the note on the workflow action
+# pins below. A Rust bump must still move all five references together
+# (Dockerfile, release.yml, smoke-oci.sh x2, rust-toolchain.toml), which the
+# consistency check right after this enforces.
+require_regex "$dockerfile" '^FROM rust:[0-9]+\.[0-9]+\.[0-9]+-slim-bookworm@sha256:[0-9a-f]{64} AS builder$'
 require_regex "$dockerfile" '^FROM gcr\.io/distroless/cc-debian13:nonroot@sha256:[0-9a-f]{64}$'
 require_absent "$dockerfile" '^# syntax='
 require_contains "$dockerfile" 'USER 65532:65532'
@@ -217,15 +243,26 @@ require_contains scripts/smoke-release-archive.sh '[[ -f $archive && ! -L $archi
 require_contains scripts/smoke-release-archive.sh '[[ -f $sidecar && ! -L $sidecar && -r $sidecar ]]'
 require_absent scripts/smoke-release-archive.sh 'tar[[:space:]]+--absolute-names[[:space:]]+-x'
 
+# Uses grep, not ripgrep. `rg` is not installed on the GitHub runner, and both
+# call sites failed *open*: the loop below simply read nothing, so the check that
+# every workflow action is pinned to a 40-hex SHA silently passed on every CI run
+# it has ever made. The Command::new check below had the same shape — a missing
+# binary makes the `if` false, so no violation is reported.
 while IFS= read -r action_line; do
     if [[ ! $action_line =~ uses:[[:space:]]+[^[:space:]@]+@[0-9a-f]{40}[[:space:]]*$ ]]; then
         printf 'workflow action is not pinned to exactly 40 hex: %s\n' "$action_line" >&2
         failures=$((failures + 1))
     fi
-done < <(rg '^[[:space:]]*-[[:space:]]+uses:' .github/workflows -g '*.yml' -g '*.yaml' | cut -d: -f2-)
-require_contains .github/workflows/ci.yml 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
-require_contains .github/workflows/release.yml 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
-require_contains .github/workflows/security.yml 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
+done < <(grep -rE '^[[:space:]]*-[[:space:]]+uses:' .github/workflows --include='*.yml' --include='*.yaml' | cut -d: -f2-)
+# These assert that each action and the builder image are *pinned*, not that they
+# sit at one frozen revision. The security property is "resolved by immutable
+# digest, never by a mutable tag", and the 40-hex sweep above enforces it across
+# every workflow. Freezing the exact SHA additionally made every dependabot bump
+# fail policy, which is a change-detector rather than a control — and one that
+# encourages merging around the gate.
+require_regex .github/workflows/ci.yml 'actions/checkout@[0-9a-f]{40}'
+require_regex .github/workflows/release.yml 'actions/checkout@[0-9a-f]{40}'
+require_regex .github/workflows/security.yml 'actions/checkout@[0-9a-f]{40}'
 for workflow in .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/security.yml; do
     if ! awk '
         function finish_checkout() {
@@ -265,7 +302,7 @@ require_contains .github/workflows/release.yml 'sbom: true'
 require_contains .github/workflows/release.yml "tags: ['v*-rc*']"
 require_contains .github/workflows/release.yml 'needs: verify'
 require_contains .github/workflows/release.yml 'Validate RC tag against Cargo version'
-require_contains .github/workflows/release.yml 'rust:1.97.0-slim-bookworm@sha256:6d220bf85c74e842a79da63997af8d2e74455c0b8847d8bb3a5888572334991d'
+require_regex .github/workflows/release.yml 'rust:[0-9]+\.[0-9]+\.[0-9]+-slim-bookworm@sha256:[0-9a-f]{64}'
 require_absent .github/workflows/ci.yml '--version'
 require_absent .github/workflows/release.yml '--version'
 require_contains .github/workflows/ci.yml '--help'
@@ -303,8 +340,8 @@ if [[ -f .gitleaksignore ]]; then
         failures=$((failures + 1))
     fi
 fi
-require_contains .github/workflows/release.yml 'actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f'
-require_contains .github/workflows/release.yml 'actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f'
+require_regex .github/workflows/release.yml 'actions/upload-artifact@[0-9a-f]{40}'
+require_regex .github/workflows/release.yml 'actions/attest-build-provenance@[0-9a-f]{40}'
 require_regex .github/workflows/release.yml '^permissions: \{\}$'
 require_count .github/workflows/release.yml 'contents: read' 3
 require_count .github/workflows/release.yml 'packages: write' 1
@@ -371,7 +408,7 @@ elif ! "$runtime_binary" \
     failures=$((failures + 1))
 fi
 
-if rg -n 'Command::new' --glob '*.rs' crates/*/src; then
+if grep -rn 'Command::new' --include='*.rs' crates/*/src; then
     printf '%s\n' 'runtime process spawning is incompatible with the distroless contract' >&2
     failures=$((failures + 1))
 fi

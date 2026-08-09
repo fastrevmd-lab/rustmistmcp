@@ -19,7 +19,7 @@ cleanup() {
     docker run --rm --network none \
         --entrypoint /bin/chown \
         -v "$work:/fixture" \
-        rust:1.97.0-slim-bookworm@sha256:6d220bf85c74e842a79da63997af8d2e74455c0b8847d8bb3a5888572334991d \
+        rust:1.97.1-slim-bookworm@sha256:96c0af8cf054fd006435089f0076729716784ec9be485bd655de59c55df105ce \
         -R "$(id -u):$(id -g)" /fixture/runtime /fixture/state >/dev/null 2>&1 || true
     rm -rf "$work"
 }
@@ -36,7 +36,7 @@ chmod 0600 "$work/runtime/tokens.json" "$work/runtime/mist-api-token" "$work/run
 docker run --rm --network none \
     --entrypoint /bin/chown \
     -v "$work:/fixture" \
-    rust:1.97.0-slim-bookworm@sha256:6d220bf85c74e842a79da63997af8d2e74455c0b8847d8bb3a5888572334991d \
+    rust:1.97.1-slim-bookworm@sha256:96c0af8cf054fd006435089f0076729716784ec9be485bd655de59c55df105ce \
     -R 65532:65532 /fixture/runtime /fixture/state
 
 docker run -d --name "$name" \
