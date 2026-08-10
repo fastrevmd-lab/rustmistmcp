@@ -1,0 +1,10 @@
+{
+  "name": "M_Lab",
+  "id": "81f100cf-7e3c-4411-94e3-544cd45e46d6",
+  "msp_id": null,
+  "created_time": 1754000000.0,
+  "modified_time": 1754000000.0,
+  "allow_mist": true,
+  "session_expiry": 1440,
+  "alarmtemplate_id": "00000000-0000-0000-0000-000000000000"
+}

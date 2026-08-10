@@ -1,0 +1,14 @@
+{
+  "name": "REDACTED",
+  "privileges": [
+    {
+      "scope": "org",
+      "org_id": "81f100cf-7e3c-4411-94e3-544cd45e46d6",
+      "name": "M_Lab",
+      "role": "write",
+      "views": [
+        "org_admin"
+      ]
+    }
+  ]
+}

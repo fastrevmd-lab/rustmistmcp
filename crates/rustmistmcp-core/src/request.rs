@@ -277,22 +277,46 @@ fn validate_schema(
     schema: &serde_json::Value,
     value: &serde_json::Value,
 ) -> Result<(), MistError> {
-    match schema_matches(catalog, schema, value) {
+    match schema_matches(catalog, schema, value, Direction::Request) {
         Ok(true) => Ok(()),
         Ok(false) => invalid(request, "value violates catalog schema"),
         Err(()) => invalid(request, "catalog schema compilation failed"),
     }
 }
 
+/// Which direction a body is travelling, and therefore how strictly its
+/// vocabulary is judged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Direction {
+    /// Outbound to Mist. Judged exactly as declared — an unknown enum member in
+    /// something we are about to send is our bug, and rejecting it protects the
+    /// upstream call.
+    Request,
+    /// Inbound from Mist. Structure is judged; vocabulary is not. See
+    /// [`crate::catalog::relax_for_responses`] for what that means and why.
+    Response,
+}
+
 fn schema_matches(
     catalog: &Catalog,
     schema: &serde_json::Value,
     value: &serde_json::Value,
+    direction: Direction,
 ) -> Result<bool, ()> {
-    let root = serde_json::json!({
-        "components": catalog.components,
-        "allOf": [schema],
-    });
+    let root = match direction {
+        Direction::Request => serde_json::json!({
+            "components": catalog.components,
+            "allOf": [schema],
+        }),
+        Direction::Response => {
+            let mut schema = schema.clone();
+            crate::catalog::relax_for_responses(&mut schema);
+            serde_json::json!({
+                "components": catalog.relaxed_components(),
+                "allOf": [schema],
+            })
+        }
+    };
     let validator = jsonschema::validator_for(&root).map_err(|_| ())?;
     Ok(validator.is_valid(value))
 }
@@ -354,10 +378,12 @@ fn validate_response_body(
                 .collect();
             if schemas.is_empty() {
                 Err("JSON body does not match declared response media")
-            } else if schemas
-                .iter()
-                .any(|schema| matches!(schema_matches(catalog, schema, value), Ok(true)))
-            {
+            } else if schemas.iter().any(|schema| {
+                matches!(
+                    schema_matches(catalog, schema, value, Direction::Response),
+                    Ok(true)
+                )
+            }) {
                 Ok(())
             } else {
                 Err("JSON body violates declared response schema")

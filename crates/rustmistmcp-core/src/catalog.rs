@@ -222,6 +222,12 @@ pub struct Catalog {
     pub source: MistCatalogSource,
     /// Complete resolvable OpenAPI components registry.
     pub components: serde_json::Value,
+    /// `components` with response-only vocabulary constraints removed.
+    ///
+    /// Computed on first use and reused: the transform walks every component
+    /// schema, and doing that per response would double the cost of an already
+    /// expensive validation.
+    relaxed_components: std::sync::OnceLock<serde_json::Value>,
     /// All current source operations, sorted by `operation_key`.
     pub operations: Vec<MistOperation>,
     /// Frozen reference discrepancy and media facts.
@@ -272,6 +278,20 @@ impl Catalog {
             operations: document.operations,
             audit: document.audit,
             operation_index,
+            relaxed_components: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// `components`, with the constraints that describe Juniper's *vocabulary*
+    /// rather than the shape of a response removed.
+    ///
+    /// See [`relax_for_responses`] for what is dropped and why.
+    #[must_use]
+    pub fn relaxed_components(&self) -> &serde_json::Value {
+        self.relaxed_components.get_or_init(|| {
+            let mut relaxed = self.components.clone();
+            relax_for_responses(&mut relaxed);
+            relaxed
         })
     }
 
@@ -651,5 +671,88 @@ fn canonical_json(value: serde_json::Value) -> serde_json::Value {
             serde_json::Value::Object(values.into_iter().collect())
         }
         value => value,
+    }
+}
+
+/// Strip the constraints that pin Juniper's *vocabulary* rather than the
+/// *shape* of a response.
+///
+/// Response validation exists to refuse a body that is malformed or hostile —
+/// wrong container, wrong types where we will index. It is a poor mechanism for
+/// pinning a vendor's vocabulary, because the vendor extends that vocabulary
+/// unilaterally and every addition then becomes a total failure of the
+/// operation rather than one unrecognised field.
+///
+/// Measured against the pinned document, the exposure is not marginal:
+///
+/// | Constraint | Occurrences |
+/// |---|---|
+/// | `additionalProperties: false` | 1103 |
+/// | closed `enum` | 516 |
+/// | non-nullable typed fields | 8746 (against only 460 nullable unions) |
+///
+/// Two live failures on a real tenant motivated this, both of the same kind —
+/// the pinned spec is narrower than the API it describes:
+///
+/// - `getSelf` returned `views: ["org_admin"]`; `admin_privilege_view` is a
+///   closed enum of eight values that does not include it.
+/// - `getOrg` returned `msp_id: null`; the field is declared `"string"`, while
+///   `alarmtemplate_id` in the same schema is declared `["string","null"]` — so
+///   the spec is inconsistent about optionality rather than missing a convention.
+///
+/// Three relaxations, each covering an *additive* vendor change:
+///
+/// 1. `enum` is dropped — a new member is data, not a violation.
+/// 2. `additionalProperties: false` is dropped — a new field is data too, and
+///    this is the largest exposure of the three.
+/// 3. Any declared `type` is widened to admit `null`, since an absent optional
+///    field is routinely returned as null.
+///
+/// What deliberately survives: containers, and the declared types of the fields
+/// that are present and non-null. A response that is structurally wrong is still
+/// refused.
+///
+/// **Requests are not relaxed.** Rejecting an unknown enum member in something
+/// we are about to *send* is correct — it protects the upstream call and catches
+/// our own bugs — and nothing about vendor evolution argues otherwise.
+pub(crate) fn relax_for_responses(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.remove("enum");
+            if map.get("additionalProperties") == Some(&serde_json::Value::Bool(false)) {
+                map.remove("additionalProperties");
+            }
+            widen_type_to_admit_null(map);
+            for nested in map.values_mut() {
+                relax_for_responses(nested);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                relax_for_responses(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Add `"null"` to a schema's declared `type`, leaving every other type intact.
+fn widen_type_to_admit_null(map: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(declared) = map.get("type") else {
+        return;
+    };
+    let widened = match declared {
+        serde_json::Value::String(name) if name != "null" => {
+            Some(serde_json::json!([name, "null"]))
+        }
+        serde_json::Value::Array(names) if !names.iter().any(|n| n.as_str() == Some("null")) => {
+            let mut widened = names.clone();
+            widened.push(serde_json::Value::String("null".to_owned()));
+            Some(serde_json::Value::Array(widened))
+        }
+        _ => None,
+    };
+    if let Some(widened) = widened {
+        map.insert("type".to_owned(), widened);
     }
 }
