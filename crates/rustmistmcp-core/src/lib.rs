@@ -4,6 +4,7 @@
 
 pub mod catalog;
 pub mod client;
+pub mod execute_class;
 pub mod pagination;
 pub mod request;
 
