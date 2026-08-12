@@ -40,6 +40,13 @@ impl MistClient for RecordingClient {
                 "total": 0,
                 "results": []
             }),
+            "getSiteGatewayMetrics" => serde_json::json!({}),
+            "getSiteInsightMetricsForGateway" => serde_json::json!({
+                "start": 0,
+                "end": 0,
+                "interval": 60,
+                "results": []
+            }),
             _ => serde_json::json!({"results": []}),
         };
         Ok(MistResponse {
@@ -127,4 +134,31 @@ async fn wan_edges_rejects_caller_supplied_type_and_ambiguous_scope() {
 
     let neither = record_call("list_mist_wan_edges", serde_json::json!({})).await;
     assert!(neither.is_err(), "missing scope must be refused");
+}
+
+#[tokio::test]
+async fn wan_edge_stats_selects_site_or_device_variant() {
+    let site = record_call(
+        "get_mist_wan_edge_stats",
+        serde_json::json!({"site_id": SITE_ID}),
+    )
+    .await
+    .expect("site call");
+    assert_eq!(site.operation_id, "getSiteGatewayMetrics");
+
+    let device = record_call(
+        "get_mist_wan_edge_stats",
+        serde_json::json!({
+            "site_id": SITE_ID,
+            "device_id": "00000000-0000-0000-0000-00000000abcd",
+            "metrics": "cpu,memory"
+        }),
+    )
+    .await
+    .expect("device call");
+    assert_eq!(device.operation_id, "getSiteInsightMetricsForGateway");
+    assert!(
+        !device.query.contains_key("device_id"),
+        "device_id belongs in the path, not the query"
+    );
 }

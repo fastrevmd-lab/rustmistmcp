@@ -64,6 +64,21 @@ pub(crate) fn wan_edges(scope: WanScope) -> Resolved {
     }
 }
 
+/// Resolve gateway stats to the site-wide or per-device operation.
+pub(crate) fn wan_edge_stats(per_device: bool) -> Resolved {
+    if per_device {
+        Resolved {
+            operation_id: "getSiteInsightMetricsForGateway",
+            path_names: &["site_id", "device_id"],
+        }
+    } else {
+        Resolved {
+            operation_id: "getSiteGatewayMetrics",
+            path_names: &["site_id"],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +105,24 @@ mod tests {
             Resolved {
                 operation_id: "searchSiteDevices",
                 path_names: &["site_id"]
+            }
+        );
+    }
+
+    #[test]
+    fn wan_edge_stats_selects_on_device_presence() {
+        assert_eq!(
+            wan_edge_stats(false),
+            Resolved {
+                operation_id: "getSiteGatewayMetrics",
+                path_names: &["site_id"]
+            }
+        );
+        assert_eq!(
+            wan_edge_stats(true),
+            Resolved {
+                operation_id: "getSiteInsightMetricsForGateway",
+                path_names: &["site_id", "device_id"],
             }
         );
     }

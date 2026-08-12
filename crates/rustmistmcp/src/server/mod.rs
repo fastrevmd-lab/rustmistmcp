@@ -40,6 +40,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "get_mist_self",
     "get_mist_site",
     "get_mist_sle",
+    "get_mist_wan_edge_stats",
     "invoke_mist_privileged_read",
     "invoke_mist_read",
     "list_mist_orgs",
@@ -1021,6 +1022,18 @@ read_args!(WanEdgeListArgs {
     r#type: String,
 });
 
+read_args!(WanEdgeStatsArgs {
+    /// Site UUID.
+    site_id: String,
+    /// Gateway device UUID. When present, returns per-device insight metrics.
+    device_id: Option<String>,
+    /// Metrics to retrieve. Required when `device_id` is present.
+    metrics: Option<String>,
+    start: Option<u64>,
+    end: Option<u64>,
+    duration: Option<String>,
+});
+
 #[tool_router(router = mist_tool_router, vis = "pub(crate)")]
 impl MistHandler {
     #[tool(name = "get_mist_device", description = "Get one site device.")]
@@ -1211,6 +1224,27 @@ impl MistHandler {
                 "getSiteSleSummary",
                 args,
                 &["site_id", "scope", "scope_id", "metric"],
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "get_mist_wan_edge_stats",
+        description = "Get WAN edge gateway metrics for a site, or insight metrics for one gateway."
+    )]
+    async fn get_mist_wan_edge_stats(
+        &self,
+        Parameters(args): Parameters<WanEdgeStatsArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let resolved = wan::wan_edge_stats(args.device_id.is_some());
+        Ok(self
+            .dispatch_named(
+                "get_mist_wan_edge_stats",
+                resolved.operation_id,
+                args,
+                resolved.path_names,
                 MistCapability::OrdinaryRead,
                 &extensions,
             )
