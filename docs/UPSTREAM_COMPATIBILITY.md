@@ -11,7 +11,7 @@ exists upstream but cannot be consumed from the repository's one coherent
 The ledger's only row was `crates/rustmistmcp/src/mist_token_cmd.rs`, an adapter
 for grant-preserving token commands (`mecmcp#160`). Its removal condition was
 "one immutable `mecmcp` revision contains the required `mecmcp-server` surface
-and `token_cmd::run_with_grant`". Revision `6a19443` (`mecmcp` v0.8.7) contains
+and `token_cmd::run_with_grant`". Revision `850f529` (`mecmcp` v0.8.8) contains
 both, the adapter is deleted, and `main` calls
 `run_with_grant::<MistGrant>(..., None)` directly.
 

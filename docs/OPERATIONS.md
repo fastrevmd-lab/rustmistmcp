@@ -66,34 +66,20 @@ Grant-bearing MCP bearer-token lifecycle is the shared
 preserve existing validated Mist grants. The operator-authentication store is
 separate from the outbound Mist API token.
 
-### Known audit defect imported with `mecmcp` v0.8.7
+### Transport-level audit
 
-**A scope-preflight denial is recorded as allowed.** `mecmcp#268`: the shared
-transport settles its `tools/call` audit outcome with `succeed()` *before*
-running the preflight, so a request denied for an out-of-scope `org_id` or
-`site_id` answers 403 while its only audit record says `allowed`/`ok`. The
-handler never runs, so nothing corrects it. A correlated second record would not
-help either, because `mecmcp#269` gives the transport and handler events
-different `request_id` values.
+Every `tools/call` produces a transport audit event in addition to the
+handler's enriched one, and its outcome is settled from the scope-preflight
+result: `authorization=denied` with reason `insufficient_scope` when the
+preflight refuses, `allowed`/`ok` when it passes.
 
-Both are upstream defects and must be fixed there, not worked around here —
-generic transport and audit code does not belong in this repo.
+That was not always true. `mecmcp#268` settled the outcome *before* running the
+preflight, so a request answered with 403 carried a single audit record saying
+`allowed`/`ok`, and the handler never ran to correct it. Fixed in `mecmcp#270`
+and first released in **v0.8.8**, which this repo pins. No build carrying the
+defect should be deployed.
 
-Neither is present in the running lab deployment, which is why the issue #11
-acceptance evidence is trustworthy: LXC 952 runs a build predating this bump,
-and v0.7.3 emits no transport-level `tools/call` event at all. Its seven audit
-records come from the handler, which settles the outcome after the decision —
-the two failed reads on 2026-08-09 are recorded as `result=error`, correctly.
-
-**`mecmcp#268` is fixed upstream** (`mecmcp#270`), and `mecmcp` v0.8.8 is the
-first revision carrying it. A preflight refusal now settles the outcome from
-the check rather than before it, and audits as `authorization=denied` with
-reason `insufficient_scope`. Until this repo pins v0.8.8 or later, the
-constraint stands: **do not upgrade 952 onto a v0.8.7 build**, or a denied call
-logs as an allowed one and the audit trail stops answering the question it
-exists to answer — whether a token ever reached an org it was not scoped for.
-
-`mecmcp#269` is still open: the transport and handler events mint different
+`mecmcp#269` remains open: the transport and handler events mint different
 `request_id`s, so the two halves of one request cannot be correlated. That
 degrades analysis; it does not make any single record false.
 
@@ -119,14 +105,15 @@ exists to exercise this server; a wildcard `devices` scope keeps new read tools
 testable without reminting a token for each one. Recorded here so nobody
 mistakes an intentionally-open scope for a tightened one that regressed.
 
-Two conditions attach to it:
+One condition attaches to it: **do not carry this shape to a token with
+production reach.** Set `devices` to the same subjects the grant names, so both
+layers agree.
 
-- **Do not carry this shape to a token with production reach.** Set `devices`
-  to the same subjects the grant names, so both layers agree.
-- **Tighten only on a `mecmcp` v0.8.8 or later build.** Tightening `devices`
-  makes preflight denials reachable for the first time. On v0.8.7 those logged
-  as allowed (`mecmcp#268`); v0.8.8 records them as denied. Tightening before
-  the pin moves would create a denial path whose audit record is false.
+The second condition is now satisfied. Tightening `devices` makes preflight
+denials reachable for the first time, and those had to audit honestly first —
+on v0.8.7 they logged as allowed (`mecmcp#268`). This repo pins v0.8.8, which
+records them as denied, so the scope can be tightened whenever the lab no longer
+needs it open.
 
 Tracked in issue #17.
 

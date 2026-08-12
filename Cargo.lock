@@ -1412,8 +1412,8 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mecmcp-audit"
-version = "0.8.7"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=6a19443b7af2476e18c9bbc38af14dd5a1c57481#6a19443b7af2476e18c9bbc38af14dd5a1c57481"
+version = "0.8.8"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=850f52972d33bd4c3e33cf4998fc7e821188707c#850f52972d33bd4c3e33cf4998fc7e821188707c"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1442,8 +1442,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-auth"
-version = "0.8.7"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=6a19443b7af2476e18c9bbc38af14dd5a1c57481#6a19443b7af2476e18c9bbc38af14dd5a1c57481"
+version = "0.8.8"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=850f52972d33bd4c3e33cf4998fc7e821188707c#850f52972d33bd4c3e33cf4998fc7e821188707c"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -1460,8 +1460,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-changeset"
-version = "0.8.7"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=6a19443b7af2476e18c9bbc38af14dd5a1c57481#6a19443b7af2476e18c9bbc38af14dd5a1c57481"
+version = "0.8.8"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=850f52972d33bd4c3e33cf4998fc7e821188707c#850f52972d33bd4c3e33cf4998fc7e821188707c"
 dependencies = [
  "async-trait",
  "getrandom 0.4.3",
@@ -1480,8 +1480,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-device"
-version = "0.8.7"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=6a19443b7af2476e18c9bbc38af14dd5a1c57481#6a19443b7af2476e18c9bbc38af14dd5a1c57481"
+version = "0.8.8"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=850f52972d33bd4c3e33cf4998fc7e821188707c#850f52972d33bd4c3e33cf4998fc7e821188707c"
 dependencies = [
  "async-trait",
  "rustix 1.1.4",
@@ -1496,8 +1496,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-http"
-version = "0.8.7"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=6a19443b7af2476e18c9bbc38af14dd5a1c57481#6a19443b7af2476e18c9bbc38af14dd5a1c57481"
+version = "0.8.8"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=850f52972d33bd4c3e33cf4998fc7e821188707c#850f52972d33bd4c3e33cf4998fc7e821188707c"
 dependencies = [
  "mecmcp-secret",
  "reqwest",
@@ -1511,8 +1511,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-inventory"
-version = "0.8.7"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=6a19443b7af2476e18c9bbc38af14dd5a1c57481#6a19443b7af2476e18c9bbc38af14dd5a1c57481"
+version = "0.8.8"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=850f52972d33bd4c3e33cf4998fc7e821188707c#850f52972d33bd4c3e33cf4998fc7e821188707c"
 dependencies = [
  "mecmcp-secret",
  "serde",
@@ -1525,8 +1525,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-job"
-version = "0.8.7"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=6a19443b7af2476e18c9bbc38af14dd5a1c57481#6a19443b7af2476e18c9bbc38af14dd5a1c57481"
+version = "0.8.8"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=850f52972d33bd4c3e33cf4998fc7e821188707c#850f52972d33bd4c3e33cf4998fc7e821188707c"
 dependencies = [
  "mecmcp-device",
  "thiserror",
@@ -1536,8 +1536,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-runtime"
-version = "0.8.7"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=6a19443b7af2476e18c9bbc38af14dd5a1c57481#6a19443b7af2476e18c9bbc38af14dd5a1c57481"
+version = "0.8.8"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=850f52972d33bd4c3e33cf4998fc7e821188707c#850f52972d33bd4c3e33cf4998fc7e821188707c"
 dependencies = [
  "anyhow",
  "clap",
@@ -1551,8 +1551,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-secret"
-version = "0.8.7"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=6a19443b7af2476e18c9bbc38af14dd5a1c57481#6a19443b7af2476e18c9bbc38af14dd5a1c57481"
+version = "0.8.8"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=850f52972d33bd4c3e33cf4998fc7e821188707c#850f52972d33bd4c3e33cf4998fc7e821188707c"
 dependencies = [
  "rustix 1.1.4",
  "thiserror",
@@ -1561,8 +1561,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-server"
-version = "0.8.7"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=6a19443b7af2476e18c9bbc38af14dd5a1c57481#6a19443b7af2476e18c9bbc38af14dd5a1c57481"
+version = "0.8.8"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=850f52972d33bd4c3e33cf4998fc7e821188707c#850f52972d33bd4c3e33cf4998fc7e821188707c"
 dependencies = [
  "http",
  "mecmcp-audit",
@@ -1575,8 +1575,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-transport"
-version = "0.8.7"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=6a19443b7af2476e18c9bbc38af14dd5a1c57481#6a19443b7af2476e18c9bbc38af14dd5a1c57481"
+version = "0.8.8"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?rev=850f52972d33bd4c3e33cf4998fc7e821188707c#850f52972d33bd4c3e33cf4998fc7e821188707c"
 dependencies = [
  "axum",
  "axum-server",
