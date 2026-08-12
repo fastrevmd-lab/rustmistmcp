@@ -5,8 +5,6 @@
 //! be tested without a client; the wiring is proven separately in
 //! `tests/wan_tools.rs`.
 
-#![allow(dead_code)]
-
 /// Which scope a collapsed tool was called with.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WanScope {
@@ -17,6 +15,7 @@ pub(crate) enum WanScope {
 }
 
 /// Whether a stats tool returns records or a count distribution.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum StatsMode {
     /// Return matching records.
@@ -51,6 +50,20 @@ pub(crate) fn resolve_scope(
     }
 }
 
+/// Resolve the gateway inventory search for a scope.
+pub(crate) fn wan_edges(scope: WanScope) -> Resolved {
+    match scope {
+        WanScope::Org => Resolved {
+            operation_id: "searchOrgDevices",
+            path_names: &["org_id"],
+        },
+        WanScope::Site => Resolved {
+            operation_id: "searchSiteDevices",
+            path_names: &["site_id"],
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,5 +74,23 @@ mod tests {
         assert_eq!(resolve_scope(None, Some("site")), Ok(WanScope::Site));
         assert_eq!(resolve_scope(None, None), Err(ScopeError));
         assert_eq!(resolve_scope(Some("org"), Some("site")), Err(ScopeError));
+    }
+
+    #[test]
+    fn wan_edges_resolves_per_scope() {
+        assert_eq!(
+            wan_edges(WanScope::Org),
+            Resolved {
+                operation_id: "searchOrgDevices",
+                path_names: &["org_id"]
+            }
+        );
+        assert_eq!(
+            wan_edges(WanScope::Site),
+            Resolved {
+                operation_id: "searchSiteDevices",
+                path_names: &["site_id"]
+            }
+        );
     }
 }

@@ -47,6 +47,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "list_mist_sites",
     "list_mist_sle_metrics",
     "list_mist_upgrades",
+    "list_mist_wan_edges",
     "list_mist_wlans",
     "search_mist_alarms",
     "search_mist_audit_logs",
@@ -668,7 +669,6 @@ enum MistCallError {
     #[error("catalog search requires a 1-128 byte query and a result limit from 1 through 50")]
     InvalidSearch,
     #[error("exactly one of org_id or site_id is required")]
-    #[allow(dead_code)]
     AmbiguousScope,
     #[error(transparent)]
     Mist(#[from] MistError),
@@ -996,6 +996,30 @@ read_args!(RogueArgs {
     #[serde(rename = "type")] r#type: Option<String>,
 });
 read_args!(UpgradeArgs { site_id: String, status: Option<String> });
+
+/// The device type this tool is permitted to enumerate.
+fn gateway_device_type() -> String {
+    "gateway".to_owned()
+}
+
+read_args!(WanEdgeListArgs {
+    /// Organization UUID. Mutually exclusive with `site_id`.
+    org_id: Option<String>,
+    /// Site UUID. Mutually exclusive with `org_id`.
+    site_id: Option<String>,
+    #[schemars(range(min = 1, max = 100))]
+    limit: Option<u32>,
+    search_after: Option<String>,
+    hostname: Option<String>,
+    mac: Option<String>,
+    model: Option<String>,
+    version: Option<String>,
+    /// Always `gateway`. Not caller-settable: this tool must not enumerate
+    /// APs or switches.
+    #[serde(rename = "type", skip_deserializing, default = "gateway_device_type")]
+    #[schemars(skip)]
+    r#type: String,
+});
 
 #[tool_router(router = mist_tool_router, vis = "pub(crate)")]
 impl MistHandler {
@@ -1343,6 +1367,37 @@ impl MistHandler {
                 "listSiteDeviceUpgrades",
                 args,
                 &["site_id"],
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "list_mist_wan_edges",
+        description = "List WAN edge gateways (SRX/SSR) in an organization or site."
+    )]
+    async fn list_mist_wan_edges(
+        &self,
+        Parameters(args): Parameters<WanEdgeListArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = match wan::resolve_scope(args.org_id.as_deref(), args.site_id.as_deref()) {
+            Ok(scope) => scope,
+            Err(_) => {
+                return Ok(tool_result::<ReadEnvelope, _>(
+                    Err(MistCallError::AmbiguousScope),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        };
+        let resolved = wan::wan_edges(scope);
+        Ok(self
+            .dispatch_named(
+                "list_mist_wan_edges",
+                resolved.operation_id,
+                args,
+                resolved.path_names,
                 MistCapability::OrdinaryRead,
                 &extensions,
             )
