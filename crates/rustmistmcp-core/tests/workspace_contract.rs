@@ -6,7 +6,7 @@ const WORKSPACE_MANIFEST: &str = include_str!("../../../Cargo.toml");
 const CORE_MANIFEST: &str = include_str!("../Cargo.toml");
 const SERVER_MANIFEST: &str = include_str!("../../rustmistmcp/Cargo.toml");
 
-const MECMCP_REVISION: &str = "6a19443b7af2476e18c9bbc38af14dd5a1c57481";
+const MECMCP_REVISION: &str = "850f52972d33bd4c3e33cf4998fc7e821188707c";
 
 #[test]
 fn workspace_metadata_lints_and_shared_revision_are_locked() {

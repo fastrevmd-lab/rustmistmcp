@@ -69,7 +69,7 @@ across the mechub MCP server family. The split is not negotiable:
 
 If you are about to write generic auth, transport, rate-limiting, or
 change-control code in this repo, stop — it belongs in `mecmcp`. The extraction
-is well past its early stage: fourteen crates exist as of `mecmcp` v0.8.7, and
+is well past its early stage: fourteen crates exist as of `mecmcp` v0.8.8, and
 every one of them is pinned here to a single immutable revision so extension
 `TypeId`s cannot diverge inside one server process. Bump all ten pins together
 or not at all. `PLAN.md` and `ANALYSIS.md` upstream describe what lands when.
