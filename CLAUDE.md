@@ -8,13 +8,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 workspace, pre-release packaging, and — since `mecmcp#90` closed — a real
 outbound `HttpMistClient` wired into the production path.
 
-**It has reached a live tenant.** A lab deployment runs as LXC **610**
-`rustmistmcp-610` on **pve2** (`192.168.1.212`, tagged `disposable`), and on
-2026-08-10 `get_mist_self`, `get_mist_org`, and `list_mist_sites` each returned
-real data from `api.ac2.mist.com` in under 400 ms. That closed issue #11. The
-guest is rebuildable and holds no unique evidence — issue #11 has it all — but
-it does hold a live Mist API token, so destroying it means revoking that token
-at Mist, not just deleting the volume.
+**It has reached a live tenant.** A lab deployment runs as LXC **952** on
+**pve2** (hostname still `rustmistmcp-610`, `192.168.1.212`), and on 2026-08-10
+`get_mist_self`, `get_mist_org`, and `list_mist_sites` each returned real data
+from `api.ac2.mist.com` in under 400 ms. That closed issue #11.
+
+**952 is tagged `protected`.** Do not stop, destroy, restore over, or otherwise
+touch it — check the tag, not this sentence, before any guest operation. It was
+briefly VMID 610 tagged `disposable`; both changed in the 2026-08-12 renumber,
+and 610 no longer exists in the cluster.
 
 What that does *not* establish: the deployment is loopback-only with no TLS, one
 org, one grant-bearing token, and three read tools. The `/api/v1/self` *startup*
