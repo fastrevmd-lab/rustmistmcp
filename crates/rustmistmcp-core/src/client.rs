@@ -29,9 +29,12 @@ pub trait MistClient: Send + Sync {
     }
 }
 
-/// Deliberately unavailable default client used while mecmcp#90 is open.
+/// Deliberately unavailable client used where no Mist transport should exist.
 ///
-/// This implementation performs no I/O and never loads a credential.
+/// It was the default while `mecmcp#90` was open. That foundation has landed
+/// and `MistHandler::from_config` now builds a real `HttpMistClient`, so this
+/// remains only for tests and for handlers constructed without a credential:
+/// it performs no I/O and never loads one.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BlockedMistClient;
 

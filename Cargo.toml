@@ -47,18 +47,20 @@ url = "2"
 zeroize = "1"
 
 # Every shared crate is pinned to one immutable revision so extension TypeIds
-# cannot diverge across the server process. mecmcp#90 and mecmcp#91 remain open prerequisites
-# for live Mist integration.
-mecmcp-audit = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
-mecmcp-auth = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
-mecmcp-changeset = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
-mecmcp-http = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
-mecmcp-inventory = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
-mecmcp-job = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
-mecmcp-runtime = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
-mecmcp-secret = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
-mecmcp-server = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
-mecmcp-transport = { version = "0.7.3", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "3eac1100b02f31254967cd07c926acf89994b287" }
+# cannot diverge across the server process. This revision is the v0.8.7 tag.
+# mecmcp#91 (target-neutral auth scope vocabulary) is the remaining open
+# prerequisite; it is why the shared CLI still spells the profile flag
+# `--device-mapping`.
+mecmcp-audit = { version = "0.8.7", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "6a19443b7af2476e18c9bbc38af14dd5a1c57481" }
+mecmcp-auth = { version = "0.8.7", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "6a19443b7af2476e18c9bbc38af14dd5a1c57481" }
+mecmcp-changeset = { version = "0.8.7", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "6a19443b7af2476e18c9bbc38af14dd5a1c57481" }
+mecmcp-http = { version = "0.8.7", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "6a19443b7af2476e18c9bbc38af14dd5a1c57481" }
+mecmcp-inventory = { version = "0.8.7", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "6a19443b7af2476e18c9bbc38af14dd5a1c57481" }
+mecmcp-job = { version = "0.8.7", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "6a19443b7af2476e18c9bbc38af14dd5a1c57481" }
+mecmcp-runtime = { version = "0.8.7", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "6a19443b7af2476e18c9bbc38af14dd5a1c57481" }
+mecmcp-secret = { version = "0.8.7", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "6a19443b7af2476e18c9bbc38af14dd5a1c57481" }
+mecmcp-server = { version = "0.8.7", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "6a19443b7af2476e18c9bbc38af14dd5a1c57481" }
+mecmcp-transport = { version = "0.8.7", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "6a19443b7af2476e18c9bbc38af14dd5a1c57481" }
 
 [profile.release]
 lto = "thin"

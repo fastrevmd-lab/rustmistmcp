@@ -106,4 +106,5 @@ jobs:
         run: |
           docker build --build-arg VERSION=ci --build-arg REVISION="$GITHUB_SHA" -t rustmistmcp:ci .
           docker run --rm --read-only --network none --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m rustmistmcp:ci --help
+          docker run --rm --read-only --network none --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m rustmistmcp:ci --version
           scripts/smoke-oci.sh rustmistmcp:ci

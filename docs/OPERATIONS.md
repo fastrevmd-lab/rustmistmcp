@@ -1,9 +1,10 @@
 # rustmistmcp pre-release operations
 
 This is operator guidance for credential-free pre-release artifacts. It is not
-release acceptance and does not establish that the blocked outbound Mist client
-works. `mecmcp#90` must close before live-Mist operations; mutation tooling is
-also absent while that blocker remains open.
+release acceptance. The outbound `HttpMistClient` exists now that `mecmcp#90`
+has closed, but nothing here establishes that it works against a real tenant —
+no deployment and no credential exist (issue #11). Mutation tooling is still
+absent by design.
 
 ## Install boundary
 
@@ -54,14 +55,16 @@ their ownership or mode. State belongs below `/var/lib/rustmistmcp`.
 The installed unit uses the checked-in shared flags for Mist configuration,
 token store, audit journald/HMAC, loopback bind, and port 30030. No mutation
 state flag exists. For an external bind, TLS and exact Host/Origin values are
-mandatory. No
-graceful HTTP drain/SIGTERM-completion claim is permitted while `mecmcp#156` is
-open, and file-audit startup is not fail-closed while `mecmcp#158` is open.
-Grant-bearing MCP bearer-token lifecycle is provided temporarily by the
-Mist-typed adapter in `docs/UPSTREAM_COMPATIBILITY.md`. `token add` creates a
-grantless token; list, rotate, revoke, and subsequent adds preserve existing
-validated Mist grants. The operator-authentication store is separate from the
-outbound Mist API token.
+mandatory. Graceful HTTP shutdown (`mecmcp#156`) is wired: SIGTERM and SIGINT
+cancel the listener, which then waits up to 10 seconds for in-flight requests.
+That is the configured behaviour, not an acceptance-verified drain. File-audit
+startup is fail-closed (`mecmcp#158`): an unopenable `--audit-log-file` fails
+startup with `initializing audit tracing` rather than degrading to no audit.
+Grant-bearing MCP bearer-token lifecycle is the shared
+`token_cmd::run_with_grant`; the Mist-typed adapter it used to need is deleted.
+`token add` creates a grantless token; list, rotate, revoke, and subsequent adds
+preserve existing validated Mist grants. The operator-authentication store is
+separate from the outbound Mist API token.
 
 ## Repository security workflow prerequisite
 
@@ -78,9 +81,10 @@ remote journal/SIEM forwarding before carrying real traffic; do not set
 compare its SHA-256 with the release record, retain the existing binary under an
 explicit versioned rollback name, install the candidate, and restart. Roll back
 immediately if the active and listener checks fail. Compare the deployed binary
-hash verbatim with the archive candidate hash. Because `mecmcp#159` tracks the
-missing shared `--version`, use `rustmistmcp --help`, `BUILD-INFO`, and exact
-candidate/deployed hashes for identity evidence.
+hash verbatim with the archive candidate hash. `rustmistmcp --version` reports
+the binary name and version (`mecmcp#159` closed), but a version string is not
+provenance: keep `--help`, `BUILD-INFO`, and exact candidate/deployed hashes as
+the identity evidence.
 
 Measure the binary's glibc requirement rather than assuming it:
 

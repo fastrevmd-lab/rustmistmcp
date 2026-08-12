@@ -303,8 +303,11 @@ require_contains .github/workflows/release.yml "tags: ['v*-rc*']"
 require_contains .github/workflows/release.yml 'needs: verify'
 require_contains .github/workflows/release.yml 'Validate RC tag against Cargo version'
 require_regex .github/workflows/release.yml 'rust:[0-9]+\.[0-9]+\.[0-9]+-slim-bookworm@sha256:[0-9a-f]{64}'
-require_absent .github/workflows/ci.yml '--version'
-require_absent .github/workflows/release.yml '--version'
+# These were `require_absent` while the shared CLI had no `--version`
+# (mecmcp#159) and a workflow mentioning it would have been claiming an
+# identity check that exits 2. The flag is wired now, so the container smoke
+# must actually exercise it.
+require_contains .github/workflows/ci.yml '--version'
 require_contains .github/workflows/ci.yml '--help'
 require_contains .github/workflows/ci.yml 'rustup toolchain install 1.88.0 --profile minimal'
 require_contains .github/workflows/ci.yml 'scripts/smoke-oci.sh'
@@ -367,7 +370,12 @@ require_contains CLAUDE.md 'Mist supports API tokens and external OAuth 2.0, but
 require_absent README.md 'Grant-bearing Mist token'
 require_absent README.md 'grant-bearing Mist token'
 require_contains README.md 'Grant-bearing MCP bearer-token add/list/revoke/rotate'
-require_contains CLAUDE.md 'Grant-bearing MCP bearer-token lifecycle is blocked by'
+# This asserted the lifecycle was blocked by mecmcp#160. That issue closed and
+# the local adapter is gone, so the guard now holds the opposite line: the
+# lifecycle is the shared command, and CLAUDE.md must not go back to calling it
+# blocked.
+require_contains CLAUDE.md 'bearer-token lifecycle uses the shared `token_cmd::run_with_grant`'
+require_absent CLAUDE.md 'bearer-token lifecycle is blocked by'
 require_contains docs/OPERATIONS.md 'sudo install -D -o root -g rustmistmcp -m 0640'
 require_contains docs/OPERATIONS.md 'sudo install -o rustmistmcp -g rustmistmcp -m 0600 /dev/null'
 require_contains docs/OPERATIONS.md '/etc/rustmistmcp/mist-api-token'
