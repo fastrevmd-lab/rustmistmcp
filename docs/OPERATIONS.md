@@ -66,6 +66,26 @@ Grant-bearing MCP bearer-token lifecycle is the shared
 preserve existing validated Mist grants. The operator-authentication store is
 separate from the outbound Mist API token.
 
+### Known audit defect imported with `mecmcp` v0.8.7
+
+**A scope-preflight denial is recorded as allowed.** `mecmcp#268`: the shared
+transport settles its `tools/call` audit outcome with `succeed()` *before*
+running the preflight, so a request denied for an out-of-scope `org_id` or
+`site_id` answers 403 while its only audit record says `allowed`/`ok`. The
+handler never runs, so nothing corrects it. A correlated second record would not
+help either, because `mecmcp#269` gives the transport and handler events
+different `request_id` values.
+
+Both are upstream defects and must be fixed there, not worked around here —
+generic transport and audit code does not belong in this repo. Neither affects
+anything today, because no deployment and no tenant credential exist (issue
+\#11).
+
+**`mecmcp#268` must be fixed and consumed before live-tenant acceptance.** Do
+not record a read-only acceptance run against a real org while a denied call
+can be logged as an allowed one; the point of that run is the evidence, and this
+defect makes one class of evidence false.
+
 ## Repository security workflow prerequisite
 
 The organization-owned repository requires an encrypted `GITLEAKS_LICENSE`
