@@ -1,5 +1,7 @@
 //! Curated read-only Mist MCP handler.
 
+mod wan;
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use mecmcp_auth::CallerCtx;
@@ -665,6 +667,9 @@ enum MistCallError {
     InvalidLimit,
     #[error("catalog search requires a 1-128 byte query and a result limit from 1 through 50")]
     InvalidSearch,
+    #[error("exactly one of org_id or site_id is required")]
+    #[allow(dead_code)]
+    AmbiguousScope,
     #[error(transparent)]
     Mist(#[from] MistError),
 }
