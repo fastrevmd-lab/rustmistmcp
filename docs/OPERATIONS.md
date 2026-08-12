@@ -80,20 +80,26 @@ Both are upstream defects and must be fixed there, not worked around here —
 generic transport and audit code does not belong in this repo.
 
 Neither is present in the running lab deployment, which is why the issue #11
-acceptance evidence is trustworthy: LXC 610 runs a build predating this bump,
+acceptance evidence is trustworthy: LXC 952 runs a build predating this bump,
 and v0.7.3 emits no transport-level `tools/call` event at all. Its seven audit
 records come from the handler, which settles the outcome after the decision —
 the two failed reads on 2026-08-09 are recorded as `result=error`, correctly.
 
-**`mecmcp#268` must be fixed and consumed before LXC 610 is upgraded to a
-v0.8.7 build.** Once it is, a denied call starts logging as an allowed one, and
-the audit trail stops being able to answer the question it exists to answer:
-whether a token ever reached an org it was not scoped for. Snapshot 610 before
-any upgrade, per the family's rollback rule.
+**`mecmcp#268` is fixed upstream** (`mecmcp#270`), and `mecmcp` v0.8.8 is the
+first revision carrying it. A preflight refusal now settles the outcome from
+the check rather than before it, and audits as `authorization=denied` with
+reason `insufficient_scope`. Until this repo pins v0.8.8 or later, the
+constraint stands: **do not upgrade 952 onto a v0.8.7 build**, or a denied call
+logs as an allowed one and the audit trail stops answering the question it
+exists to answer — whether a token ever reached an org it was not scoped for.
+
+`mecmcp#269` is still open: the transport and handler events mint different
+`request_id`s, so the two halves of one request cannot be correlated. That
+degrades analysis; it does not make any single record false.
 
 ### The lab token deliberately runs on one authorization layer
 
-The `acceptance` token on LXC 610 pairs a wildcard shared scope with an
+The `acceptance` token on LXC 952 pairs a wildcard shared scope with an
 org-scoped Mist grant:
 
 ```json
@@ -108,7 +114,7 @@ grant check is the only thing enforcing org reach. The handler is documented as
 the final boundary and does enforce `subjects` — a call to an unscoped org is
 still refused — but the two-layer design is running on one layer.
 
-**This is a deliberate lab choice, not an oversight.** The Mist org behind 610
+**This is a deliberate lab choice, not an oversight.** The Mist org behind 952
 exists to exercise this server; a wildcard `devices` scope keeps new read tools
 testable without reminting a token for each one. Recorded here so nobody
 mistakes an intentionally-open scope for a tightened one that regressed.
@@ -117,26 +123,31 @@ Two conditions attach to it:
 
 - **Do not carry this shape to a token with production reach.** Set `devices`
   to the same subjects the grant names, so both layers agree.
-- **Revisit before the token is used on a `mecmcp` v0.8.7 build.** Tightening
-  `devices` makes preflight denials reachable for the first time, and `#268`
-  logs those as allowed. Fix `#268` first, then tighten.
+- **Tighten only on a `mecmcp` v0.8.8 or later build.** Tightening `devices`
+  makes preflight denials reachable for the first time. On v0.8.7 those logged
+  as allowed (`mecmcp#268`); v0.8.8 records them as denied. Tightening before
+  the pin moves would create a denial path whose audit record is false.
 
 Tracked in issue #17.
 
 ### Guest lifecycle
 
-610 is tagged `disposable` — a rebuildable test rig, not a guest to preserve.
-That is safe for the record, because its acceptance evidence does not live on
-it: the guest configuration, deployed binary hash, token grant shape, and all
-seven audit records are captured in issue #11. Rebuilding 610 loses no evidence.
+The deployment is **LXC 952 on pve2**, tagged `protected`. Do not stop,
+destroy, restore over, or upgrade it without an explicit decision and a
+snapshot first — check the tag, not this document, before any guest operation.
 
-What it does lose is the **live Mist API token** installed at
-`/etc/rustmistmcp/mist-api-token`. A disposable guest holding a real cloud
-credential is worth one explicit rule: **revoke or rotate that token at the Mist
-portal as part of destroying 610**, rather than assuming the credential dies
-with the filesystem. Deleting the LVM volume does not tell Mist the token is
-gone, and an org-scoped API token that nobody holds is still an org-scoped API
-token that exists.
+It was briefly VMID 610 tagged `disposable`; both changed in the 2026-08-12
+renumber and 610 no longer exists in the cluster. The hostname is still
+`rustmistmcp-610`, so hostname and VMID disagree — trust the VMID.
+
+Nothing irreplaceable lives on the guest: the configuration, deployed binary
+hash, token grant shape, and all seven audit records are captured in issue #11.
+What does live there is a **live Mist API token** at
+`/etc/rustmistmcp/mist-api-token`. If the guest is ever rebuilt or retired,
+**revoke or rotate that token at the Mist portal** rather than assuming the
+credential dies with the filesystem — deleting an LVM volume does not tell Mist
+the token is gone, and an org-scoped API token nobody holds is still an
+org-scoped API token that exists.
 
 The same applies to the `acceptance` MCP bearer token in
 `/etc/rustmistmcp/tokens.json`, though that one is only reachable through this
