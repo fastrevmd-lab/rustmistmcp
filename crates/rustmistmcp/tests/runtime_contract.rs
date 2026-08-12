@@ -619,8 +619,9 @@ fn token_add_is_local_and_its_file_loads_as_a_mist_grant_store() {
 
 #[test]
 fn token_management_accepts_relative_paths_per_upstream() {
-    // mecmcp 0.7.3's token_cmd::run_with_grant accepts relative paths.
-    // Path validation is mecmcp's responsibility now.
+    // `token_cmd::run_with_grant` accepts relative paths. Path validation is
+    // mecmcp's responsibility now, so this asserts the upstream behaviour
+    // rather than one upstream version's behaviour.
     let dir = tempfile::tempdir().expect("temporary directory");
     let output = Command::new(env!("CARGO_BIN_EXE_rustmistmcp"))
         .current_dir(dir.path())
@@ -640,7 +641,7 @@ fn token_management_accepts_relative_paths_per_upstream() {
         .expect("run token command");
     assert!(
         output.status.success(),
-        "token add should succeed with relative path per mecmcp 0.7.3"
+        "token add should succeed with a relative path, per upstream mecmcp"
     );
     assert!(dir.path().join("tokens.json").exists());
 }
@@ -960,7 +961,10 @@ fn example_uses_absolute_operator_paths_and_runtime_is_honest_about_blockers() {
         config.credential_file.to_string_lossy(),
         "/etc/rustmistmcp/mist-api-token"
     );
-    assert!(LIVE_MIST_BLOCKER.contains("mecmcp#90"));
+    // The blocker names the credential, not `mecmcp#90` — that foundation
+    // landed, and citing a closed issue would misreport why a call refused.
+    assert!(!LIVE_MIST_BLOCKER.contains("mecmcp#90"));
+    assert!(LIVE_MIST_BLOCKER.contains("credential"));
     assert!(LIVE_MIST_BLOCKER.contains("/api/v1/self"));
     assert!(
         !KNOWN_TOOLS
@@ -991,4 +995,31 @@ fn binary_help_preserves_the_shared_runtime_flag_names() {
     }
     assert!(help.contains("streamable-http"));
     assert_eq!(parse_cli(&[]).transport, Transport::Stdio);
+}
+
+#[test]
+fn binary_reports_its_own_name_and_version() {
+    // The shared `Cli` carries no version of its own, so parsing it directly
+    // made `--version` exit 2. `cli::parse_for` supplies the consumer's
+    // identity; release verification used to need hashes because of that gap.
+    let output = Command::new(env!("CARGO_BIN_EXE_rustmistmcp"))
+        .arg("--version")
+        .output()
+        .expect("run --version");
+    assert!(
+        output.status.success(),
+        "--version exited {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reported = String::from_utf8(output.stdout).expect("UTF-8 version");
+    assert!(
+        reported.contains("rustmistmcp"),
+        "--version must name the binary, got {reported:?}"
+    );
+    assert!(
+        reported.contains(env!("CARGO_PKG_VERSION")),
+        "--version must report {}, got {reported:?}",
+        env!("CARGO_PKG_VERSION")
+    );
 }

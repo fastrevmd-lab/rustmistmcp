@@ -57,11 +57,11 @@ foundation shared by the mechub MCP server family. This repository is a
 
 Everything that is *not* specific to the Mist API is upstream. If you find
 yourself writing generic auth or transport code here, it belongs in `mecmcp`.
-The sole temporary exception is recorded in
-[`docs/UPSTREAM_COMPATIBILITY.md`](docs/UPSTREAM_COMPATIBILITY.md): a private,
-Mist-typed token lifecycle adapter needed because the current `mecmcp-server`
-revision predates merged `mecmcp#160`. It must be deleted at the ledger's
-objective removal condition.
+There is currently no temporary exception: the one the ledger at
+[`docs/UPSTREAM_COMPATIBILITY.md`](docs/UPSTREAM_COMPATIBILITY.md) recorded — a
+Mist-typed token lifecycle adapter — was deleted when its removal condition was
+met. Any new exception must be recorded there with an objective removal
+condition.
 
 ## The API
 
@@ -96,45 +96,48 @@ README will not restate a surface it has not verified.
 
 ## Status
 
-**Foundation in progress; no live Mist client.** The workspace has an audited
-operation catalog, strict profile metadata, authorization models, and a
-catalog-bound injectable `MistClient` contract. The contract validates Mist
-operation inputs and binds opaque cursors to a configured origin, but it has no
-concrete HTTP implementation.
+**Foundation built; read-only live-tenant acceptance passed.** The workspace has
+an audited operation catalog, strict profile metadata, authorization models, and
+a catalog-bound `MistClient` contract that validates Mist operation inputs and
+binds opaque cursors to a configured origin. `mecmcp#90` has closed, so
+`HttpMistClient` — the concrete HTTPS implementation over `mecmcp-http` — is
+built by `MistHandler::from_config` on the production path.
 
-`mecmcp#90` remains the prerequisite for production outbound behavior. Until
-that shared foundation lands, this repository does not load tokens, construct
-HTTPS requests or URLs, expand paths, encode JSON or multipart payloads, stream
-or decode responses, parse rate-limit or pagination data, apply retry policy,
-or expose a live tool surface. `MistResponse` and `RateLimited` are DTOs that an
-injected test or future shared client can supply; they are not evidence of local
-transport support.
+A lab deployment has reached a real Mist org. On 2026-08-10, through a
+loopback-bound endpoint and a grant-scoped bearer token, `get_mist_self`
+(`getSelf`), `get_mist_org` (`getOrg`), and `list_mist_sites` (`listOrgSites`)
+each returned tenant data with `result: ok` in 92–325 ms. That was issue #11's
+gate, and it closed.
 
-The accepted `mecmcp#90` plan now gives this consumer a concrete adoption
-sequence. Rustmistmcp will consume each upstream phase only after it is
-published in one coherent immutable revision:
+What is *not* done, and must not be described as done:
 
-| `mecmcp#90` phase | Rustmistmcp adoption |
-|---|---|
-| 1: `mecmcp-secret` | Load the Mist API token through the shared secret boundary. |
-| 2a: bounded pooled HTTPS client | Construct the live Mist client with HTTPS-only, no-redirect, concurrency, and deadline policy. |
-| 2b: streamed response limits | Enforce response byte ceilings before decoding Mist payloads. |
-| 3: cancellable job polling | Implement Mist asynchronous job polling with product-owned terminal states and retry semantics. |
-| 4: bounded OpenAPI path/query helpers | Expand whole path segments and validate bounded Mist pagination. |
-| 5: extended `mecmcp-changeset` | Implement multi-target preview-bound Mist mutations; this phase remains last. |
+- **That run is not full packaging acceptance.** It was loopback-only with no
+  TLS, one org, one token, three read tools. The checklist in
+  [`docs/PACKAGING_ACCEPTANCE.md`](docs/PACKAGING_ACCEPTANCE.md) — TLS hostname
+  and chain, anonymous and bad-bearer rejection, exact Host/Origin enforcement —
+  is not complete.
+- **No `/api/v1/self` *startup* identity probe.** The `get_mist_self` tool works
+  against a live tenant; nothing probes `/self` during startup, and
+  `LIVE_MIST_BLOCKER` still names that gap.
+- **No mutating tools.** The registered tools are all reads. Mutations are
+  designed in issue #14 and land only behind `mecmcp-changeset`.
 
-Existing `TokenSecret`, cancellation, and changeset primitives will be reused,
-not rebuilt. Mist header names, catalog policy, request/response schemas,
-terminal states, retry classification, and deployment remain in this
-repository.
+A handler constructed without a credential uses `BlockedMistClient`, which
+performs no I/O; `LIVE_MIST_BLOCKER` is the message it refuses with.
+
+Shared `TokenSecret`, cancellation, and changeset primitives are reused, not
+rebuilt. Mist header names, catalog policy, request/response schemas, terminal
+states, retry classification, and deployment remain in this repository.
 
 ## Pre-release packaging and deployment boundary
 
 The checked-in Docker, archive, systemd, and LXC assets are **pre-release
-packaging only**. They are not evidence of a production-ready Mist client or of
-live readiness: `mecmcp#90` blocks the outbound client and Task 6 mutations.
-No v1 release label or deployment acceptance may be claimed while that blocker
-is open.
+packaging only**. A lab LXC built from them has served live read-only tenant
+traffic (issue #11), which is not the same as packaging acceptance: that run
+used no TLS and no off-loopback bind, so the TLS, Host/Origin, and bad-bearer
+rows of `docs/PACKAGING_ACCEPTANCE.md` remain unproven. The `/api/v1/self`
+startup probe is unimplemented and no mutating tool is registered. No v1 release
+label may be claimed until that checklist is complete.
 
 The OCI image is a multi-stage build with a digest-pinned Rust builder and a
 digest-pinned distroless Debian 13 runtime. It runs only
@@ -150,9 +153,10 @@ The checked-in service and OCI command use the shared CLI's exact loopback HTTP
 contract: `/etc/rustmistmcp/mist.json`, the bearer store, port `30030`, JSON
 audit with HMAC redaction, and direct journald delivery for systemd. OCI audit
 goes to JSON stderr and does not mount the host journal socket. There is no
-mutation-state flag or live-Mist readiness check. The shared CLI has no
-`--version`; `mecmcp#159` tracks that gap, so release identity is verified with
-`--help`, `BUILD-INFO`, and artifact/deployed SHA-256 values.
+mutation-state flag or live-Mist readiness check. `--version` reports this
+binary's name and version now that `mecmcp#159` has closed, so release identity
+is verified with `--version`, `--help`, `BUILD-INFO`, and artifact/deployed
+SHA-256 values.
 
 The compose example is Linux-only: host networking makes the container's
 `127.0.0.1:30030` listener reachable from the same host without exposing it on
@@ -181,12 +185,11 @@ RUSTMISTMCP_IMAGE='ghcr.io/fastrevmd-lab/rustmistmcp@sha256:<verified-64-hex-dig
 
 Populate the two empty secret files without placing their values in an
 environment variable, command argument, image layer, or Compose file.
-Grant-bearing MCP bearer-token add/list/revoke/rotate is temporarily supported
-by the private Mist-typed adapter recorded in
-[`docs/UPSTREAM_COMPATIBILITY.md`](docs/UPSTREAM_COMPATIBILITY.md). New tokens
-created by `token add` remain grantless; the adapter preserves and manages
-existing validated `MistGrant` values. This bearer-token store is separate from
-the Mist API token used by the outbound client.
+Grant-bearing MCP bearer-token add/list/revoke/rotate is the shared
+`token_cmd::run_with_grant`; the private Mist-typed adapter that once bridged it
+is deleted. New tokens created by `token add` remain grantless; the shared
+command preserves existing validated `MistGrant` values. This bearer-token store
+is separate from the Mist API token used by the outbound client.
 
 ### LXC operator prerequisites
 
@@ -219,10 +222,12 @@ It installs non-live examples as `/etc/rustmistmcp/mist.example.json` and
 | `/var/lib/rustmistmcp/changeset-state.json` | service-user state, `0700` parent | Durable state path |
 
 Persistent journald is bounded to 512 MiB. Configure remote journal/SIEM
-forwarding before real traffic. While `mecmcp#158` remains open, file-audit
-startup is not claimed fail-closed; journald is the delivery baseline. While
-`mecmcp#156` remains open, graceful HTTP draining/SIGTERM completion is not
-claimed. Any external bind requires TLS plus exact allowed Host and Origin
+forwarding before real traffic. File-audit startup is fail-closed
+(`mecmcp#158`): an unopenable `--audit-log-file` fails startup rather than
+degrading silently, and journald remains the delivery baseline. Graceful HTTP
+shutdown (`mecmcp#156`) is wired — SIGTERM and SIGINT cancel the listener, which
+waits up to 10 seconds for in-flight requests — but that is the configured
+behaviour, not a drain verified under load. Any external bind requires TLS plus exact allowed Host and Origin
 configuration; the default deployment posture is loopback only.
 
 For each release candidate, build from a clean tree with
@@ -241,15 +246,14 @@ before any separate deployment acceptance.
 
 Next, in order:
 
-1. Consume `mecmcp#90` phases 1 through 4 and implement the production outbound
-   Mist client plus `/self` identity probe.
-2. Remove the temporary token adapter once merged `mecmcp#160` is published in
-   the same coherent revision as the complete shared server foundation; resolve
-   `mecmcp#159` for a shared version surface.
-3. Complete read-only live-tenant acceptance only after the RC reference refresh
-   and zero-gap parity review.
-4. Consume `mecmcp#90` phase 5 and add mutations only behind
-   `mecmcp-changeset`, never as direct writes.
+1. Implement the `/api/v1/self` startup identity probe. The outbound
+   `HttpMistClient` it needs already landed with `mecmcp#90`, and the
+   `get_mist_self` tool proves the call itself works against a live org.
+2. Finish the rest of `docs/PACKAGING_ACCEPTANCE.md` — TLS, off-loopback
+   Host/Origin enforcement, anonymous and bad-bearer rejection — none of which
+   the loopback read-only run in issue #11 exercised.
+3. Add mutations only behind `mecmcp-changeset`, never as direct writes.
+   Designed in issue #14; the `execute` split landed as `execute_class.rs`.
 
 ## Design commitments
 

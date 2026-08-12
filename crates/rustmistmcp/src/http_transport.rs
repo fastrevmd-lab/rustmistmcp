@@ -14,11 +14,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{MistHandler, RESTRICTED_TOOLS};
 
-/// Production Mist calls and the `/api/v1/self` startup identity probe remain
-/// unavailable until the vendor-neutral cloud foundation tracked by
-/// `mecmcp#90` lands.
-pub const LIVE_MIST_BLOCKER: &str =
-    "mecmcp#90 blocks live Mist requests and the required /api/v1/self startup identity probe";
+/// Why a handler built without a Mist credential refuses live calls.
+///
+/// This used to cite `mecmcp#90`, the vendor-neutral cloud foundation. That
+/// has landed and `MistHandler::from_config` builds a real client, so what is
+/// missing here is the credential itself — including the one the `/api/v1/self`
+/// startup identity probe needs.
+pub const LIVE_MIST_BLOCKER: &str = "no Mist credential is configured, so live Mist requests and the /api/v1/self startup identity probe are unavailable";
 
 /// Apply RustMistMCP's stricter remote listener policy.
 ///

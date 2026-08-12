@@ -1,7 +1,6 @@
 //! HPE Juniper Mist MCP server executable.
 
 use anyhow::{Context as _, Result};
-use clap::Parser as _;
 use mecmcp_auth::TokenStoreFile;
 use mecmcp_runtime::cli::{Cli, Command, Transport};
 use rmcp::ServiceExt as _;
@@ -13,7 +12,10 @@ use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Cli::parse();
+    // The shared `Cli` carries no version of its own; `parse_for` stamps this
+    // binary's name and version onto it so `--version` answers instead of
+    // exiting 2 (mecmcp#159).
+    let args = mecmcp_runtime::cli::parse_for("rustmistmcp", env!("CARGO_PKG_VERSION"));
     validate_runtime_serve(&args).map_err(|error| anyhow::anyhow!("{error}"))?;
     init_audit(&args)?;
 

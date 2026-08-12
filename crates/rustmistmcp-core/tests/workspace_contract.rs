@@ -6,7 +6,7 @@ const WORKSPACE_MANIFEST: &str = include_str!("../../../Cargo.toml");
 const CORE_MANIFEST: &str = include_str!("../Cargo.toml");
 const SERVER_MANIFEST: &str = include_str!("../../rustmistmcp/Cargo.toml");
 
-const MECMCP_REVISION: &str = "3eac1100b02f31254967cd07c926acf89994b287";
+const MECMCP_REVISION: &str = "6a19443b7af2476e18c9bbc38af14dd5a1c57481";
 
 #[test]
 fn workspace_metadata_lints_and_shared_revision_are_locked() {
@@ -29,7 +29,9 @@ fn workspace_metadata_lints_and_shared_revision_are_locked() {
         "lto = \"thin\"",
         "codegen-units = 1",
         "strip = \"symbols\"",
-        "mecmcp#90 and mecmcp#91 remain open prerequisites",
+        // mecmcp#90 closed; #91 has not, and it is the reason the shared CLI
+        // still spells the profile flag `--device-mapping`.
+        "mecmcp#91 (target-neutral auth scope vocabulary) is the remaining open",
     ] {
         assert!(
             WORKSPACE_MANIFEST.contains(expected),

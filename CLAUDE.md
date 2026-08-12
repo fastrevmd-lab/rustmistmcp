@@ -5,9 +5,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repo is
 
 `rustmistmcp` is an MCP server for the **HPE Juniper Mist cloud**. It has a Rust
-workspace and pre-release packaging; it does **not** have a production outbound
-Mist client while `mecmcp#90` is open. Do not characterize local contract tests,
-an image build, or packaging as live-Mist readiness or a v1 release.
+workspace, pre-release packaging, and — since `mecmcp#90` closed — a real
+outbound `HttpMistClient` wired into the production path.
+
+**It has reached a live tenant.** A lab deployment runs as LXC **610**
+`rustmistmcp-610` on **pve2** (`192.168.1.212`, tagged `protected`), and on
+2026-08-10 `get_mist_self`, `get_mist_org`, and `list_mist_sites` each returned
+real data from `api.ac2.mist.com` in under 400 ms. That closed issue #11.
+
+What that does *not* establish: the deployment is loopback-only with no TLS, one
+org, one grant-bearing token, and three read tools. The `/api/v1/self` *startup*
+identity probe is still unimplemented — the operator-facing `get_mist_self` tool
+is a different thing. No mutating tool exists. Do not characterize local
+contract tests, an image build, or packaging as v1, and do not read one
+successful read run as full packaging acceptance — that checklist lives in
+`docs/PACKAGING_ACCEPTANCE.md` and is not complete.
 
 ## Packaging boundary
 
@@ -24,12 +36,15 @@ Task 7's shared CLI is checked in. Packaging uses `--device-mapping
 /etc/rustmistmcp/mist.json`, `--transport streamable-http`, loopback
 `--host 127.0.0.1`, `--port 30030`, the absolute `--tokens-file`, and exact
 audit flags. Systemd uses journald; OCI emits JSON audit to stderr and must not
-mount the host journal socket. Do not advertise a mutation-state flag,
-live-Mist readiness, graceful HTTP draining (`mecmcp#156`), or fail-closed file
-audit (`mecmcp#158`). External HTTP requires TLS plus exact Host/Origin policy.
-The CLI has no `--version` while `mecmcp#159` is open; use `--help`,
-`BUILD-INFO`, and hashes. Grant-bearing MCP bearer-token lifecycle is blocked by
-`mecmcp#160`. Run `scripts/verify-packaging.sh` after delivery edits and build
+mount the host journal socket. Do not advertise a mutation-state flag or
+live-Mist readiness. Graceful HTTP shutdown (`mecmcp#156`) and fail-closed file
+audit (`mecmcp#158`) are wired and may be described as configured — but only
+graceful shutdown's *configuration* is verified, not a drain under load.
+External HTTP requires TLS plus exact Host/Origin policy. `--version` reports
+the binary name and version (`mecmcp#159` closed); it supplements `--help`,
+`BUILD-INFO`, and hashes rather than replacing them. Grant-bearing MCP
+bearer-token lifecycle uses the shared `token_cmd::run_with_grant`
+(`mecmcp#160` closed). Run `scripts/verify-packaging.sh` after delivery edits and build
 archives only from a completely clean tree by default.
 
 ## The one architectural rule
@@ -41,14 +56,18 @@ across the mechub MCP server family. The split is not negotiable:
 - **Upstream in `mecmcp`:** token auth/scopes/grants (`mecmcp-auth`), audit and
   redaction (`mecmcp-audit`), streamable-HTTP transport and limits
   (`mecmcp-transport`), CLI/TLS/shutdown (`mecmcp-runtime`), change-control
-  state machine (`mecmcp-changeset`), inventory (`mecmcp-inventory`).
+  state machine (`mecmcp-changeset`), inventory (`mecmcp-inventory`), the
+  outbound HTTPS client (`mecmcp-http`), secret loading (`mecmcp-secret`), job
+  polling (`mecmcp-job`), and the server scaffold (`mecmcp-server`).
 - **Here:** the Mist REST client, its v1 API-token auth flow, response models,
   and the MCP tool surface built on them.
 
 If you are about to write generic auth, transport, rate-limiting, or
-change-control code in this repo, stop — it belongs in `mecmcp`. `mecmcp` is
-itself mid-extraction (only `mecmcp-auth` exists so far); its `PLAN.md` and
-`ANALYSIS.md` describe what lands when.
+change-control code in this repo, stop — it belongs in `mecmcp`. The extraction
+is well past its early stage: fourteen crates exist as of `mecmcp` v0.8.7, and
+every one of them is pinned here to a single immutable revision so extension
+`TypeId`s cannot diverge inside one server process. Bump all ten pins together
+or not at all. `PLAN.md` and `ANALYSIS.md` upstream describe what lands when.
 
 Sibling reference implementations for the *shape* of a mechub MCP server:
 `~/Projects/RustJunosMCP` (NETCONF/SSH, runtime hardening) and
