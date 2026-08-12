@@ -1,10 +1,10 @@
 # rustmistmcp pre-release operations
 
 This is operator guidance for credential-free pre-release artifacts. It is not
-release acceptance. The outbound `HttpMistClient` exists now that `mecmcp#90`
-has closed, but nothing here establishes that it works against a real tenant —
-no deployment and no credential exist (issue #11). Mutation tooling is still
-absent by design.
+release acceptance. The outbound `HttpMistClient` has served live read-only
+traffic from a lab LXC (issue #11), but that run was loopback-only with no TLS,
+so the TLS, Host/Origin, and bad-bearer rows of `PACKAGING_ACCEPTANCE.md` are
+still unproven. Mutation tooling is absent by design.
 
 ## Install boundary
 
@@ -77,14 +77,19 @@ help either, because `mecmcp#269` gives the transport and handler events
 different `request_id` values.
 
 Both are upstream defects and must be fixed there, not worked around here —
-generic transport and audit code does not belong in this repo. Neither affects
-anything today, because no deployment and no tenant credential exist (issue
-\#11).
+generic transport and audit code does not belong in this repo.
 
-**`mecmcp#268` must be fixed and consumed before live-tenant acceptance.** Do
-not record a read-only acceptance run against a real org while a denied call
-can be logged as an allowed one; the point of that run is the evidence, and this
-defect makes one class of evidence false.
+Neither is present in the running lab deployment, which is why the issue #11
+acceptance evidence is trustworthy: LXC 610 runs a build predating this bump,
+and v0.7.3 emits no transport-level `tools/call` event at all. Its seven audit
+records come from the handler, which settles the outcome after the decision —
+the two failed reads on 2026-08-09 are recorded as `result=error`, correctly.
+
+**`mecmcp#268` must be fixed and consumed before LXC 610 is upgraded to a
+v0.8.7 build.** Once it is, a denied call starts logging as an allowed one, and
+the audit trail stops being able to answer the question it exists to answer:
+whether a token ever reached an org it was not scoped for. Snapshot 610 before
+any upgrade, per the family's rollback rule.
 
 ## Repository security workflow prerequisite
 

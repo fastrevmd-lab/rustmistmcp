@@ -6,11 +6,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `rustmistmcp` is an MCP server for the **HPE Juniper Mist cloud**. It has a Rust
 workspace, pre-release packaging, and — since `mecmcp#90` closed — a real
-outbound `HttpMistClient` wired into the production path. What it has never had
-is a live tenant: no deployment and no Mist credential exist (issue #11), and
-the `/api/v1/self` startup identity probe is still unimplemented. Do not
-characterize local contract tests, an image build, or packaging as live-Mist
-readiness or a v1 release.
+outbound `HttpMistClient` wired into the production path.
+
+**It has reached a live tenant.** A lab deployment runs as LXC **610**
+`rustmistmcp-610` on **pve2** (`192.168.1.212`, tagged `protected`), and on
+2026-08-10 `get_mist_self`, `get_mist_org`, and `list_mist_sites` each returned
+real data from `api.ac2.mist.com` in under 400 ms. That closed issue #11.
+
+What that does *not* establish: the deployment is loopback-only with no TLS, one
+org, one grant-bearing token, and three read tools. The `/api/v1/self` *startup*
+identity probe is still unimplemented — the operator-facing `get_mist_self` tool
+is a different thing. No mutating tool exists. Do not characterize local
+contract tests, an image build, or packaging as v1, and do not read one
+successful read run as full packaging acceptance — that checklist lives in
+`docs/PACKAGING_ACCEPTANCE.md` and is not complete.
 
 ## Packaging boundary
 

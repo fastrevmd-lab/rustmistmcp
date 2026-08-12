@@ -3,6 +3,13 @@
 This credential-free template is intentionally empty: no live tenant, Proxmox,
 or VMID has been queried or changed by packaging work.
 
+It is **not** a record of the chunk 7 lab run. That run reached a real Mist org
+from LXC 610 and is recorded in issue #11; this checklist targets a separate
+release deployment on VMID 613 and stays unfilled until that happens. Nothing
+below may be ticked from 610's evidence — in particular 610 was loopback-only
+with no TLS, so the TLS, Host/Origin, and bad-bearer rows were never exercised
+by it.
+
 ## Authorization and target checks
 
 - [ ] Authorized lab inventory confirms VMID **613** and its address are unused.

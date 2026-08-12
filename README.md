@@ -96,21 +96,30 @@ README will not restate a surface it has not verified.
 
 ## Status
 
-**Foundation built; never run against a live tenant.** The workspace has an
-audited operation catalog, strict profile metadata, authorization models, and a
-catalog-bound `MistClient` contract that validates Mist operation inputs and
+**Foundation built; read-only live-tenant acceptance passed.** The workspace has
+an audited operation catalog, strict profile metadata, authorization models, and
+a catalog-bound `MistClient` contract that validates Mist operation inputs and
 binds opaque cursors to a configured origin. `mecmcp#90` has closed, so
 `HttpMistClient` — the concrete HTTPS implementation over `mecmcp-http` — is
 built by `MistHandler::from_config` on the production path.
 
+A lab deployment has reached a real Mist org. On 2026-08-10, through a
+loopback-bound endpoint and a grant-scoped bearer token, `get_mist_self`
+(`getSelf`), `get_mist_org` (`getOrg`), and `list_mist_sites` (`listOrgSites`)
+each returned tenant data with `result: ok` in 92–325 ms. That was issue #11's
+gate, and it closed.
+
 What is *not* done, and must not be described as done:
 
-- **No live-tenant call has ever been made.** There is no deployment and no
-  Mist API credential (issue #11). Every test runs against fixtures or a
-  blocked client.
-- **No `/api/v1/self` startup identity probe.** It is named in the runtime's
-  own blocker message and is still unimplemented.
-- **No mutating tools.** The 21 registered tools are all reads. Mutations are
+- **That run is not full packaging acceptance.** It was loopback-only with no
+  TLS, one org, one token, three read tools. The checklist in
+  [`docs/PACKAGING_ACCEPTANCE.md`](docs/PACKAGING_ACCEPTANCE.md) — TLS hostname
+  and chain, anonymous and bad-bearer rejection, exact Host/Origin enforcement —
+  is not complete.
+- **No `/api/v1/self` *startup* identity probe.** The `get_mist_self` tool works
+  against a live tenant; nothing probes `/self` during startup, and
+  `LIVE_MIST_BLOCKER` still names that gap.
+- **No mutating tools.** The registered tools are all reads. Mutations are
   designed in issue #14 and land only behind `mecmcp-changeset`.
 
 A handler constructed without a credential uses `BlockedMistClient`, which
@@ -123,10 +132,12 @@ states, retry classification, and deployment remain in this repository.
 ## Pre-release packaging and deployment boundary
 
 The checked-in Docker, archive, systemd, and LXC assets are **pre-release
-packaging only**. They are not evidence of live readiness: no deployment or
-tenant credential exists (issue #11), the `/api/v1/self` identity probe is
-unimplemented, and no mutating tool is registered. No v1 release label or
-deployment acceptance may be claimed until live-tenant acceptance is recorded.
+packaging only**. A lab LXC built from them has served live read-only tenant
+traffic (issue #11), which is not the same as packaging acceptance: that run
+used no TLS and no off-loopback bind, so the TLS, Host/Origin, and bad-bearer
+rows of `docs/PACKAGING_ACCEPTANCE.md` remain unproven. The `/api/v1/self`
+startup probe is unimplemented and no mutating tool is registered. No v1 release
+label may be claimed until that checklist is complete.
 
 The OCI image is a multi-stage build with a digest-pinned Rust builder and a
 digest-pinned distroless Debian 13 runtime. It runs only
@@ -236,10 +247,11 @@ before any separate deployment acceptance.
 Next, in order:
 
 1. Implement the `/api/v1/self` startup identity probe. The outbound
-   `HttpMistClient` it needs already landed with `mecmcp#90`.
-2. Complete read-only live-tenant acceptance only after the RC reference refresh
-   and zero-gap parity review. Blocked on a deployment and a tenant credential,
-   tracked in issue #11.
+   `HttpMistClient` it needs already landed with `mecmcp#90`, and the
+   `get_mist_self` tool proves the call itself works against a live org.
+2. Finish the rest of `docs/PACKAGING_ACCEPTANCE.md` — TLS, off-loopback
+   Host/Origin enforcement, anonymous and bad-bearer rejection — none of which
+   the loopback read-only run in issue #11 exercised.
 3. Add mutations only behind `mecmcp-changeset`, never as direct writes.
    Designed in issue #14; the `execute` split landed as `execute_class.rs`.
 
