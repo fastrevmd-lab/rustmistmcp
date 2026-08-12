@@ -91,6 +91,57 @@ the audit trail stops being able to answer the question it exists to answer:
 whether a token ever reached an org it was not scoped for. Snapshot 610 before
 any upgrade, per the family's rollback rule.
 
+### The lab token deliberately runs on one authorization layer
+
+The `acceptance` token on LXC 610 pairs a wildcard shared scope with an
+org-scoped Mist grant:
+
+```json
+"devices": ["*"],
+"grant": { "subjects": ["org/<org-uuid>"] }
+```
+
+`MistScopePreflight` checks wire `org_id`/`site_id` arguments against
+**`devices`**, not against the grant, and `ScopeSet::Wildcard` allows every
+name. So for this token the early transport check is inert and the handler's
+grant check is the only thing enforcing org reach. The handler is documented as
+the final boundary and does enforce `subjects` — a call to an unscoped org is
+still refused — but the two-layer design is running on one layer.
+
+**This is a deliberate lab choice, not an oversight.** The Mist org behind 610
+exists to exercise this server; a wildcard `devices` scope keeps new read tools
+testable without reminting a token for each one. Recorded here so nobody
+mistakes an intentionally-open scope for a tightened one that regressed.
+
+Two conditions attach to it:
+
+- **Do not carry this shape to a token with production reach.** Set `devices`
+  to the same subjects the grant names, so both layers agree.
+- **Revisit before the token is used on a `mecmcp` v0.8.7 build.** Tightening
+  `devices` makes preflight denials reachable for the first time, and `#268`
+  logs those as allowed. Fix `#268` first, then tighten.
+
+Tracked in issue #17.
+
+### Guest lifecycle
+
+610 is tagged `disposable` — a rebuildable test rig, not a guest to preserve.
+That is safe for the record, because its acceptance evidence does not live on
+it: the guest configuration, deployed binary hash, token grant shape, and all
+seven audit records are captured in issue #11. Rebuilding 610 loses no evidence.
+
+What it does lose is the **live Mist API token** installed at
+`/etc/rustmistmcp/mist-api-token`. A disposable guest holding a real cloud
+credential is worth one explicit rule: **revoke or rotate that token at the Mist
+portal as part of destroying 610**, rather than assuming the credential dies
+with the filesystem. Deleting the LVM volume does not tell Mist the token is
+gone, and an org-scoped API token that nobody holds is still an org-scoped API
+token that exists.
+
+The same applies to the `acceptance` MCP bearer token in
+`/etc/rustmistmcp/tokens.json`, though that one is only reachable through this
+server's loopback listener, so destroying the guest genuinely does end it.
+
 ## Repository security workflow prerequisite
 
 The organization-owned repository requires an encrypted `GITLEAKS_LICENSE`

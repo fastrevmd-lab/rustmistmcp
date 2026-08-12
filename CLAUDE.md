@@ -9,9 +9,12 @@ workspace, pre-release packaging, and — since `mecmcp#90` closed — a real
 outbound `HttpMistClient` wired into the production path.
 
 **It has reached a live tenant.** A lab deployment runs as LXC **610**
-`rustmistmcp-610` on **pve2** (`192.168.1.212`, tagged `protected`), and on
+`rustmistmcp-610` on **pve2** (`192.168.1.212`, tagged `disposable`), and on
 2026-08-10 `get_mist_self`, `get_mist_org`, and `list_mist_sites` each returned
-real data from `api.ac2.mist.com` in under 400 ms. That closed issue #11.
+real data from `api.ac2.mist.com` in under 400 ms. That closed issue #11. The
+guest is rebuildable and holds no unique evidence — issue #11 has it all — but
+it does hold a live Mist API token, so destroying it means revoking that token
+at Mist, not just deleting the volume.
 
 What that does *not* establish: the deployment is loopback-only with no TLS, one
 org, one grant-bearing token, and three read tools. The `/api/v1/self` *startup*
