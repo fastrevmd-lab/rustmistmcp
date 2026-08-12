@@ -226,22 +226,25 @@ struct RecordingClient {
 
 #[async_trait]
 impl MistClient for RecordingClient {
-    fn is_blocked(&self) -> bool {
-        false
-    }
-
     async fn execute(&self, request: MistRequest) -> Result<MistResponse, MistError> {
-        self.requests.lock().expect("lock").push(request);
+        self.requests
+            .lock()
+            .expect("request recorder")
+            .push(request.clone());
         Ok(MistResponse {
+            operation_id: request.operation_id,
             status: 200,
-            content_type: "application/json".to_owned(),
             body: MistResponseBody::Json(serde_json::json!({"results": []})),
-            next: None,
+            cursor: None,
         })
     }
 }
 
 /// Call one tool against a recording client and return the request it issued.
+///
+/// A tool that fails validation returns `Ok` with `is_error == Some(true)`
+/// rather than `Err`, so both are mapped to `Err` here — otherwise the
+/// rejection tests would pass for the wrong reason.
 async fn record_call(
     tool: &str,
     arguments: serde_json::Value,
@@ -265,17 +268,23 @@ async fn record_call(
     });
     let client = ().serve(client_transport).await.expect("client initialization");
     let result = client
-        .call_tool(CallToolRequestParams {
-            name: tool.to_owned().into(),
-            arguments: arguments.as_object().cloned(),
-        })
+        .call_tool(
+            CallToolRequestParams::new(tool.to_owned())
+                .with_arguments(serde_json::from_value(arguments).expect("arguments")),
+        )
         .await;
     client.cancel().await.expect("client shutdown");
     server_task.abort();
 
-    result.map_err(|error| error.to_string())?;
-    let requests = recorder.requests.lock().expect("lock");
-    requests.first().cloned().ok_or_else(|| "no request issued".to_owned())
+    let result = result.map_err(|error| error.to_string())?;
+    if result.is_error == Some(true) {
+        return Err(format!("tool returned an error result: {result:?}"));
+    }
+    let requests = recorder.requests.lock().expect("request recorder");
+    requests
+        .first()
+        .cloned()
+        .ok_or_else(|| "no request issued".to_owned())
 }
 
 #[tokio::test]
