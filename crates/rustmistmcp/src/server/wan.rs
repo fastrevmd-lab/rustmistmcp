@@ -197,6 +197,108 @@ pub(crate) fn applications(source: AppSource, mode: StatsMode) -> Resolved {
     }
 }
 
+/// A WAN edge configuration object type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WanObject {
+    /// A LAN segment / network.
+    Network,
+    /// An application or service definition.
+    Service,
+    /// A service (SD-WAN steering) policy.
+    ServicePolicy,
+    /// A gateway template.
+    GatewayTemplate,
+    /// A device profile.
+    DeviceProfile,
+}
+
+/// Resolve a configuration listing.
+pub(crate) fn list_config(object: WanObject, scope: WanScope) -> Resolved {
+    match (object, scope) {
+        (WanObject::Network, WanScope::Org) => Resolved {
+            operation_id: "listOrgNetworks",
+            path_names: &["org_id"],
+        },
+        (WanObject::Service, WanScope::Org) => Resolved {
+            operation_id: "listOrgServices",
+            path_names: &["org_id"],
+        },
+        (WanObject::ServicePolicy, WanScope::Org) => Resolved {
+            operation_id: "listOrgServicePolicies",
+            path_names: &["org_id"],
+        },
+        (WanObject::GatewayTemplate, WanScope::Org) => Resolved {
+            operation_id: "listOrgGatewayTemplates",
+            path_names: &["org_id"],
+        },
+        (WanObject::DeviceProfile, WanScope::Org) => Resolved {
+            operation_id: "listOrgDeviceProfiles",
+            path_names: &["org_id"],
+        },
+        (WanObject::Network, WanScope::Site) => Resolved {
+            operation_id: "listSiteNetworksDerived",
+            path_names: &["site_id"],
+        },
+        (WanObject::Service, WanScope::Site) => Resolved {
+            operation_id: "listSiteServicesDerived",
+            path_names: &["site_id"],
+        },
+        (WanObject::ServicePolicy, WanScope::Site) => Resolved {
+            operation_id: "listSiteServicePoliciesDerived",
+            path_names: &["site_id"],
+        },
+        (WanObject::GatewayTemplate, WanScope::Site) => Resolved {
+            operation_id: "listSiteGatewayTemplatesDerived",
+            path_names: &["site_id"],
+        },
+        (WanObject::DeviceProfile, WanScope::Site) => Resolved {
+            operation_id: "listSiteDeviceProfilesDerived",
+            path_names: &["site_id"],
+        },
+    }
+}
+
+/// Resolve the single-object read for a configuration object type.
+///
+/// This mapping is what a future `plan_mist_change` uses to fetch the `before`
+/// state its digest binds to, so each entry must name the exact catalog read
+/// that corresponds to the write on the same object.
+pub(crate) fn get_config(object: WanObject) -> Resolved {
+    match object {
+        WanObject::Network => Resolved {
+            operation_id: "getOrgNetwork",
+            path_names: &["org_id", "network_id"],
+        },
+        WanObject::Service => Resolved {
+            operation_id: "getOrgService",
+            path_names: &["org_id", "service_id"],
+        },
+        WanObject::ServicePolicy => Resolved {
+            operation_id: "getOrgServicePolicy",
+            path_names: &["org_id", "servicepolicy_id"],
+        },
+        WanObject::GatewayTemplate => Resolved {
+            operation_id: "getOrgGatewayTemplate",
+            path_names: &["org_id", "gatewaytemplate_id"],
+        },
+        WanObject::DeviceProfile => Resolved {
+            operation_id: "getOrgDeviceProfile",
+            path_names: &["org_id", "deviceprofile_id"],
+        },
+    }
+}
+
+/// The path parameter name carrying the object's own identifier.
+pub(crate) fn object_id_name(object: WanObject) -> &'static str {
+    match object {
+        WanObject::Network => "network_id",
+        WanObject::Service => "service_id",
+        WanObject::ServicePolicy => "servicepolicy_id",
+        WanObject::GatewayTemplate => "gatewaytemplate_id",
+        WanObject::DeviceProfile => "deviceprofile_id",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +481,77 @@ mod tests {
             Resolved {
                 operation_id: "listGatewayApplications",
                 path_names: &[]
+            }
+        );
+    }
+
+    #[test]
+    fn list_config_resolves_object_and_scope() {
+        assert_eq!(
+            list_config(WanObject::Network, WanScope::Org),
+            Resolved {
+                operation_id: "listOrgNetworks",
+                path_names: &["org_id"]
+            }
+        );
+        assert_eq!(
+            list_config(WanObject::Network, WanScope::Site),
+            Resolved {
+                operation_id: "listSiteNetworksDerived",
+                path_names: &["site_id"]
+            }
+        );
+        assert_eq!(
+            list_config(WanObject::GatewayTemplate, WanScope::Site),
+            Resolved {
+                operation_id: "listSiteGatewayTemplatesDerived",
+                path_names: &["site_id"],
+            }
+        );
+        assert_eq!(
+            list_config(WanObject::DeviceProfile, WanScope::Site),
+            Resolved {
+                operation_id: "listSiteDeviceProfilesDerived",
+                path_names: &["site_id"]
+            }
+        );
+    }
+
+    #[test]
+    fn get_config_resolves_each_object() {
+        assert_eq!(
+            get_config(WanObject::Network),
+            Resolved {
+                operation_id: "getOrgNetwork",
+                path_names: &["org_id", "network_id"]
+            }
+        );
+        assert_eq!(
+            get_config(WanObject::Service),
+            Resolved {
+                operation_id: "getOrgService",
+                path_names: &["org_id", "service_id"]
+            }
+        );
+        assert_eq!(
+            get_config(WanObject::ServicePolicy),
+            Resolved {
+                operation_id: "getOrgServicePolicy",
+                path_names: &["org_id", "servicepolicy_id"],
+            }
+        );
+        assert_eq!(
+            get_config(WanObject::GatewayTemplate),
+            Resolved {
+                operation_id: "getOrgGatewayTemplate",
+                path_names: &["org_id", "gatewaytemplate_id"],
+            }
+        );
+        assert_eq!(
+            get_config(WanObject::DeviceProfile),
+            Resolved {
+                operation_id: "getOrgDeviceProfile",
+                path_names: &["org_id", "deviceprofile_id"],
             }
         );
     }

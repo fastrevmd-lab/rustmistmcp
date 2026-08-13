@@ -41,6 +41,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "get_mist_site",
     "get_mist_sle",
     "get_mist_sle_impact",
+    "get_mist_wan_config",
     "get_mist_wan_edge_stats",
     "invoke_mist_privileged_read",
     "invoke_mist_read",
@@ -50,6 +51,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "list_mist_sites",
     "list_mist_sle_metrics",
     "list_mist_upgrades",
+    "list_mist_wan_config",
     "list_mist_wan_edges",
     "list_mist_wlans",
     "search_mist_alarms",
@@ -69,7 +71,9 @@ pub const KNOWN_TOOLS: &[&str] = &[
 pub const RESTRICTED_TOOLS: &[&str] = &[
     "get_mist_device",
     "get_mist_self",
+    "get_mist_wan_config",
     "invoke_mist_privileged_read",
+    "list_mist_wan_config",
     "list_mist_wlans",
     "search_mist_audit_logs",
 ];
@@ -943,6 +947,34 @@ impl From<AppSourceArg> for wan::AppSource {
     }
 }
 
+/// A WAN edge configuration object type.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum WanObjectArg {
+    /// A LAN segment / network.
+    Network,
+    /// An application or service definition.
+    Service,
+    /// A service (SD-WAN steering) policy.
+    ServicePolicy,
+    /// A gateway template.
+    GatewayTemplate,
+    /// A device profile. Org scope only.
+    DeviceProfile,
+}
+
+impl From<WanObjectArg> for wan::WanObject {
+    fn from(value: WanObjectArg) -> Self {
+        match value {
+            WanObjectArg::Network => Self::Network,
+            WanObjectArg::Service => Self::Service,
+            WanObjectArg::ServicePolicy => Self::ServicePolicy,
+            WanObjectArg::GatewayTemplate => Self::GatewayTemplate,
+            WanObjectArg::DeviceProfile => Self::DeviceProfile,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SearchOperationsArgs {
@@ -1193,6 +1225,31 @@ read_args!(ApplicationListArgs {
     distinct: Option<String>,
 });
 
+read_args!(WanConfigListArgs {
+    /// Which configuration object type to list. Not sent to Mist.
+    #[serde(skip_serializing)]
+    object: WanObjectArg,
+    /// Organization UUID. Mutually exclusive with `site_id`.
+    org_id: Option<String>,
+    /// Site UUID for the derived listing. Mutually exclusive with `org_id`.
+    site_id: Option<String>,
+    #[schemars(range(min = 1, max = 100))]
+    limit: Option<u32>,
+    #[schemars(range(min = 1))]
+    page: Option<u32>,
+});
+
+read_args!(WanConfigGetArgs {
+    /// Which configuration object type to read. Not sent to Mist.
+    #[serde(skip_serializing)]
+    object: WanObjectArg,
+    /// Organization UUID.
+    org_id: String,
+    /// The object's own UUID. Not sent to Mist under this name.
+    #[serde(skip_serializing)]
+    object_id: String,
+});
+
 #[tool_router(router = mist_tool_router, vis = "pub(crate)")]
 impl MistHandler {
     #[tool(name = "get_mist_device", description = "Get one site device.")]
@@ -1410,6 +1467,42 @@ impl MistHandler {
             .await)
     }
     #[tool(
+        name = "get_mist_wan_config",
+        description = "Get one WAN edge configuration object by ID."
+    )]
+    async fn get_mist_wan_config(
+        &self,
+        Parameters(args): Parameters<WanConfigGetArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let object: wan::WanObject = args.object.into();
+        let resolved = wan::get_config(object);
+        let path = BTreeMap::from([
+            ("org_id".to_owned(), args.org_id),
+            (wan::object_id_name(object).to_owned(), args.object_id),
+        ]);
+        // Gateway templates and device profiles are privileged config.
+        let capability = match args.object {
+            WanObjectArg::GatewayTemplate | WanObjectArg::DeviceProfile => {
+                MistCapability::PrivilegedRead
+            }
+            _ => MistCapability::OrdinaryRead,
+        };
+        Ok(self
+            .dispatch_catalogued_read(
+                CatalogRead {
+                    tool: "get_mist_wan_config",
+                    operation_id: resolved.operation_id.to_owned(),
+                    path,
+                    query: BTreeMap::new(),
+                    cursor: None,
+                    capability,
+                },
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
         name = "get_mist_wan_edge_stats",
         description = "Get WAN edge gateway metrics for a site, or insight metrics for one gateway."
     )]
@@ -1610,6 +1703,45 @@ impl MistHandler {
                 args,
                 &["site_id"],
                 MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "list_mist_wan_config",
+        description = "List WAN edge configuration objects: networks, services, service policies, gateway templates, or device profiles."
+    )]
+    async fn list_mist_wan_config(
+        &self,
+        Parameters(args): Parameters<WanConfigListArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = match wan::resolve_scope(args.org_id.as_deref(), args.site_id.as_deref()) {
+            Ok(scope) => scope,
+            Err(_) => {
+                return Ok(tool_result::<ReadEnvelope, _>(
+                    Err(MistCallError::AmbiguousScope),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        };
+        let object = args.object;
+        let resolved = wan::list_config(object.into(), scope);
+        // Gateway templates and device profiles are privileged config.
+        let capability = match object {
+            WanObjectArg::GatewayTemplate | WanObjectArg::DeviceProfile => {
+                MistCapability::PrivilegedRead
+            }
+            _ => MistCapability::OrdinaryRead,
+        };
+        Ok(self
+            .dispatch_named(
+                "list_mist_wan_config",
+                resolved.operation_id,
+                args,
+                resolved.path_names,
+                capability,
                 &extensions,
             )
             .await)
