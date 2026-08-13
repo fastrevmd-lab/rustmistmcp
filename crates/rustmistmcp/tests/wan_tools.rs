@@ -47,6 +47,21 @@ impl MistClient for RecordingClient {
                 "interval": 60,
                 "results": []
             }),
+            "searchOrgTunnelsStats" => serde_json::json!({
+                "start": 0,
+                "end": 0,
+                "limit": 10,
+                "total": 0,
+                "results": []
+            }),
+            "countOrgTunnelsStats" => serde_json::json!({
+                "distinct": "type",
+                "start": 0,
+                "end": 0,
+                "limit": 10,
+                "total": 0,
+                "results": []
+            }),
             _ => serde_json::json!({"results": []}),
         };
         Ok(MistResponse {
@@ -161,4 +176,25 @@ async fn wan_edge_stats_selects_site_or_device_variant() {
         !device.query.contains_key("device_id"),
         "device_id belongs in the path, not the query"
     );
+}
+
+#[tokio::test]
+async fn tunnels_resolve_mode_and_never_leak_the_selector() {
+    let records = record_call("search_mist_tunnels", serde_json::json!({"org_id": ORG_ID}))
+        .await
+        .expect("records call");
+    assert_eq!(records.operation_id, "searchOrgTunnelsStats");
+    assert!(
+        !records.query.contains_key("mode"),
+        "mode is a tool selector and must not reach Mist"
+    );
+
+    let counted = record_call(
+        "search_mist_tunnels",
+        serde_json::json!({"org_id": ORG_ID, "mode": "count"}),
+    )
+    .await
+    .expect("count call");
+    assert_eq!(counted.operation_id, "countOrgTunnelsStats");
+    assert!(!counted.query.contains_key("mode"));
 }

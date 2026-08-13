@@ -56,6 +56,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "search_mist_events",
     "search_mist_inventory",
     "search_mist_operations",
+    "search_mist_tunnels",
     "troubleshoot_mist",
 ];
 
@@ -876,6 +877,26 @@ impl From<SearchTarget> for TargetSelector {
     }
 }
 
+/// Whether a stats tool returns records or a count distribution.
+#[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum StatsModeArg {
+    /// Return matching records.
+    #[default]
+    Records,
+    /// Return a count distribution. The response shape differs from records.
+    Count,
+}
+
+impl From<StatsModeArg> for wan::StatsMode {
+    fn from(value: StatsModeArg) -> Self {
+        match value {
+            StatsModeArg::Records => Self::Records,
+            StatsModeArg::Count => Self::Count,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SearchOperationsArgs {
@@ -1032,6 +1053,21 @@ read_args!(WanEdgeStatsArgs {
     start: Option<u64>,
     end: Option<u64>,
     duration: Option<String>,
+});
+
+read_args!(TunnelSearchArgs {
+    /// Organization UUID.
+    org_id: String,
+    /// Records or count distribution. Not sent to Mist.
+    #[serde(default, skip_serializing)]
+    mode: StatsModeArg,
+    #[schemars(range(min = 1, max = 100))]
+    limit: Option<u32>,
+    search_after: Option<String>,
+    start: Option<u64>,
+    end: Option<u64>,
+    duration: Option<String>,
+    distinct: Option<String>,
 });
 
 #[tool_router(router = mist_tool_router, vis = "pub(crate)")]
@@ -1620,6 +1656,27 @@ impl MistHandler {
             &mut audit,
             Ok::<_, MistCallError>(matches),
         ))
+    }
+    #[tool(
+        name = "search_mist_tunnels",
+        description = "Search WAN edge IPsec tunnel stats, or count them by a distinct field."
+    )]
+    async fn search_mist_tunnels(
+        &self,
+        Parameters(args): Parameters<TunnelSearchArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let resolved = wan::tunnels(args.mode.into());
+        Ok(self
+            .dispatch_named(
+                "search_mist_tunnels",
+                resolved.operation_id,
+                args,
+                resolved.path_names,
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
     }
     #[tool(
         name = "troubleshoot_mist",

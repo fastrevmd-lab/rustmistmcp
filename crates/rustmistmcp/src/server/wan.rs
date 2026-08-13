@@ -15,7 +15,6 @@ pub(crate) enum WanScope {
 }
 
 /// Whether a stats tool returns records or a count distribution.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum StatsMode {
     /// Return matching records.
@@ -79,6 +78,20 @@ pub(crate) fn wan_edge_stats(per_device: bool) -> Resolved {
     }
 }
 
+/// Resolve WAN IPsec tunnel stats for a mode.
+pub(crate) fn tunnels(mode: StatsMode) -> Resolved {
+    match mode {
+        StatsMode::Records => Resolved {
+            operation_id: "searchOrgTunnelsStats",
+            path_names: &["org_id"],
+        },
+        StatsMode::Count => Resolved {
+            operation_id: "countOrgTunnelsStats",
+            path_names: &["org_id"],
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +136,24 @@ mod tests {
             Resolved {
                 operation_id: "getSiteInsightMetricsForGateway",
                 path_names: &["site_id", "device_id"],
+            }
+        );
+    }
+
+    #[test]
+    fn tunnels_resolve_per_mode() {
+        assert_eq!(
+            tunnels(StatsMode::Records),
+            Resolved {
+                operation_id: "searchOrgTunnelsStats",
+                path_names: &["org_id"]
+            }
+        );
+        assert_eq!(
+            tunnels(StatsMode::Count),
+            Resolved {
+                operation_id: "countOrgTunnelsStats",
+                path_names: &["org_id"]
             }
         );
     }
