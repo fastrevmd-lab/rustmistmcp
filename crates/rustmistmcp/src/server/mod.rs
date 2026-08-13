@@ -56,6 +56,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "search_mist_events",
     "search_mist_inventory",
     "search_mist_operations",
+    "search_mist_peer_paths",
     "search_mist_tunnels",
     "troubleshoot_mist",
 ];
@@ -1070,6 +1071,21 @@ read_args!(TunnelSearchArgs {
     distinct: Option<String>,
 });
 
+read_args!(PeerPathSearchArgs {
+    /// Organization UUID.
+    org_id: String,
+    /// Records or count distribution. Not sent to Mist.
+    #[serde(default, skip_serializing)]
+    mode: StatsModeArg,
+    #[schemars(range(min = 1, max = 100))]
+    limit: Option<u32>,
+    search_after: Option<String>,
+    start: Option<u64>,
+    end: Option<u64>,
+    duration: Option<String>,
+    distinct: Option<String>,
+});
+
 #[tool_router(router = mist_tool_router, vis = "pub(crate)")]
 impl MistHandler {
     #[tool(name = "get_mist_device", description = "Get one site device.")]
@@ -1656,6 +1672,27 @@ impl MistHandler {
             &mut audit,
             Ok::<_, MistCallError>(matches),
         ))
+    }
+    #[tool(
+        name = "search_mist_peer_paths",
+        description = "Search SD-WAN overlay peer path stats, or count them by a distinct field."
+    )]
+    async fn search_mist_peer_paths(
+        &self,
+        Parameters(args): Parameters<PeerPathSearchArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let resolved = wan::peer_paths(args.mode.into());
+        Ok(self
+            .dispatch_named(
+                "search_mist_peer_paths",
+                resolved.operation_id,
+                args,
+                resolved.path_names,
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
     }
     #[tool(
         name = "search_mist_tunnels",

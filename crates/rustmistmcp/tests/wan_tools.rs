@@ -62,6 +62,21 @@ impl MistClient for RecordingClient {
                 "total": 0,
                 "results": []
             }),
+            "searchOrgPeerPathStats" => serde_json::json!({
+                "start": 0,
+                "end": 0,
+                "limit": 10,
+                "total": 0,
+                "results": []
+            }),
+            "countOrgPeerPathStats" => serde_json::json!({
+                "distinct": "type",
+                "start": 0,
+                "end": 0,
+                "limit": 10,
+                "total": 0,
+                "results": []
+            }),
             _ => serde_json::json!({"results": []}),
         };
         Ok(MistResponse {
@@ -196,5 +211,25 @@ async fn tunnels_resolve_mode_and_never_leak_the_selector() {
     .await
     .expect("count call");
     assert_eq!(counted.operation_id, "countOrgTunnelsStats");
+    assert!(!counted.query.contains_key("mode"));
+}
+
+#[tokio::test]
+async fn peer_paths_resolve_mode() {
+    let records = record_call(
+        "search_mist_peer_paths",
+        serde_json::json!({"org_id": ORG_ID}),
+    )
+    .await
+    .expect("records call");
+    assert_eq!(records.operation_id, "searchOrgPeerPathStats");
+
+    let counted = record_call(
+        "search_mist_peer_paths",
+        serde_json::json!({"org_id": ORG_ID, "mode": "count"}),
+    )
+    .await
+    .expect("count call");
+    assert_eq!(counted.operation_id, "countOrgPeerPathStats");
     assert!(!counted.query.contains_key("mode"));
 }

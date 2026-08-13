@@ -92,6 +92,20 @@ pub(crate) fn tunnels(mode: StatsMode) -> Resolved {
     }
 }
 
+/// Resolve SD-WAN overlay peer path stats for a mode.
+pub(crate) fn peer_paths(mode: StatsMode) -> Resolved {
+    match mode {
+        StatsMode::Records => Resolved {
+            operation_id: "searchOrgPeerPathStats",
+            path_names: &["org_id"],
+        },
+        StatsMode::Count => Resolved {
+            operation_id: "countOrgPeerPathStats",
+            path_names: &["org_id"],
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +167,24 @@ mod tests {
             tunnels(StatsMode::Count),
             Resolved {
                 operation_id: "countOrgTunnelsStats",
+                path_names: &["org_id"]
+            }
+        );
+    }
+
+    #[test]
+    fn peer_paths_resolve_per_mode() {
+        assert_eq!(
+            peer_paths(StatsMode::Records),
+            Resolved {
+                operation_id: "searchOrgPeerPathStats",
+                path_names: &["org_id"]
+            }
+        );
+        assert_eq!(
+            peer_paths(StatsMode::Count),
+            Resolved {
+                operation_id: "countOrgPeerPathStats",
                 path_names: &["org_id"]
             }
         );

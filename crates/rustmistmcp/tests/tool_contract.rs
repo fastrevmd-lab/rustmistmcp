@@ -46,6 +46,7 @@ async fn registry_contains_only_the_approved_read_tools() {
         "search_mist_events",
         "search_mist_inventory",
         "search_mist_operations",
+        "search_mist_peer_paths",
         "search_mist_tunnels",
         "troubleshoot_mist",
     ];
