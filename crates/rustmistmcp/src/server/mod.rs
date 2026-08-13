@@ -58,6 +58,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "search_mist_inventory",
     "search_mist_operations",
     "search_mist_peer_paths",
+    "search_mist_service_path_events",
     "search_mist_tunnels",
     "troubleshoot_mist",
 ];
@@ -1104,6 +1105,21 @@ read_args!(BgpPeerSearchArgs {
     distinct: Option<String>,
 });
 
+read_args!(ServicePathEventArgs {
+    /// Site UUID.
+    site_id: String,
+    /// Records or count distribution. Not sent to Mist.
+    #[serde(default, skip_serializing)]
+    mode: StatsModeArg,
+    #[schemars(range(min = 1, max = 100))]
+    limit: Option<u32>,
+    search_after: Option<String>,
+    start: Option<u64>,
+    end: Option<u64>,
+    duration: Option<String>,
+    distinct: Option<String>,
+});
+
 #[tool_router(router = mist_tool_router, vis = "pub(crate)")]
 impl MistHandler {
     #[tool(name = "get_mist_device", description = "Get one site device.")]
@@ -1735,6 +1751,27 @@ impl MistHandler {
         Ok(self
             .dispatch_named(
                 "search_mist_peer_paths",
+                resolved.operation_id,
+                args,
+                resolved.path_names,
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "search_mist_service_path_events",
+        description = "Search WAN edge service path events for a site, or count them."
+    )]
+    async fn search_mist_service_path_events(
+        &self,
+        Parameters(args): Parameters<ServicePathEventArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let resolved = wan::service_path_events(args.mode.into());
+        Ok(self
+            .dispatch_named(
+                "search_mist_service_path_events",
                 resolved.operation_id,
                 args,
                 resolved.path_names,

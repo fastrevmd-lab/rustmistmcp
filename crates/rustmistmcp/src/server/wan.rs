@@ -128,6 +128,20 @@ pub(crate) fn bgp_peers(scope: WanScope, mode: StatsMode) -> Resolved {
     }
 }
 
+/// Resolve service path events for a mode.
+pub(crate) fn service_path_events(mode: StatsMode) -> Resolved {
+    match mode {
+        StatsMode::Records => Resolved {
+            operation_id: "searchSiteServicePathEvents",
+            path_names: &["site_id"],
+        },
+        StatsMode::Count => Resolved {
+            operation_id: "countSiteServicePathEvents",
+            path_names: &["site_id"],
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +253,24 @@ mod tests {
             bgp_peers(WanScope::Site, StatsMode::Count),
             Resolved {
                 operation_id: "countSiteBgpStats",
+                path_names: &["site_id"]
+            }
+        );
+    }
+
+    #[test]
+    fn service_path_events_resolve_per_mode() {
+        assert_eq!(
+            service_path_events(StatsMode::Records),
+            Resolved {
+                operation_id: "searchSiteServicePathEvents",
+                path_names: &["site_id"]
+            }
+        );
+        assert_eq!(
+            service_path_events(StatsMode::Count),
+            Resolved {
+                operation_id: "countSiteServicePathEvents",
                 path_names: &["site_id"]
             }
         );

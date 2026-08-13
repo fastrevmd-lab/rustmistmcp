@@ -107,6 +107,21 @@ impl MistClient for RecordingClient {
                 "total": 0,
                 "results": []
             }),
+            "searchSiteServicePathEvents" => serde_json::json!({
+                "start": 0,
+                "end": 0,
+                "limit": 10,
+                "total": 0,
+                "results": []
+            }),
+            "countSiteServicePathEvents" => serde_json::json!({
+                "distinct": "type",
+                "start": 0,
+                "end": 0,
+                "limit": 10,
+                "total": 0,
+                "results": []
+            }),
             _ => serde_json::json!({"results": []}),
         };
         Ok(MistResponse {
@@ -300,4 +315,28 @@ async fn bgp_peers_resolve_scope_and_mode() {
         .is_err(),
         "missing scope must be refused"
     );
+}
+
+#[tokio::test]
+async fn service_path_events_resolve_mode() {
+    let records = record_call(
+        "search_mist_service_path_events",
+        serde_json::json!({"site_id": SITE_ID}),
+    )
+    .await
+    .expect("records call");
+    assert_eq!(records.operation_id, "searchSiteServicePathEvents");
+    assert!(
+        !records.query.contains_key("mode"),
+        "mode is a tool selector and must not reach Mist"
+    );
+
+    let counted = record_call(
+        "search_mist_service_path_events",
+        serde_json::json!({"site_id": SITE_ID, "mode": "count"}),
+    )
+    .await
+    .expect("count call");
+    assert_eq!(counted.operation_id, "countSiteServicePathEvents");
+    assert!(!counted.query.contains_key("mode"));
 }
