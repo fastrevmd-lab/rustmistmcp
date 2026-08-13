@@ -177,3 +177,48 @@ to. This matching is intentional: the read operation a tool uses to retrieve one
 object must be the exact catalog read that corresponds to the write on that same
 object type, so `get_mist_wan_config`'s resolution is the authoritative map for
 both read and write flows.
+
+## Change-set write lifecycle
+
+Batch-1 WAN edge mutations — create and update for networks, services, service
+policies, gateway templates, and device profiles — are reachable only through a
+plan → digest → approve → apply → verify lifecycle. Delete operations and
+`mist_configured` device-profile assignment/unassignment remain out of reach.
+
+The four change-set tools (`plan_mist_change`, `get_mist_change_set`,
+`approve_mist_change_set`, `apply_mist_change_set`) all live in `RESTRICTED_TOOLS`,
+so a wildcard-tools token scope cannot reach them. Explicit tool grants are
+required.
+
+### Two-principal approval
+
+Approval requires a second principal: the approver's token name must differ from
+the change set's owner. The refusal compares token names, which `mecmcp-auth`
+guarantees are unique within a store. What no code can enforce is that two
+differently-named tokens are not held by the same human. This control assumes
+tokens are issued to distinct people; if that assumption is violated, the
+two-person property breaks.
+
+### Merge-patch semantics
+
+The patch body is merged onto the configuration object's current state using
+JSON Merge Patch (RFC 7386) semantics with one critical detail: **arrays replace
+wholesale**. There is no element-wise edit — setting `"vlans": [10, 20]` replaces
+the entire array, it does not append or merge. Additionally, **`null` deletes a
+field** rather than setting it to the literal null value.
+
+### Refused fields
+
+`plan_mist_change` refuses any patch containing the `mist_configured` field and
+will not stage the change set. This refusal is immutable: an operator cannot
+approve it past.
+
+### State file and upgrades
+
+Change-set state persists at `/var/lib/rustmistmcp/changeset-state.json`, which
+packaging reserves and the OCI runtime mounts read-write. **Preserve this file
+across upgrades.** Losing it strands every planned and approved change set.
+
+Versions prior to the org-scope fix lack `org_id` in stored previews and will
+refuse at apply with "preview missing org_id". When upgrading across this change,
+re-plan any change set that was staged but not yet applied.
