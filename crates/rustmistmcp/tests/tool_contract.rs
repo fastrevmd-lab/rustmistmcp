@@ -21,6 +21,7 @@ fn site_map() -> BTreeMap<String, String> {
 #[tokio::test]
 async fn registry_contains_only_the_approved_read_tools() {
     const EXPECTED: &[&str] = &[
+        "apply_mist_change_set",
         "approve_mist_change_set",
         "get_mist_change_set",
         "get_mist_device",
@@ -60,6 +61,7 @@ async fn registry_contains_only_the_approved_read_tools() {
         "troubleshoot_mist",
     ];
     const EXPECTED_RESTRICTED: &[&str] = &[
+        "apply_mist_change_set",
         "approve_mist_change_set",
         "get_mist_change_set",
         "get_mist_device",

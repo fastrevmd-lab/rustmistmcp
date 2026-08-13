@@ -297,3 +297,95 @@ async fn get_refuses_a_change_set_belonging_to_another_object() {
         "a change set must not be readable under another object key"
     );
 }
+
+#[tokio::test]
+async fn apply_refuses_when_the_object_moved_after_planning() {
+    let recorder = Arc::new(ScriptedClient::new(serde_json::json!({
+        "id": NETWORK_ID, "name": "branch", "vlan_id": 10
+    })));
+    let handler = MistHandler::with_client(
+        "https://api.mist.com/",
+        vec![ORG_ID.to_owned()],
+        site_map(),
+        recorder.clone(),
+    )
+    .expect("handler");
+
+    let planned = call(
+        handler.clone(),
+        "plan_mist_change",
+        serde_json::json!({
+            "object": "network", "verb": "update", "org_id": ORG_ID,
+            "object_id": NETWORK_ID, "patch": {"vlan_id": 20}
+        }),
+    )
+    .await
+    .expect("plan");
+    let id = planned["change_set_id"].as_str().expect("id").to_owned();
+
+    // Someone else edits the object between plan and apply.
+    *recorder.object.lock().expect("object") = serde_json::json!({
+        "id": NETWORK_ID, "name": "branch-renamed", "vlan_id": 10
+    });
+
+    let refused = call(
+        handler,
+        "apply_mist_change_set",
+        serde_json::json!({"change_set_id": id, "object": "network", "object_id": NETWORK_ID}),
+    )
+    .await;
+
+    assert!(
+        refused.is_err(),
+        "apply must refuse when the object moved since planning"
+    );
+    let requests = recorder.requests.lock().expect("recorder");
+    assert!(
+        requests.iter().all(|request| request.json.is_none()),
+        "no write may be issued once the fingerprint mismatches, got {requests:?}"
+    );
+}
+
+#[tokio::test]
+async fn apply_refuses_an_unapproved_change_set() {
+    let recorder = Arc::new(ScriptedClient::new(serde_json::json!({
+        "id": NETWORK_ID, "name": "branch", "vlan_id": 10
+    })));
+    let handler = MistHandler::with_client(
+        "https://api.mist.com/",
+        vec![ORG_ID.to_owned()],
+        site_map(),
+        recorder.clone(),
+    )
+    .expect("handler");
+
+    let planned = call(
+        handler.clone(),
+        "plan_mist_change",
+        serde_json::json!({
+            "object": "network", "verb": "update", "org_id": ORG_ID,
+            "object_id": NETWORK_ID, "patch": {"vlan_id": 20}
+        }),
+    )
+    .await
+    .expect("plan");
+    let id = planned["change_set_id"].as_str().expect("id").to_owned();
+
+    let refused = call(
+        handler,
+        "apply_mist_change_set",
+        serde_json::json!({"change_set_id": id, "object": "network", "object_id": NETWORK_ID}),
+    )
+    .await;
+
+    assert!(refused.is_err(), "an unapproved change set must not apply");
+    assert!(
+        recorder
+            .requests
+            .lock()
+            .expect("recorder")
+            .iter()
+            .all(|request| request.json.is_none()),
+        "no write may be issued for an unapproved change set"
+    );
+}
