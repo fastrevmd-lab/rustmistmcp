@@ -255,19 +255,6 @@ Next, in order:
 3. Add mutations only behind `mecmcp-changeset`, never as direct writes.
    Designed in issue #14; the `execute` split landed as `execute_class.rs`.
 
-## Tools
-
-The following WAN edge diagnostic tools are currently implemented:
-
-| Tool | Description |
-|---|---|
-| `get_mist_wan_edge_stats` | Get WAN edge gateway metrics for a site, or insight metrics for one gateway. |
-| `list_mist_wan_edges` | List WAN edge gateways (SRX/SSR) in an organization or site. |
-| `search_mist_bgp_peers` | Search WAN edge BGP peer stats in an organization or site, or count them. |
-| `search_mist_peer_paths` | Search SD-WAN overlay peer path stats, or count them by a distinct field. |
-| `search_mist_service_path_events` | Search WAN edge service path events for a site, or count them. |
-| `search_mist_tunnels` | Search WAN edge IPsec tunnel stats, or count them by a distinct field. |
-
 ## Design commitments
 
 - **Curated, not generated.** Tools are chosen and documented by hand. A
@@ -285,6 +272,22 @@ The following WAN edge diagnostic tools are currently implemented:
   credentials into logs.
 - **No secrets in the repo.** Mist API tokens live in operator-managed files
   outside version control. v1 does not accept OAuth client secrets.
+
+## WAN edge tools
+
+The server exposes a curated read surface covering organizations, sites, devices,
+WLANs, clients, SLE, events, and diagnostics. The WAN edge subset listed below
+targets SRX/SSR gateways and their overlay connectivity. See `KNOWN_TOOLS` in
+`crates/rustmistmcp/src/server/mod.rs` for the full tool registry.
+
+| Tool | Description |
+|---|---|
+| `get_mist_wan_edge_stats` | Get WAN edge gateway metrics for a site, or insight metrics for one gateway. |
+| `list_mist_wan_edges` | List WAN edge gateways (SRX/SSR) in an organization or site. |
+| `search_mist_bgp_peers` | Search WAN edge BGP peer stats in an organization or site, or count them. |
+| `search_mist_peer_paths` | Search SD-WAN overlay peer path stats, or count them by a distinct field. |
+| `search_mist_service_path_events` | Search WAN edge service path events for a site, or count them. |
+| `search_mist_tunnels` | Search WAN edge IPsec tunnel stats, or count them by a distinct field. |
 
 ## License
 
