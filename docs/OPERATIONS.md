@@ -4,7 +4,8 @@ This is operator guidance for credential-free pre-release artifacts. It is not
 release acceptance. The outbound `HttpMistClient` has served live read-only
 traffic from a lab LXC (issue #11), but that run was loopback-only with no TLS,
 so the TLS, Host/Origin, and bad-bearer rows of `PACKAGING_ACCEPTANCE.md` are
-still unproven. Mutation tooling is absent by design.
+still unproven. Batch-1 WAN edge mutations exist behind the change-set lifecycle,
+but no live-tenant apply has been performed.
 
 ## Install boundary
 

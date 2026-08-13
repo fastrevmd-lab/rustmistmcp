@@ -140,8 +140,9 @@ packaging only**. A lab LXC built from them has served live read-only tenant
 traffic (issue #11), which is not the same as packaging acceptance: that run
 used no TLS and no off-loopback bind, so the TLS, Host/Origin, and bad-bearer
 rows of `docs/PACKAGING_ACCEPTANCE.md` remain unproven. The `/api/v1/self`
-startup probe is unimplemented and no mutating tool is registered. No v1 release
-label may be claimed until that checklist is complete.
+startup probe is unimplemented, and mutations exist only for batch-1 WAN edge
+objects behind the change-set lifecycle; no live-tenant apply has been performed.
+No v1 release label may be claimed until that checklist is complete.
 
 The OCI image is a multi-stage build with a digest-pinned Rust builder and a
 digest-pinned distroless Debian 13 runtime. It runs only
