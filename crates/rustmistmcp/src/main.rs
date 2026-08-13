@@ -230,7 +230,9 @@ mod tests {
             result.is_err(),
             "load_http_token_store must refuse (None, false) with an error"
         );
-        let error = result.unwrap_err().to_string();
+        let error = result
+            .expect_err("(None, false) must be refused")
+            .to_string();
         assert!(
             error.contains("requires either --tokens-file or --allow-no-auth"),
             "error message should explain the requirement, got: {error}"
@@ -266,7 +268,10 @@ mod tests {
             "load_http_token_store must permit explicit --allow-no-auth"
         );
         assert!(
-            matches!(result.unwrap(), AuthConfig::ExplicitlyUnauthenticated),
+            matches!(
+                result.expect("--allow-no-auth must yield an explicit acknowledgement"),
+                AuthConfig::ExplicitlyUnauthenticated
+            ),
             "result should be ExplicitlyUnauthenticated"
         );
     }
