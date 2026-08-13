@@ -71,6 +71,7 @@ pub const RESTRICTED_TOOLS: &[&str] = &[
     "get_mist_device",
     "get_mist_self",
     "invoke_mist_privileged_read",
+    "list_mist_wan_config",
     "list_mist_wlans",
     "search_mist_audit_logs",
 ];
@@ -1677,16 +1678,7 @@ impl MistHandler {
             }
         };
         let object = args.object;
-        let resolved = match wan::list_config(object.into(), scope) {
-            Ok(resolved) => resolved,
-            Err(_) => {
-                return Ok(tool_result::<ReadEnvelope, _>(
-                    Err(MistCallError::AmbiguousScope),
-                    ResultFormat::PrettyJson,
-                    RESULT_LIMITS,
-                ));
-            }
-        };
+        let resolved = wan::list_config(object.into(), scope);
         // Gateway templates and device profiles are privileged config.
         let capability = match object {
             WanObjectArg::GatewayTemplate | WanObjectArg::DeviceProfile => {

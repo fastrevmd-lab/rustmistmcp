@@ -158,6 +158,7 @@ impl MistClient for RecordingClient {
             "listSiteServicesDerived" => serde_json::json!([]),
             "listSiteServicePoliciesDerived" => serde_json::json!([]),
             "listSiteGatewayTemplatesDerived" => serde_json::json!([]),
+            "listSiteDeviceProfilesDerived" => serde_json::json!([]),
             _ => serde_json::json!({"results": []}),
         };
         Ok(MistResponse {
@@ -477,14 +478,4 @@ async fn wan_config_listing_resolves_object_and_scope() {
         assert_eq!(request.operation_id, expected, "for {args}");
         assert!(!request.query.contains_key("object"));
     }
-
-    assert!(
-        record_call(
-            "list_mist_wan_config",
-            serde_json::json!({"object": "deviceprofile", "site_id": SITE_ID}),
-        )
-        .await
-        .is_err(),
-        "device profiles have no site-derived listing"
-    );
 }

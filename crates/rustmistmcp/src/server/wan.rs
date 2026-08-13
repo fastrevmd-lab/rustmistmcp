@@ -213,11 +213,8 @@ pub(crate) enum WanObject {
 }
 
 /// Resolve a configuration listing.
-///
-/// Device profiles have no site-derived listing, so a site scope is refused
-/// rather than silently answered with the org listing.
-pub(crate) fn list_config(object: WanObject, scope: WanScope) -> Result<Resolved, ScopeError> {
-    let resolved = match (object, scope) {
+pub(crate) fn list_config(object: WanObject, scope: WanScope) -> Resolved {
+    match (object, scope) {
         (WanObject::Network, WanScope::Org) => Resolved {
             operation_id: "listOrgNetworks",
             path_names: &["org_id"],
@@ -254,9 +251,11 @@ pub(crate) fn list_config(object: WanObject, scope: WanScope) -> Result<Resolved
             operation_id: "listSiteGatewayTemplatesDerived",
             path_names: &["site_id"],
         },
-        (WanObject::DeviceProfile, WanScope::Site) => return Err(ScopeError),
-    };
-    Ok(resolved)
+        (WanObject::DeviceProfile, WanScope::Site) => Resolved {
+            operation_id: "listSiteDeviceProfilesDerived",
+            path_names: &["site_id"],
+        },
+    }
 }
 
 #[cfg(test)]
@@ -449,29 +448,31 @@ mod tests {
     fn list_config_resolves_object_and_scope() {
         assert_eq!(
             list_config(WanObject::Network, WanScope::Org),
-            Ok(Resolved {
+            Resolved {
                 operation_id: "listOrgNetworks",
                 path_names: &["org_id"]
-            })
+            }
         );
         assert_eq!(
             list_config(WanObject::Network, WanScope::Site),
-            Ok(Resolved {
+            Resolved {
                 operation_id: "listSiteNetworksDerived",
                 path_names: &["site_id"]
-            })
+            }
         );
         assert_eq!(
             list_config(WanObject::GatewayTemplate, WanScope::Site),
-            Ok(Resolved {
+            Resolved {
                 operation_id: "listSiteGatewayTemplatesDerived",
                 path_names: &["site_id"],
-            })
+            }
         );
-        // Device profiles have no site-derived listing.
         assert_eq!(
             list_config(WanObject::DeviceProfile, WanScope::Site),
-            Err(ScopeError)
+            Resolved {
+                operation_id: "listSiteDeviceProfilesDerived",
+                path_names: &["site_id"]
+            }
         );
     }
 }
