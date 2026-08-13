@@ -103,9 +103,80 @@ pub(crate) fn write_target(object: WanObject, verb: WriteVerb) -> WriteTarget {
     }
 }
 
+/// Why a patch was refused before a change set was created.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+pub(crate) enum PatchError {
+    /// The patch tried to set `mist_configured`.
+    MistConfigured,
+}
+
+/// Refuse any patch that touches `mist_configured`, at any depth.
+///
+/// That field decides whether Mist owns a device's configuration, so changing
+/// it decides who may configure the device at all — a different kind of act
+/// from changing what a configuration says, and one with fleet-wide reach. It
+/// spans two capabilities (`update` and `create`), so no capability-based gate
+/// can contain it; refusing the field is the only control that holds. The
+/// refusal happens before a change set exists so approval cannot override it.
+#[allow(dead_code)]
+pub(crate) fn reject_config_authority(patch: &serde_json::Value) -> Result<(), PatchError> {
+    match patch {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("mist_configured") {
+                return Err(PatchError::MistConfigured);
+            }
+            for value in map.values() {
+                reject_config_authority(value)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                reject_config_authority(value)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Apply a JSON merge-patch to the object read from Mist.
+///
+/// All five objects update via `PUT`, which replaces the whole object, so a
+/// caller sending only the field it wants changed would silently drop every
+/// other field. Merging onto the `before` state removes that hazard. Two
+/// behaviours must be documented wherever this is exposed: **arrays replace
+/// wholesale** (there is no element-wise edit), and **`null` deletes a field**
+/// rather than setting it to null.
+#[allow(dead_code)]
+pub(crate) fn merge_patch(
+    before: &serde_json::Value,
+    patch: &serde_json::Value,
+) -> serde_json::Value {
+    let serde_json::Value::Object(patch_map) = patch else {
+        return patch.clone();
+    };
+    let mut merged = match before {
+        serde_json::Value::Object(before_map) => before_map.clone(),
+        _ => serde_json::Map::new(),
+    };
+    for (key, value) in patch_map {
+        if value.is_null() {
+            merged.remove(key);
+        } else if let Some(existing) = merged.get(key) {
+            merged.insert(key.clone(), merge_patch(existing, value));
+        } else {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::Value::Object(merged)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn update_targets_pair_each_write_with_its_own_read() {
@@ -151,5 +222,56 @@ mod tests {
                 assert!(target.read_operation_id.starts_with("get"));
             }
         }
+    }
+
+    #[test]
+    fn merge_preserves_unspecified_fields() {
+        let before = json!({"name": "branch", "vlan_id": 10, "subnet": "10.0.0.0/24"});
+        let patch = json!({"vlan_id": 20});
+        assert_eq!(
+            merge_patch(&before, &patch),
+            json!({"name": "branch", "vlan_id": 20, "subnet": "10.0.0.0/24"})
+        );
+    }
+
+    #[test]
+    fn merge_replaces_arrays_wholesale() {
+        let before = json!({"servers": ["a", "b", "c"]});
+        let patch = json!({"servers": ["z"]});
+        assert_eq!(merge_patch(&before, &patch), json!({"servers": ["z"]}));
+    }
+
+    #[test]
+    fn merge_deletes_on_null() {
+        let before = json!({"name": "branch", "note": "temporary"});
+        let patch = json!({"note": null});
+        assert_eq!(merge_patch(&before, &patch), json!({"name": "branch"}));
+    }
+
+    #[test]
+    fn merge_recurses_into_nested_objects() {
+        let before = json!({"dhcpd": {"enabled": true, "lease": 3600}});
+        let patch = json!({"dhcpd": {"lease": 7200}});
+        assert_eq!(
+            merge_patch(&before, &patch),
+            json!({"dhcpd": {"enabled": true, "lease": 7200}})
+        );
+    }
+
+    #[test]
+    fn config_authority_is_refused_at_any_depth() {
+        assert_eq!(
+            reject_config_authority(&json!({"mist_configured": true})),
+            Err(PatchError::MistConfigured)
+        );
+        assert_eq!(
+            reject_config_authority(&json!({"switch": {"mist_configured": false}})),
+            Err(PatchError::MistConfigured)
+        );
+        assert_eq!(
+            reject_config_authority(&json!({"devices": [{"mist_configured": true}]})),
+            Err(PatchError::MistConfigured)
+        );
+        assert_eq!(reject_config_authority(&json!({"name": "branch"})), Ok(()));
     }
 }
