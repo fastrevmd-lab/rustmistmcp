@@ -197,6 +197,68 @@ pub(crate) fn applications(source: AppSource, mode: StatsMode) -> Resolved {
     }
 }
 
+/// A WAN edge configuration object type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WanObject {
+    /// A LAN segment / network.
+    Network,
+    /// An application or service definition.
+    Service,
+    /// A service (SD-WAN steering) policy.
+    ServicePolicy,
+    /// A gateway template.
+    GatewayTemplate,
+    /// A device profile.
+    DeviceProfile,
+}
+
+/// Resolve a configuration listing.
+///
+/// Device profiles have no site-derived listing, so a site scope is refused
+/// rather than silently answered with the org listing.
+pub(crate) fn list_config(object: WanObject, scope: WanScope) -> Result<Resolved, ScopeError> {
+    let resolved = match (object, scope) {
+        (WanObject::Network, WanScope::Org) => Resolved {
+            operation_id: "listOrgNetworks",
+            path_names: &["org_id"],
+        },
+        (WanObject::Service, WanScope::Org) => Resolved {
+            operation_id: "listOrgServices",
+            path_names: &["org_id"],
+        },
+        (WanObject::ServicePolicy, WanScope::Org) => Resolved {
+            operation_id: "listOrgServicePolicies",
+            path_names: &["org_id"],
+        },
+        (WanObject::GatewayTemplate, WanScope::Org) => Resolved {
+            operation_id: "listOrgGatewayTemplates",
+            path_names: &["org_id"],
+        },
+        (WanObject::DeviceProfile, WanScope::Org) => Resolved {
+            operation_id: "listOrgDeviceProfiles",
+            path_names: &["org_id"],
+        },
+        (WanObject::Network, WanScope::Site) => Resolved {
+            operation_id: "listSiteNetworksDerived",
+            path_names: &["site_id"],
+        },
+        (WanObject::Service, WanScope::Site) => Resolved {
+            operation_id: "listSiteServicesDerived",
+            path_names: &["site_id"],
+        },
+        (WanObject::ServicePolicy, WanScope::Site) => Resolved {
+            operation_id: "listSiteServicePoliciesDerived",
+            path_names: &["site_id"],
+        },
+        (WanObject::GatewayTemplate, WanScope::Site) => Resolved {
+            operation_id: "listSiteGatewayTemplatesDerived",
+            path_names: &["site_id"],
+        },
+        (WanObject::DeviceProfile, WanScope::Site) => return Err(ScopeError),
+    };
+    Ok(resolved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,6 +442,36 @@ mod tests {
                 operation_id: "listGatewayApplications",
                 path_names: &[]
             }
+        );
+    }
+
+    #[test]
+    fn list_config_resolves_object_and_scope() {
+        assert_eq!(
+            list_config(WanObject::Network, WanScope::Org),
+            Ok(Resolved {
+                operation_id: "listOrgNetworks",
+                path_names: &["org_id"]
+            })
+        );
+        assert_eq!(
+            list_config(WanObject::Network, WanScope::Site),
+            Ok(Resolved {
+                operation_id: "listSiteNetworksDerived",
+                path_names: &["site_id"]
+            })
+        );
+        assert_eq!(
+            list_config(WanObject::GatewayTemplate, WanScope::Site),
+            Ok(Resolved {
+                operation_id: "listSiteGatewayTemplatesDerived",
+                path_names: &["site_id"],
+            })
+        );
+        // Device profiles have no site-derived listing.
+        assert_eq!(
+            list_config(WanObject::DeviceProfile, WanScope::Site),
+            Err(ScopeError)
         );
     }
 }

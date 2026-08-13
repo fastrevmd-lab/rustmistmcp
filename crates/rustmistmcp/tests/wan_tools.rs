@@ -149,6 +149,15 @@ impl MistClient for RecordingClient {
                 "results": []
             }),
             "listGatewayApplications" => serde_json::json!([]),
+            "listOrgNetworks" => serde_json::json!([]),
+            "listOrgServices" => serde_json::json!([]),
+            "listOrgServicePolicies" => serde_json::json!([]),
+            "listOrgGatewayTemplates" => serde_json::json!([]),
+            "listOrgDeviceProfiles" => serde_json::json!([]),
+            "listSiteNetworksDerived" => serde_json::json!([]),
+            "listSiteServicesDerived" => serde_json::json!([]),
+            "listSiteServicePoliciesDerived" => serde_json::json!([]),
+            "listSiteGatewayTemplatesDerived" => serde_json::json!([]),
             _ => serde_json::json!({"results": []}),
         };
         Ok(MistResponse {
@@ -440,5 +449,42 @@ async fn applications_require_site_id_for_the_site_source() {
         .await
         .is_err(),
         "site source without site_id must be refused"
+    );
+}
+
+#[tokio::test]
+async fn wan_config_listing_resolves_object_and_scope() {
+    // Gateway templates and device profiles require privileged read auth, so
+    // this test only covers the ordinary-read config types. The unit test in
+    // wan.rs proves all 10 operation resolutions work correctly.
+    for (object, scope_key, scope_value, expected) in [
+        ("network", "org_id", ORG_ID, "listOrgNetworks"),
+        ("service", "org_id", ORG_ID, "listOrgServices"),
+        ("servicepolicy", "org_id", ORG_ID, "listOrgServicePolicies"),
+        ("network", "site_id", SITE_ID, "listSiteNetworksDerived"),
+        ("service", "site_id", SITE_ID, "listSiteServicesDerived"),
+        (
+            "servicepolicy",
+            "site_id",
+            SITE_ID,
+            "listSiteServicePoliciesDerived",
+        ),
+    ] {
+        let args = serde_json::json!({"object": object, scope_key: scope_value});
+        let request = record_call("list_mist_wan_config", args.clone())
+            .await
+            .unwrap_or_else(|error| panic!("{args} failed: {error}"));
+        assert_eq!(request.operation_id, expected, "for {args}");
+        assert!(!request.query.contains_key("object"));
+    }
+
+    assert!(
+        record_call(
+            "list_mist_wan_config",
+            serde_json::json!({"object": "deviceprofile", "site_id": SITE_ID}),
+        )
+        .await
+        .is_err(),
+        "device profiles have no site-derived listing"
     );
 }

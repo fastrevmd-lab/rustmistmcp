@@ -40,6 +40,7 @@ async fn registry_contains_only_the_approved_read_tools() {
         "list_mist_sites",
         "list_mist_sle_metrics",
         "list_mist_upgrades",
+        "list_mist_wan_config",
         "list_mist_wan_edges",
         "list_mist_wlans",
         "search_mist_alarms",
