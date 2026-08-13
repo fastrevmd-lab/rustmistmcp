@@ -106,6 +106,28 @@ pub(crate) fn peer_paths(mode: StatsMode) -> Resolved {
     }
 }
 
+/// Resolve BGP peer stats for a scope and mode.
+pub(crate) fn bgp_peers(scope: WanScope, mode: StatsMode) -> Resolved {
+    match (scope, mode) {
+        (WanScope::Org, StatsMode::Records) => Resolved {
+            operation_id: "searchOrgBgpStats",
+            path_names: &["org_id"],
+        },
+        (WanScope::Org, StatsMode::Count) => Resolved {
+            operation_id: "countOrgBgpStats",
+            path_names: &["org_id"],
+        },
+        (WanScope::Site, StatsMode::Records) => Resolved {
+            operation_id: "searchSiteBgpStats",
+            path_names: &["site_id"],
+        },
+        (WanScope::Site, StatsMode::Count) => Resolved {
+            operation_id: "countSiteBgpStats",
+            path_names: &["site_id"],
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +208,38 @@ mod tests {
             Resolved {
                 operation_id: "countOrgPeerPathStats",
                 path_names: &["org_id"]
+            }
+        );
+    }
+
+    #[test]
+    fn bgp_peers_resolve_all_four_combinations() {
+        assert_eq!(
+            bgp_peers(WanScope::Org, StatsMode::Records),
+            Resolved {
+                operation_id: "searchOrgBgpStats",
+                path_names: &["org_id"]
+            }
+        );
+        assert_eq!(
+            bgp_peers(WanScope::Org, StatsMode::Count),
+            Resolved {
+                operation_id: "countOrgBgpStats",
+                path_names: &["org_id"]
+            }
+        );
+        assert_eq!(
+            bgp_peers(WanScope::Site, StatsMode::Records),
+            Resolved {
+                operation_id: "searchSiteBgpStats",
+                path_names: &["site_id"]
+            }
+        );
+        assert_eq!(
+            bgp_peers(WanScope::Site, StatsMode::Count),
+            Resolved {
+                operation_id: "countSiteBgpStats",
+                path_names: &["site_id"]
             }
         );
     }

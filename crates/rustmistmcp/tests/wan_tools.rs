@@ -77,6 +77,36 @@ impl MistClient for RecordingClient {
                 "total": 0,
                 "results": []
             }),
+            "searchOrgBgpStats" => serde_json::json!({
+                "start": 0,
+                "end": 0,
+                "limit": 10,
+                "total": 0,
+                "results": []
+            }),
+            "countOrgBgpStats" => serde_json::json!({
+                "distinct": "type",
+                "start": 0,
+                "end": 0,
+                "limit": 10,
+                "total": 0,
+                "results": []
+            }),
+            "searchSiteBgpStats" => serde_json::json!({
+                "start": 0,
+                "end": 0,
+                "limit": 10,
+                "total": 0,
+                "results": []
+            }),
+            "countSiteBgpStats" => serde_json::json!({
+                "distinct": "type",
+                "start": 0,
+                "end": 0,
+                "limit": 10,
+                "total": 0,
+                "results": []
+            }),
             _ => serde_json::json!({"results": []}),
         };
         Ok(MistResponse {
@@ -232,4 +262,38 @@ async fn peer_paths_resolve_mode() {
     .expect("count call");
     assert_eq!(counted.operation_id, "countOrgPeerPathStats");
     assert!(!counted.query.contains_key("mode"));
+}
+
+#[tokio::test]
+async fn bgp_peers_resolve_scope_and_mode() {
+    for (args, expected) in [
+        (serde_json::json!({"org_id": ORG_ID}), "searchOrgBgpStats"),
+        (
+            serde_json::json!({"org_id": ORG_ID, "mode": "count"}),
+            "countOrgBgpStats",
+        ),
+        (
+            serde_json::json!({"site_id": SITE_ID}),
+            "searchSiteBgpStats",
+        ),
+        (
+            serde_json::json!({"site_id": SITE_ID, "mode": "count"}),
+            "countSiteBgpStats",
+        ),
+    ] {
+        let request = record_call("search_mist_bgp_peers", args.clone())
+            .await
+            .unwrap_or_else(|error| panic!("call {args} failed: {error}"));
+        assert_eq!(request.operation_id, expected, "for {args}");
+    }
+
+    assert!(
+        record_call(
+            "search_mist_bgp_peers",
+            serde_json::json!({"mode": "count"})
+        )
+        .await
+        .is_err(),
+        "missing scope must be refused"
+    );
 }

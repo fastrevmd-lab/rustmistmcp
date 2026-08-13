@@ -52,6 +52,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "list_mist_wlans",
     "search_mist_alarms",
     "search_mist_audit_logs",
+    "search_mist_bgp_peers",
     "search_mist_clients",
     "search_mist_events",
     "search_mist_inventory",
@@ -1086,6 +1087,23 @@ read_args!(PeerPathSearchArgs {
     distinct: Option<String>,
 });
 
+read_args!(BgpPeerSearchArgs {
+    /// Organization UUID. Mutually exclusive with `site_id`.
+    org_id: Option<String>,
+    /// Site UUID. Mutually exclusive with `org_id`.
+    site_id: Option<String>,
+    /// Records or count distribution. Not sent to Mist.
+    #[serde(default, skip_serializing)]
+    mode: StatsModeArg,
+    #[schemars(range(min = 1, max = 100))]
+    limit: Option<u32>,
+    search_after: Option<String>,
+    start: Option<u64>,
+    end: Option<u64>,
+    duration: Option<String>,
+    distinct: Option<String>,
+});
+
 #[tool_router(router = mist_tool_router, vis = "pub(crate)")]
 impl MistHandler {
     #[tool(name = "get_mist_device", description = "Get one site device.")]
@@ -1542,6 +1560,37 @@ impl MistHandler {
                 args,
                 &["org_id"],
                 MistCapability::PrivilegedRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "search_mist_bgp_peers",
+        description = "Search WAN edge BGP peer stats in an organization or site, or count them."
+    )]
+    async fn search_mist_bgp_peers(
+        &self,
+        Parameters(args): Parameters<BgpPeerSearchArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = match wan::resolve_scope(args.org_id.as_deref(), args.site_id.as_deref()) {
+            Ok(scope) => scope,
+            Err(_) => {
+                return Ok(tool_result::<ReadEnvelope, _>(
+                    Err(MistCallError::AmbiguousScope),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        };
+        let resolved = wan::bgp_peers(scope, args.mode.into());
+        Ok(self
+            .dispatch_named(
+                "search_mist_bgp_peers",
+                resolved.operation_id,
+                args,
+                resolved.path_names,
+                MistCapability::OrdinaryRead,
                 &extensions,
             )
             .await)

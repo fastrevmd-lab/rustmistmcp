@@ -42,6 +42,7 @@ async fn registry_contains_only_the_approved_read_tools() {
         "list_mist_wlans",
         "search_mist_alarms",
         "search_mist_audit_logs",
+        "search_mist_bgp_peers",
         "search_mist_clients",
         "search_mist_events",
         "search_mist_inventory",
