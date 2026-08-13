@@ -31,6 +31,7 @@ async fn registry_contains_only_the_approved_read_tools() {
         "get_mist_site",
         "get_mist_sle",
         "get_mist_sle_impact",
+        "get_mist_wan_config",
         "get_mist_wan_edge_stats",
         "invoke_mist_privileged_read",
         "invoke_mist_read",
@@ -58,6 +59,7 @@ async fn registry_contains_only_the_approved_read_tools() {
     const EXPECTED_RESTRICTED: &[&str] = &[
         "get_mist_device",
         "get_mist_self",
+        "get_mist_wan_config",
         "invoke_mist_privileged_read",
         "list_mist_wan_config",
         "list_mist_wlans",

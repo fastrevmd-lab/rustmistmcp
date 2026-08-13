@@ -165,3 +165,15 @@ Measure the binary's glibc requirement rather than assuming it:
 ```sh
 objdump -T /usr/local/bin/rustmistmcp | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -1
 ```
+
+## WAN edge configuration tools
+
+The `get_mist_wan_config` tool reads one configuration object by ID: networks,
+services, service policies, gateway templates, or device profiles. Its
+object→operation mapping (`getOrgNetwork`, `getOrgService`, `getOrgServicePolicy`,
+`getOrgGatewayTemplate`, `getOrgDeviceProfile`) is the same mapping the
+change-set lifecycle will use when fetching the `before` state its digest binds
+to. This matching is intentional: the read operation a tool uses to retrieve one
+object must be the exact catalog read that corresponds to the write on that same
+object type, so `get_mist_wan_config`'s resolution is the authoritative map for
+both read and write flows.

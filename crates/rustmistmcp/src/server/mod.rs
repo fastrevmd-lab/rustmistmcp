@@ -41,6 +41,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "get_mist_site",
     "get_mist_sle",
     "get_mist_sle_impact",
+    "get_mist_wan_config",
     "get_mist_wan_edge_stats",
     "invoke_mist_privileged_read",
     "invoke_mist_read",
@@ -70,6 +71,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
 pub const RESTRICTED_TOOLS: &[&str] = &[
     "get_mist_device",
     "get_mist_self",
+    "get_mist_wan_config",
     "invoke_mist_privileged_read",
     "list_mist_wan_config",
     "list_mist_wlans",
@@ -1237,6 +1239,17 @@ read_args!(WanConfigListArgs {
     page: Option<u32>,
 });
 
+read_args!(WanConfigGetArgs {
+    /// Which configuration object type to read. Not sent to Mist.
+    #[serde(skip_serializing)]
+    object: WanObjectArg,
+    /// Organization UUID.
+    org_id: String,
+    /// The object's own UUID. Not sent to Mist under this name.
+    #[serde(skip_serializing)]
+    object_id: String,
+});
+
 #[tool_router(router = mist_tool_router, vis = "pub(crate)")]
 impl MistHandler {
     #[tool(name = "get_mist_device", description = "Get one site device.")]
@@ -1449,6 +1462,42 @@ impl MistHandler {
                 args,
                 resolved.path_names,
                 MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "get_mist_wan_config",
+        description = "Get one WAN edge configuration object by ID."
+    )]
+    async fn get_mist_wan_config(
+        &self,
+        Parameters(args): Parameters<WanConfigGetArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let object: wan::WanObject = args.object.into();
+        let resolved = wan::get_config(object);
+        let path = BTreeMap::from([
+            ("org_id".to_owned(), args.org_id),
+            (wan::object_id_name(object).to_owned(), args.object_id),
+        ]);
+        // Gateway templates and device profiles are privileged config.
+        let capability = match args.object {
+            WanObjectArg::GatewayTemplate | WanObjectArg::DeviceProfile => {
+                MistCapability::PrivilegedRead
+            }
+            _ => MistCapability::OrdinaryRead,
+        };
+        Ok(self
+            .dispatch_catalogued_read(
+                CatalogRead {
+                    tool: "get_mist_wan_config",
+                    operation_id: resolved.operation_id.to_owned(),
+                    path,
+                    query: BTreeMap::new(),
+                    cursor: None,
+                    capability,
+                },
                 &extensions,
             )
             .await)

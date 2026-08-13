@@ -159,6 +159,11 @@ impl MistClient for RecordingClient {
             "listSiteServicePoliciesDerived" => serde_json::json!([]),
             "listSiteGatewayTemplatesDerived" => serde_json::json!([]),
             "listSiteDeviceProfilesDerived" => serde_json::json!([]),
+            "getOrgNetwork" => serde_json::json!({"name": "test-network"}),
+            "getOrgService" => serde_json::json!({}),
+            "getOrgServicePolicy" => serde_json::json!({}),
+            "getOrgGatewayTemplate" => serde_json::json!({"name": "test-template"}),
+            "getOrgDeviceProfile" => serde_json::json!({}),
             _ => serde_json::json!({"results": []}),
         };
         Ok(MistResponse {
@@ -477,5 +482,32 @@ async fn wan_config_listing_resolves_object_and_scope() {
             .unwrap_or_else(|error| panic!("{args} failed: {error}"));
         assert_eq!(request.operation_id, expected, "for {args}");
         assert!(!request.query.contains_key("object"));
+    }
+}
+
+#[tokio::test]
+async fn wan_config_get_resolves_each_object_and_places_the_id_in_the_path() {
+    // Gateway templates and device profiles require privileged read auth, so
+    // this test only covers the ordinary-read config types. The unit test in
+    // wan.rs proves all 5 operation resolutions work correctly.
+    const OBJECT_ID: &str = "33333333-3333-3333-3333-333333333333";
+    for (object, expected) in [
+        ("network", "getOrgNetwork"),
+        ("service", "getOrgService"),
+        ("servicepolicy", "getOrgServicePolicy"),
+    ] {
+        let args = serde_json::json!({
+            "object": object,
+            "org_id": ORG_ID,
+            "object_id": OBJECT_ID,
+        });
+        let request = record_call("get_mist_wan_config", args.clone())
+            .await
+            .unwrap_or_else(|error| panic!("{args} failed: {error}"));
+        assert_eq!(request.operation_id, expected, "for {args}");
+        assert!(
+            !request.query.contains_key("object_id"),
+            "the object id belongs in the path"
+        );
     }
 }
