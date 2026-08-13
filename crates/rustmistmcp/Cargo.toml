@@ -43,9 +43,11 @@ mecmcp-transport.workspace = true
 async-trait.workspace = true
 http.workspace = true
 mecmcp-audit = { workspace = true, features = ["test-util"] }
+reqwest.workspace = true
 rmcp = { workspace = true, features = ["client"] }
 tempfile = "3"
 tower.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

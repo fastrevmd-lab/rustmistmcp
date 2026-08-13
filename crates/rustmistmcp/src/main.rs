@@ -4,9 +4,7 @@ use anyhow::{Context as _, Result};
 use mecmcp_auth::TokenStoreFile;
 use mecmcp_runtime::cli::{Cli, Command, Transport};
 use rmcp::ServiceExt as _;
-use rustmistmcp::{
-    KNOWN_TOOLS, MistHandler, install_token_reload_handler, serve_http, validate_runtime_serve,
-};
+use rustmistmcp::{AuthConfig, KNOWN_TOOLS, MistHandler, install_token_reload_handler, serve_http};
 use rustmistmcp_core::{MistConfig, MistGrant};
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
@@ -16,7 +14,7 @@ async fn main() -> Result<()> {
     // binary's name and version onto it so `--version` answers instead of
     // exiting 2 (mecmcp#159).
     let args = mecmcp_runtime::cli::parse_for("rustmistmcp", env!("CARGO_PKG_VERSION"));
-    validate_runtime_serve(&args).map_err(|error| anyhow::anyhow!("{error}"))?;
+    mecmcp_runtime::cli_validate::validate(&args).map_err(|error| anyhow::anyhow!("{error}"))?;
     init_audit(&args)?;
 
     if let Some(Command::Token { action }) = args.command {
@@ -60,9 +58,9 @@ async fn main() -> Result<()> {
     match args.transport {
         Transport::Stdio => serve_stdio(handler).await,
         Transport::StreamableHttp => {
-            let token_store = load_http_token_store(&args)?;
-            if let Some(store) = token_store.clone() {
-                install_token_reload_handler(store)
+            let auth_config = load_http_token_store(&args)?;
+            if let AuthConfig::Authenticated(store) = &auth_config {
+                install_token_reload_handler(store.clone())
                     .context("installing token snapshot reload handler")?;
             }
             let tls = load_listener_tls(&args)?;
@@ -107,7 +105,7 @@ async fn main() -> Result<()> {
             serve_http(
                 handler,
                 address,
-                token_store,
+                auth_config,
                 args.allowed_host,
                 args.allowed_origin,
                 mecmcp_transport::LimitsConfig::default(),
@@ -157,24 +155,29 @@ async fn serve_stdio(handler: MistHandler) -> Result<()> {
         .context("MCP stdio service exited with error")
 }
 
-fn load_http_token_store(args: &Cli) -> Result<Option<Arc<TokenStoreFile<MistGrant>>>> {
+fn load_http_token_store(args: &Cli) -> Result<AuthConfig> {
     match (&args.tokens_file, args.allow_no_auth) {
-        (Some(path), false) => {
+        (Some(path), _) => {
             let store = Arc::new(
                 TokenStoreFile::<MistGrant>::load(path)
                     .with_context(|| format!("loading {}", path.display()))?,
             );
             tracing::info!(tokens = store.store().len(), "token store loaded");
-            Ok(Some(store))
+            Ok(AuthConfig::Authenticated(store))
         }
         (None, true) => {
             tracing::warn!(
                 "--allow-no-auth: Streamable HTTP accepts ordinary read/local metadata requests \
                  without authentication on loopback; restricted reads and mutations remain denied"
             );
-            Ok(None)
+            Ok(AuthConfig::ExplicitlyUnauthenticated)
         }
-        _ => Ok(None),
+        (None, false) => {
+            anyhow::bail!(
+                "HTTP transport requires either --tokens-file or --allow-no-auth; \
+                 refusing to serve unauthenticated without explicit acknowledgement"
+            )
+        }
     }
 }
 
@@ -189,4 +192,87 @@ fn load_listener_tls(args: &Cli) -> Result<Option<Arc<rustls::ServerConfig>>> {
     mecmcp_transport::load_tls(cert, key, Arc::new(provider))
         .context("loading listener TLS")
         .map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mecmcp_runtime::cli::Transport;
+    use std::path::PathBuf;
+
+    /// Verify that the (None, false) case — neither --tokens-file nor
+    /// --allow-no-auth — is refused at startup rather than silently serving
+    /// unauthenticated.
+    #[test]
+    fn none_false_refuses_to_serve_unauthenticated() {
+        let args = Cli {
+            transport: Transport::StreamableHttp,
+            host: "127.0.0.1".to_owned(),
+            port: 8080,
+            tokens_file: None,
+            allow_no_auth: false,
+            allowed_host: vec![],
+            allowed_origin: vec![],
+            allow_insecure_bind: false,
+            tls_cert: None,
+            tls_key: None,
+            device_mapping: PathBuf::from("/dev/null"),
+            audit_format: String::new(),
+            audit_redact: String::new(),
+            audit_log_file: None,
+            audit_hmac_key_file: None,
+            audit_journald: false,
+            command: None,
+        };
+
+        let result = load_http_token_store(&args);
+        assert!(
+            result.is_err(),
+            "load_http_token_store must refuse (None, false) with an error"
+        );
+        let error = result
+            .expect_err("(None, false) must be refused")
+            .to_string();
+        assert!(
+            error.contains("requires either --tokens-file or --allow-no-auth"),
+            "error message should explain the requirement, got: {error}"
+        );
+    }
+
+    /// Verify that --allow-no-auth explicitly permits unauthenticated serving.
+    #[test]
+    fn explicit_no_auth_is_permitted() {
+        let args = Cli {
+            transport: Transport::StreamableHttp,
+            host: "127.0.0.1".to_owned(),
+            port: 8080,
+            tokens_file: None,
+            allow_no_auth: true,
+            allowed_host: vec![],
+            allowed_origin: vec![],
+            allow_insecure_bind: false,
+            tls_cert: None,
+            tls_key: None,
+            device_mapping: PathBuf::from("/dev/null"),
+            audit_format: String::new(),
+            audit_redact: String::new(),
+            audit_log_file: None,
+            audit_hmac_key_file: None,
+            audit_journald: false,
+            command: None,
+        };
+
+        let result = load_http_token_store(&args);
+        assert!(
+            result.is_ok(),
+            "load_http_token_store must permit explicit --allow-no-auth"
+        );
+        assert!(
+            matches!(
+                result.expect("--allow-no-auth must yield an explicit acknowledgement"),
+                AuthConfig::ExplicitlyUnauthenticated
+            ),
+            "result should be ExplicitlyUnauthenticated"
+        );
+    }
 }

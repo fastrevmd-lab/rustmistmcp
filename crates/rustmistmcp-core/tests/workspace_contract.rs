@@ -6,7 +6,13 @@ const WORKSPACE_MANIFEST: &str = include_str!("../../../Cargo.toml");
 const CORE_MANIFEST: &str = include_str!("../Cargo.toml");
 const SERVER_MANIFEST: &str = include_str!("../../rustmistmcp/Cargo.toml");
 
-const MECMCP_REVISION: &str = "850f52972d33bd4c3e33cf4998fc7e821188707c";
+/// The commit `MECMCP_TAG` must resolve to. Checked against the lockfile so a
+/// moved tag cannot silently change the code this server links.
+const MECMCP_REVISION: &str = "675550d23d1f43773a13b7ac04231750096813bc";
+/// The released tag every shared crate is pinned to.
+const MECMCP_TAG: &str = "v0.9.1";
+/// Lockfile text, for verifying the tag resolved to `MECMCP_REVISION`.
+const LOCKFILE: &str = include_str!("../../../Cargo.lock");
 
 #[test]
 fn workspace_metadata_lints_and_shared_revision_are_locked() {
@@ -95,10 +101,20 @@ fn assert_workspace_mecmcp_dependencies_are_pinned(manifest: &str) {
             Some("https://github.com/fastrevmd-lab/mecmcp"),
             "{crate_name} must use the approved mecmcp Git source"
         );
+        // Tag, not rev, since the family standardised on tags at v0.9.1 — but a
+        // tag can be moved, and the original rev pin existed precisely so
+        // extension TypeIds could not diverge. The immutability guarantee is
+        // preserved by checking the commit the lockfile actually resolved the
+        // tag to, below: readable pin, verified resolution.
         assert_eq!(
-            dependency.get("rev").and_then(toml::Value::as_str),
-            Some(MECMCP_REVISION),
-            "{crate_name} must use the shared immutable mecmcp revision"
+            dependency.get("tag").and_then(toml::Value::as_str),
+            Some(MECMCP_TAG),
+            "{crate_name} must use the shared mecmcp tag"
+        );
+        assert!(
+            LOCKFILE.contains(&format!("?tag={MECMCP_TAG}#{MECMCP_REVISION}")),
+            "{crate_name}: the lockfile must resolve {MECMCP_TAG} to {MECMCP_REVISION}; \
+             a moved tag would otherwise change the code silently"
         );
     }
 }

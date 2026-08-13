@@ -1,11 +1,11 @@
 //! Mist parameters for the shared MCP Streamable HTTP transport.
 
 use mecmcp_auth::{BearerSyntax, CallerCtx, TokenStoreFile};
-use mecmcp_runtime::cli::Cli;
 use mecmcp_transport::{
     BearerAuthenticator, BearerBoundary, BearerResponseProfile, CallerScopes, HostOriginPolicy,
-    HttpServeError, HttpShutdown, HttpTransportBuildError, HttpTransportConfig, LimitsConfig,
-    ScopePreflight, TransportIdentity, build_streamable_http_router, serve_router,
+    HttpServeError, HttpTransportBuildError, HttpTransportConfig, LimitsConfig,
+    NoAuthAcknowledgement, ScopePreflight, ServePlan, TransportIdentity,
+    build_streamable_http_router, serve_router,
 };
 use rustmistmcp_core::{MistGrant, MistTarget};
 use serde_json::Value;
@@ -14,6 +14,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{MistHandler, RESTRICTED_TOOLS};
 
+/// Authentication configuration for HTTP transport.
+#[derive(Debug, Clone)]
+pub enum AuthConfig {
+    /// Authenticated with a token store file.
+    Authenticated(Arc<TokenStoreFile<MistGrant>>),
+    /// Explicitly unauthenticated (requires operator acknowledgement).
+    ExplicitlyUnauthenticated,
+}
+
 /// Why a handler built without a Mist credential refuses live calls.
 ///
 /// This used to cite `mecmcp#90`, the vendor-neutral cloud foundation. That
@@ -21,33 +30,6 @@ use crate::{MistHandler, RESTRICTED_TOOLS};
 /// missing here is the credential itself — including the one the `/api/v1/self`
 /// startup identity probe needs.
 pub const LIVE_MIST_BLOCKER: &str = "no Mist credential is configured, so live Mist requests and the /api/v1/self startup identity probe are unavailable";
-
-/// Apply RustMistMCP's stricter remote listener policy.
-///
-/// Unlike the shared compatibility default, this consumer requires at least
-/// one exact allowed Host and browser Origin for every off-loopback listener.
-///
-/// # Errors
-///
-/// Returns an error for an unsafe or ambiguous setting.
-pub fn validate_runtime_serve(cli: &Cli) -> Result<(), String> {
-    // Require allowed_host and allowed_origin for off-loopback listeners
-    use std::net::IpAddr;
-    let is_loopback = cli
-        .host
-        .parse::<IpAddr>()
-        .map(|ip| ip.is_loopback())
-        .unwrap_or(false);
-    if !is_loopback
-        && !cli.allow_insecure_bind
-        && (cli.allowed_host.is_empty() || cli.allowed_origin.is_empty())
-    {
-        return Err(
-            "off-loopback listener requires --allowed-host and --allowed-origin".to_owned(),
-        );
-    }
-    Ok(())
-}
 
 /// Mist-aware early scope check for raw `org_id` and `site_id` arguments.
 ///
@@ -166,36 +148,40 @@ impl ScopePreflight for MistScopePreflight {
 /// Returns an error when shared HTTP limits or router composition are invalid.
 pub fn build_http_router(
     handler: MistHandler,
-    token_store: Option<Arc<TokenStoreFile<MistGrant>>>,
+    auth_config: AuthConfig,
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
     limits: LimitsConfig,
     enable_metrics: bool,
     shutdown: CancellationToken,
-) -> Result<(axum::Router, HttpShutdown), HttpTransportBuildError> {
+) -> Result<ServePlan, HttpTransportBuildError> {
     let identity =
         TransportIdentity::new("rustmistmcp", "mist", "rustmistmcp", ["org_id", "site_id"]);
-    let mut config = HttpTransportConfig::new(
-        identity,
-        limits,
-        HostOriginPolicy::enforced(allowed_hosts, allowed_origins),
-        shutdown,
-    )
-    .with_metrics(enable_metrics);
+    let host_origin = HostOriginPolicy::enforced(allowed_hosts, allowed_origins);
 
-    if let Some(store_file) = token_store {
-        let auth_store = store_file.clone();
-        let authenticator = BearerAuthenticator::new(BearerSyntax::Strict, move |candidate| {
-            let snapshot = auth_store.store();
-            snapshot.authenticate(candidate).map(CallerCtx::from)
-        });
-        let boundary = BearerBoundary::new(
-            authenticator,
-            BearerResponseProfile::detailed("rustmistmcp"),
-        )
-        .with_preflight(MistScopePreflight::new(RESTRICTED_TOOLS));
-        config = config.with_bearer(boundary);
+    let config = match auth_config {
+        AuthConfig::Authenticated(store_file) => {
+            let auth_store = store_file.clone();
+            let authenticator = BearerAuthenticator::new(BearerSyntax::Strict, move |candidate| {
+                let snapshot = auth_store.store();
+                snapshot.authenticate(candidate).map(CallerCtx::from)
+            });
+            let boundary = BearerBoundary::new(
+                authenticator,
+                BearerResponseProfile::detailed("rustmistmcp"),
+            )
+            .with_preflight(MistScopePreflight::new(RESTRICTED_TOOLS));
+            HttpTransportConfig::authenticated(identity, limits, host_origin, shutdown, boundary)
+        }
+        AuthConfig::ExplicitlyUnauthenticated => HttpTransportConfig::unauthenticated(
+            identity,
+            limits,
+            host_origin,
+            shutdown,
+            NoAuthAcknowledgement::operator_allowed_no_auth(),
+        ),
     }
+    .with_metrics(enable_metrics);
 
     build_streamable_http_router(move || Ok::<_, std::io::Error>(handler.clone()), config)
 }
@@ -227,7 +213,7 @@ pub fn install_token_reload_handler(store: Arc<TokenStoreFile<MistGrant>>) -> st
 pub async fn serve_http(
     handler: MistHandler,
     address: SocketAddr,
-    token_store: Option<Arc<TokenStoreFile<MistGrant>>>,
+    auth_config: AuthConfig,
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
     limits: LimitsConfig,
@@ -236,9 +222,9 @@ pub async fn serve_http(
     shutdown: CancellationToken,
     shutdown_timeout: std::time::Duration,
 ) -> Result<(), HttpServeError> {
-    let (router, shutdown_token) = build_http_router(
+    let plan = build_http_router(
         handler,
-        token_store,
+        auth_config,
         allowed_hosts,
         allowed_origins,
         limits,
@@ -249,5 +235,5 @@ pub async fn serve_http(
         address,
         error: std::io::Error::other(error.to_string()),
     })?;
-    serve_router(router, address, tls, shutdown_token, shutdown_timeout).await
+    serve_router(plan, address, tls, shutdown_timeout).await
 }
