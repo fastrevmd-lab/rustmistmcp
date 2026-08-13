@@ -162,11 +162,10 @@ pub fn build_http_router(
     let config = match auth_config {
         AuthConfig::Authenticated(store_file) => {
             let auth_store = store_file.clone();
-            let authenticator =
-                BearerAuthenticator::new(BearerSyntax::Strict, move |candidate| {
-                    let snapshot = auth_store.store();
-                    snapshot.authenticate(candidate).map(CallerCtx::from)
-                });
+            let authenticator = BearerAuthenticator::new(BearerSyntax::Strict, move |candidate| {
+                let snapshot = auth_store.store();
+                snapshot.authenticate(candidate).map(CallerCtx::from)
+            });
             let boundary = BearerBoundary::new(
                 authenticator,
                 BearerResponseProfile::detailed("rustmistmcp"),

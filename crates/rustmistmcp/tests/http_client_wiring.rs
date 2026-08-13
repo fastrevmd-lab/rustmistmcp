@@ -9,11 +9,10 @@ use axum::{
     routing::get,
 };
 use mecmcp_auth::{KnownNames, ScopeSet, TokenStoreFile};
-use rustmistmcp::{MistHandler, build_http_router};
+use rustmistmcp::{AuthConfig, MistHandler, build_http_router};
 use rustmistmcp_core::MistGrant;
 use std::{collections::BTreeMap, sync::Arc};
 use tempfile::TempDir;
-use tower::ServiceExt;
 
 const TEST_TOKEN: &str = "test-mist-token-12345";
 const ORG_ID: &str = "11111111-1111-1111-1111-111111111111";
@@ -117,9 +116,9 @@ async fn tool_call_reaches_http_client_and_sends_correct_auth_header() {
 
     // Build MCP router
     let shutdown = tokio_util::sync::CancellationToken::new();
-    let (router, _shutdown_token) = build_http_router(
+    let plan = build_http_router(
         handler,
-        Some(token_store),
+        AuthConfig::Authenticated(token_store),
         vec!["localhost".to_owned()],
         vec![],
         mecmcp_transport::LimitsConfig::default(),
@@ -128,33 +127,32 @@ async fn tool_call_reaches_http_client_and_sends_correct_auth_header() {
     )
     .expect("build router");
 
+    // Serve on loopback
+    let served = mecmcp_transport::test_harness::serve_on_loopback(plan).await;
+    let base_url = format!("http://{}", served.address);
+
     // Initialize MCP session
-    let init_request = http::Request::post("/mcp")
+    let client = reqwest::Client::new();
+    let init_response = client
+        .post(format!("{base_url}/mcp"))
         .header(header::HOST, "localhost")
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ACCEPT, "application/json, text/event-stream")
         .header("Mcp-Protocol-Version", "2025-06-18")
         .header(header::AUTHORIZATION, auth_header_value.as_str())
-        .body(Body::from(
-            serde_json::to_string(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": {},
-                    "clientInfo": {"name": "http-wiring-test", "version": "1"}
-                }
-            }))
-            .expect("serialize init"),
-        ))
-        .expect("build init request");
-
-    let init_response = router
-        .clone()
-        .oneshot(init_request)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "http-wiring-test", "version": "1"}
+            }
+        }))
+        .send()
         .await
-        .expect("init response");
+        .expect("init request");
 
     assert_eq!(init_response.status(), StatusCode::OK);
 
@@ -162,68 +160,55 @@ async fn tool_call_reaches_http_client_and_sends_correct_auth_header() {
         .headers()
         .get("mcp-session-id")
         .expect("session id")
-        .clone();
+        .to_str()
+        .expect("session id str")
+        .to_owned();
 
     // Send initialized notification
-    let initialized_request = http::Request::post("/mcp")
+    let initialized_response = client
+        .post(format!("{base_url}/mcp"))
         .header(header::HOST, "localhost")
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ACCEPT, "application/json, text/event-stream")
         .header("Mcp-Protocol-Version", "2025-06-18")
         .header("mcp-session-id", &session_id)
         .header(header::AUTHORIZATION, auth_header_value.as_str())
-        .body(Body::from(
-            serde_json::to_string(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized"
-            }))
-            .expect("serialize initialized"),
-        ))
-        .expect("build initialized request");
-
-    let initialized_response = router
-        .clone()
-        .oneshot(initialized_request)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }))
+        .send()
         .await
-        .expect("initialized response");
+        .expect("initialized request");
 
     assert_eq!(initialized_response.status(), StatusCode::ACCEPTED);
 
     // Call get_mist_org tool - this is the critical assertion
-    let tool_request = http::Request::post("/mcp")
+    let tool_response = client
+        .post(format!("{base_url}/mcp"))
         .header(header::HOST, "localhost")
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ACCEPT, "application/json, text/event-stream")
         .header("Mcp-Protocol-Version", "2025-06-18")
         .header("mcp-session-id", &session_id)
         .header(header::AUTHORIZATION, auth_header_value.as_str())
-        .body(Body::from(
-            serde_json::to_string(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": "get_mist_org",
-                    "arguments": {"org_id": ORG_ID}
-                }
-            }))
-            .expect("serialize tool call"),
-        ))
-        .expect("build tool call request");
-
-    let tool_response = router
-        .clone()
-        .oneshot(tool_request)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "get_mist_org",
+                "arguments": {"org_id": ORG_ID}
+            }
+        }))
+        .send()
         .await
-        .expect("tool call response");
+        .expect("tool call request");
 
     assert_eq!(tool_response.status(), StatusCode::OK);
 
     // Parse response body
-    let body_bytes = axum::body::to_bytes(tool_response.into_body(), 1024 * 1024)
-        .await
-        .expect("read response body");
-    let body_text = String::from_utf8(body_bytes.to_vec()).expect("UTF-8 response");
+    let body_text = tool_response.text().await.expect("read response body");
 
     // Extract JSON-RPC response from SSE stream
     let json_response: serde_json::Value = body_text
@@ -282,9 +267,9 @@ async fn blocked_client_still_available_for_no_credential_mode() {
 
     // Build a minimal router with no auth
     let shutdown = tokio_util::sync::CancellationToken::new();
-    let (router, _shutdown_token) = build_http_router(
+    let plan = build_http_router(
         handler,
-        None,
+        AuthConfig::ExplicitlyUnauthenticated,
         vec!["localhost".to_owned()],
         vec![],
         mecmcp_transport::LimitsConfig::default(),
@@ -293,86 +278,77 @@ async fn blocked_client_still_available_for_no_credential_mode() {
     )
     .expect("build router");
 
+    // Serve on loopback
+    let served = mecmcp_transport::test_harness::serve_on_loopback(plan).await;
+    let base_url = format!("http://{}", served.address);
+
     // Initialize session
-    let init_request = http::Request::post("/mcp")
+    let client = reqwest::Client::new();
+    let init_response = client
+        .post(format!("{base_url}/mcp"))
         .header(header::HOST, "localhost")
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ACCEPT, "application/json, text/event-stream")
         .header("Mcp-Protocol-Version", "2025-06-18")
-        .body(Body::from(
-            serde_json::to_string(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": {},
-                    "clientInfo": {"name": "blocked-test", "version": "1"}
-                }
-            }))
-            .expect("serialize"),
-        ))
-        .expect("build request");
-
-    let response = router
-        .clone()
-        .oneshot(init_request)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "blocked-test", "version": "1"}
+            }
+        }))
+        .send()
         .await
-        .expect("response");
-    let session_id = response
+        .expect("init request");
+
+    let session_id = init_response
         .headers()
         .get("mcp-session-id")
         .expect("session id")
-        .clone();
+        .to_str()
+        .expect("session id str")
+        .to_owned();
 
     // Send initialized notification
-    let initialized_request = http::Request::post("/mcp")
+    client
+        .post(format!("{base_url}/mcp"))
         .header(header::HOST, "localhost")
         .header(header::CONTENT_TYPE, "application/json")
         .header("Mcp-Protocol-Version", "2025-06-18")
         .header("mcp-session-id", &session_id)
-        .body(Body::from(
-            serde_json::to_string(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized"
-            }))
-            .expect("serialize"),
-        ))
-        .expect("build request");
-
-    router
-        .clone()
-        .oneshot(initialized_request)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }))
+        .send()
         .await
-        .expect("response");
+        .expect("initialized request");
 
     // Try to call a tool - should fail with TransportUnavailable
-    let tool_request = http::Request::post("/mcp")
+    let tool_response = client
+        .post(format!("{base_url}/mcp"))
         .header(header::HOST, "localhost")
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ACCEPT, "application/json, text/event-stream")
         .header("Mcp-Protocol-Version", "2025-06-18")
         .header("mcp-session-id", &session_id)
-        .body(Body::from(
-            serde_json::to_string(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": "get_mist_org",
-                    "arguments": {"org_id": ORG_ID}
-                }
-            }))
-            .expect("serialize"),
-        ))
-        .expect("build request");
-
-    let tool_response = router.oneshot(tool_request).await.expect("response");
-
-    let body_bytes = axum::body::to_bytes(tool_response.into_body(), 1024 * 1024)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "get_mist_org",
+                "arguments": {"org_id": ORG_ID}
+            }
+        }))
+        .send()
         .await
-        .expect("read body");
-    let body_text = String::from_utf8(body_bytes.to_vec()).expect("UTF-8");
+        .expect("tool call request");
+
+    let body_text = tool_response.text().await.expect("read body");
 
     // Should contain an error (TransportUnavailable)
     assert!(

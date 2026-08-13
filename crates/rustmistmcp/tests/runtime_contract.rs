@@ -1,21 +1,16 @@
 //! Runtime composition contracts for the Mist MCP binary.
 
-use axum::{
-    Router,
-    body::{Body, to_bytes},
-    http::{HeaderValue, Request, Response, StatusCode, header},
-};
+use axum::http::StatusCode;
 use clap::Parser as _;
 use mecmcp_auth::{KnownNames, ScopeSet, TokenStoreFile};
 use mecmcp_runtime::cli::{Cli, Transport};
 use mecmcp_transport::{CallerScopes, LimitsConfig, ScopePreflight as _};
 use rustmistmcp::{
-    KNOWN_TOOLS, LIVE_MIST_BLOCKER, MistHandler, MistScopePreflight, RESTRICTED_TOOLS,
-    build_http_router, install_token_reload_handler, validate_runtime_serve,
+    AuthConfig, KNOWN_TOOLS, LIVE_MIST_BLOCKER, MistHandler, MistScopePreflight, RESTRICTED_TOOLS,
+    build_http_router, install_token_reload_handler,
 };
 use rustmistmcp_core::{MistAction, MistConfig, MistGrant, MistTarget};
 use std::{collections::BTreeMap, fs, path::Path, process::Command, sync::Arc, time::Duration};
-use tower::ServiceExt as _;
 
 const ORG_ID: &str = "11111111-1111-1111-1111-111111111111";
 const OTHER_ORG_ID: &str = "99999999-9999-9999-9999-999999999999";
@@ -69,34 +64,28 @@ fn add_grant_bearing_token(path: &Path, name: &str, grant: MistGrant) {
 }
 
 async fn post_mcp(
-    router: &Router,
-    session: Option<&HeaderValue>,
+    client: &reqwest::Client,
+    base_url: &str,
+    session: Option<&str>,
     body: serde_json::Value,
-) -> Response<Body> {
-    let mut request = Request::post("/mcp")
-        .header(header::HOST, "localhost")
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::ACCEPT, "application/json, text/event-stream")
+) -> reqwest::Response {
+    let mut request = client
+        .post(format!("{base_url}/mcp"))
+        .header(axum::http::header::HOST, "localhost")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(
+            axum::http::header::ACCEPT,
+            "application/json, text/event-stream",
+        )
         .header("Mcp-Protocol-Version", "2025-06-18");
     if let Some(session) = session {
         request = request.header("mcp-session-id", session);
     }
-    router
-        .clone()
-        .oneshot(
-            request
-                .body(Body::from(body.to_string()))
-                .expect("protocol request"),
-        )
-        .await
-        .expect("protocol response")
+    request.json(&body).send().await.expect("protocol request")
 }
 
-async fn response_json(response: Response<Body>) -> serde_json::Value {
-    let bytes = to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .expect("bounded response body");
-    let text = String::from_utf8(bytes.to_vec()).expect("UTF-8 response");
+async fn response_json(response: reqwest::Response) -> serde_json::Value {
+    let text = response.text().await.expect("response body");
     text.lines()
         .filter_map(|line| line.strip_prefix("data:"))
         .filter_map(|data| serde_json::from_str(data.trim()).ok())
@@ -104,9 +93,10 @@ async fn response_json(response: Response<Body>) -> serde_json::Value {
         .unwrap_or_else(|| panic!("missing JSON-RPC response in {text}"))
 }
 
-async fn initialize_no_auth_session(router: &Router) -> HeaderValue {
+async fn initialize_no_auth_session(client: &reqwest::Client, base_url: &str) -> String {
     let response = post_mcp(
-        router,
+        client,
+        base_url,
         None,
         serde_json::json!({
             "jsonrpc": "2.0",
@@ -125,12 +115,15 @@ async fn initialize_no_auth_session(router: &Router) -> HeaderValue {
         .headers()
         .get("mcp-session-id")
         .expect("session id")
-        .clone();
+        .to_str()
+        .expect("session str")
+        .to_owned();
     let initialized = response_json(response).await;
     assert_eq!(initialized["id"], 1);
 
     let notification = post_mcp(
-        router,
+        client,
+        base_url,
         Some(&session),
         serde_json::json!({
             "jsonrpc": "2.0",
@@ -144,7 +137,8 @@ async fn initialize_no_auth_session(router: &Router) -> HeaderValue {
 
 #[test]
 fn remote_listener_requires_explicit_host_and_origin_policies() {
-    let missing_host = parse_cli(&[
+    // The new validator requires --allow-insecure-bind for 0.0.0.0 listeners
+    let missing_insecure_bind = parse_cli(&[
         "--transport",
         "streamable-http",
         "--host",
@@ -153,8 +147,8 @@ fn remote_listener_requires_explicit_host_and_origin_policies() {
         "/etc/rustmistmcp/tokens.json",
     ]);
     assert!(
-        validate_runtime_serve(&missing_host).is_err(),
-        "should reject missing --allowed-host"
+        mecmcp_runtime::cli_validate::validate(&missing_insecure_bind).is_err(),
+        "should reject 0.0.0.0 without --allow-insecure-bind"
     );
 
     let missing_origin = parse_cli(&[
@@ -164,12 +158,13 @@ fn remote_listener_requires_explicit_host_and_origin_policies() {
         "0.0.0.0",
         "--tokens-file",
         "/etc/rustmistmcp/tokens.json",
+        "--allow-insecure-bind",
         "--allowed-host",
         "mist.example.test",
     ]);
     assert!(
-        validate_runtime_serve(&missing_origin).is_err(),
-        "should reject missing --allowed-origin"
+        mecmcp_runtime::cli_validate::validate(&missing_origin).is_err(),
+        "should reject missing --allowed-origin with --allow-insecure-bind"
     );
 
     let strict_remote = parse_cli(&[
@@ -179,12 +174,14 @@ fn remote_listener_requires_explicit_host_and_origin_policies() {
         "0.0.0.0",
         "--tokens-file",
         "/etc/rustmistmcp/tokens.json",
+        "--allow-insecure-bind",
         "--allowed-host",
         "mist.example.test",
         "--allowed-origin",
         "https://client.example.test",
     ]);
-    validate_runtime_serve(&strict_remote).expect("strict remote listener");
+    mecmcp_runtime::cli_validate::validate(&strict_remote)
+        .expect("strict remote listener with --allow-insecure-bind");
 
     // Loopback listeners bypass the requirement
     let loopback = parse_cli(&[
@@ -195,12 +192,13 @@ fn remote_listener_requires_explicit_host_and_origin_policies() {
         "--tokens-file",
         "/etc/rustmistmcp/tokens.json",
     ]);
-    validate_runtime_serve(&loopback).expect("loopback listener");
+    mecmcp_runtime::cli_validate::validate(&loopback).expect("loopback listener");
 }
 
 #[test]
 fn listener_validation_allows_insecure_bind_bypass() {
-    let insecure_bind = parse_cli(&[
+    // The new validator still requires --allowed-host even with --allow-insecure-bind
+    let insecure_bind_missing_host = parse_cli(&[
         "--transport",
         "streamable-http",
         "--host",
@@ -209,7 +207,27 @@ fn listener_validation_allows_insecure_bind_bypass() {
         "/etc/rustmistmcp/tokens.json",
         "--allow-insecure-bind",
     ]);
-    validate_runtime_serve(&insecure_bind).expect("allow-insecure-bind bypasses Host/Origin check");
+    assert!(
+        mecmcp_runtime::cli_validate::validate(&insecure_bind_missing_host).is_err(),
+        "should still require --allowed-host with --allow-insecure-bind"
+    );
+
+    // Both flags are needed for 0.0.0.0
+    let insecure_bind = parse_cli(&[
+        "--transport",
+        "streamable-http",
+        "--host",
+        "0.0.0.0",
+        "--tokens-file",
+        "/etc/rustmistmcp/tokens.json",
+        "--allow-insecure-bind",
+        "--allowed-host",
+        "mist.example.test",
+        "--allowed-origin",
+        "https://client.example.test",
+    ]);
+    mecmcp_runtime::cli_validate::validate(&insecure_bind)
+        .expect("allow-insecure-bind with host and origin");
 }
 
 #[test]
@@ -393,6 +411,9 @@ fn mist_preflight_denies_every_malformed_org_and_site_shape() {
 
 #[tokio::test]
 async fn authenticated_router_uses_strict_bearer_syntax_and_scope_preflight() {
+    // Install crypto provider for reqwest
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let dir = tempfile::tempdir().expect("temporary directory");
     let path = dir.path().join("tokens.json");
     let known = KnownNames {
@@ -409,9 +430,9 @@ async fn authenticated_router_uses_strict_bearer_syntax_and_scope_preflight() {
     .expect("token");
     let store = Arc::new(TokenStoreFile::<MistGrant>::load(&path).expect("token store"));
     let shutdown = tokio_util::sync::CancellationToken::new();
-    let (router, _shutdown_token) = build_http_router(
+    let plan = build_http_router(
         handler(),
-        Some(store),
+        AuthConfig::Authenticated(store),
         Vec::new(),
         Vec::new(),
         LimitsConfig::default(),
@@ -419,7 +440,11 @@ async fn authenticated_router_uses_strict_bearer_syntax_and_scope_preflight() {
         shutdown,
     )
     .expect("HTTP router");
-    let body = serde_json::json!({
+
+    let served = mecmcp_transport::test_harness::serve_on_loopback(plan).await;
+    let base_url = format!("http://{}", served.address);
+
+    let body = serde_json::to_string(&serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "tools/call",
@@ -427,66 +452,82 @@ async fn authenticated_router_uses_strict_bearer_syntax_and_scope_preflight() {
             "name": "get_mist_org",
             "arguments": {"org_id": OTHER_ORG_ID}
         }
-    })
-    .to_string();
+    }))
+    .expect("serialize body");
 
-    let missing = router
-        .clone()
-        .oneshot(
-            Request::post("/mcp")
-                .header(header::HOST, "localhost")
-                .body(Body::from(body.clone()))
-                .expect("request"),
+    let client = reqwest::Client::new();
+    let missing = client
+        .post(format!("{base_url}/mcp"))
+        .header(axum::http::header::HOST, "localhost")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(
+            axum::http::header::ACCEPT,
+            "application/json, text/event-stream",
         )
+        .header("Mcp-Protocol-Version", "2025-06-18")
+        .body(body.clone())
+        .send()
         .await
-        .expect("response");
+        .expect("request");
     assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
 
-    let malformed = router
-        .clone()
-        .oneshot(
-            Request::post("/mcp")
-                .header(header::HOST, "localhost")
-                .header(
-                    header::AUTHORIZATION,
-                    format!(" Bearer {}", secret.expose_secret()),
-                )
-                .body(Body::from(body.clone()))
-                .expect("request"),
+    let malformed = client
+        .post(format!("{base_url}/mcp"))
+        .header(axum::http::header::HOST, "localhost")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(
+            axum::http::header::ACCEPT,
+            "application/json, text/event-stream",
         )
+        .header("Mcp-Protocol-Version", "2025-06-18")
+        .header(
+            axum::http::header::AUTHORIZATION,
+            format!(" Bearer {}", secret.expose_secret()),
+        )
+        .body(body.clone())
+        .send()
         .await
-        .expect("response");
+        .expect("request");
     assert_eq!(malformed.status(), StatusCode::UNAUTHORIZED);
 
-    let out_of_scope = router
-        .oneshot(
-            Request::post("/mcp")
-                .header(header::HOST, "localhost")
-                .header(
-                    header::AUTHORIZATION,
-                    format!("Bearer {}", secret.expose_secret()),
-                )
-                .body(Body::from(body))
-                .expect("request"),
+    let out_of_scope = client
+        .post(format!("{base_url}/mcp"))
+        .header(axum::http::header::HOST, "localhost")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(
+            axum::http::header::ACCEPT,
+            "application/json, text/event-stream",
         )
+        .header("Mcp-Protocol-Version", "2025-06-18")
+        .header(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", secret.expose_secret()),
+        )
+        .body(body)
+        .send()
         .await
-        .expect("response");
+        .expect("request");
     assert_eq!(out_of_scope.status(), StatusCode::FORBIDDEN);
     assert_eq!(
         out_of_scope
             .headers()
-            .get(header::WWW_AUTHENTICATE)
-            .expect("challenge"),
+            .get(axum::http::header::WWW_AUTHENTICATE)
+            .expect("challenge")
+            .to_str()
+            .expect("header str"),
         r#"Bearer realm="rustmistmcp", error="insufficient_scope""#
     );
 }
 
 #[tokio::test]
 async fn unauthenticated_loopback_http_exposes_only_ordinary_tools_and_denies_restricted_calls() {
+    // Install crypto provider for reqwest
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let shutdown = tokio_util::sync::CancellationToken::new();
-    let (router, _shutdown_token) = build_http_router(
+    let plan = build_http_router(
         handler(),
-        None,
+        AuthConfig::ExplicitlyUnauthenticated,
         Vec::new(),
         Vec::new(),
         LimitsConfig::default(),
@@ -494,11 +535,17 @@ async fn unauthenticated_loopback_http_exposes_only_ordinary_tools_and_denies_re
         shutdown,
     )
     .expect("HTTP router");
-    let session = initialize_no_auth_session(&router).await;
+
+    let served = mecmcp_transport::test_harness::serve_on_loopback(plan).await;
+    let base_url = format!("http://{}", served.address);
+
+    let client = reqwest::Client::new();
+    let session = initialize_no_auth_session(&client, &base_url).await;
 
     let list = response_json(
         post_mcp(
-            &router,
+            &client,
+            &base_url,
             Some(&session),
             serde_json::json!({
                 "jsonrpc": "2.0",
@@ -523,7 +570,8 @@ async fn unauthenticated_loopback_http_exposes_only_ordinary_tools_and_denies_re
 
     let ordinary = response_json(
         post_mcp(
-            &router,
+            &client,
+            &base_url,
             Some(&session),
             serde_json::json!({
                 "jsonrpc": "2.0",
@@ -542,7 +590,8 @@ async fn unauthenticated_loopback_http_exposes_only_ordinary_tools_and_denies_re
 
     let restricted = response_json(
         post_mcp(
-            &router,
+            &client,
+            &base_url,
             Some(&session),
             serde_json::json!({
                 "jsonrpc": "2.0",
