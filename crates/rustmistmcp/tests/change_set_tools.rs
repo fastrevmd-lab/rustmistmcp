@@ -208,3 +208,92 @@ async fn plan_refuses_a_patch_that_sets_config_authority() {
         "the refusal must happen before any Mist call"
     );
 }
+
+#[tokio::test]
+async fn the_planner_cannot_approve_its_own_change_set() {
+    let recorder = Arc::new(ScriptedClient::new(serde_json::json!({
+        "id": NETWORK_ID, "name": "branch", "vlan_id": 10
+    })));
+    let handler = MistHandler::with_client(
+        "https://api.mist.com/",
+        vec![ORG_ID.to_owned()],
+        site_map(),
+        recorder.clone(),
+    )
+    .expect("handler");
+
+    let planned = call(
+        handler.clone(),
+        "plan_mist_change",
+        serde_json::json!({
+            "object": "network", "verb": "update", "org_id": ORG_ID,
+            "object_id": NETWORK_ID, "patch": {"vlan_id": 20}
+        }),
+    )
+    .await
+    .expect("plan");
+    let id = planned["change_set_id"].as_str().expect("id").to_owned();
+
+    // Same principal — the stdio transport has one caller identity — must be refused.
+    let refused = call(
+        handler.clone(),
+        "approve_mist_change_set",
+        serde_json::json!({"change_set_id": id, "object": "network", "object_id": NETWORK_ID}),
+    )
+    .await;
+    assert!(
+        refused.is_err(),
+        "the planning principal must not be able to approve"
+    );
+
+    // The change set is still inspectable, and still planned rather than approved.
+    let fetched = call(
+        handler,
+        "get_mist_change_set",
+        serde_json::json!({"change_set_id": id, "object": "network", "object_id": NETWORK_ID}),
+    )
+    .await
+    .expect("get");
+    assert_eq!(fetched["state"], "planned");
+    assert_eq!(fetched["before"]["vlan_id"], 10);
+    assert_eq!(fetched["after"]["vlan_id"], 20);
+}
+
+#[tokio::test]
+async fn get_refuses_a_change_set_belonging_to_another_object() {
+    let recorder = Arc::new(ScriptedClient::new(serde_json::json!({
+        "id": NETWORK_ID, "name": "original"
+    })));
+    let handler = MistHandler::with_client(
+        "https://api.mist.com/",
+        vec![ORG_ID.to_owned()],
+        site_map(),
+        recorder,
+    )
+    .expect("handler");
+
+    let planned = call(
+        handler.clone(),
+        "plan_mist_change",
+        serde_json::json!({
+            "object": "network", "verb": "update", "org_id": ORG_ID,
+            "object_id": NETWORK_ID, "patch": {"name": "x"}
+        }),
+    )
+    .await
+    .expect("plan");
+    let id = planned["change_set_id"].as_str().expect("id").to_owned();
+
+    let wrong = call(
+        handler,
+        "get_mist_change_set",
+        serde_json::json!({
+            "change_set_id": id, "object": "service", "object_id": NETWORK_ID
+        }),
+    )
+    .await;
+    assert!(
+        wrong.is_err(),
+        "a change set must not be readable under another object key"
+    );
+}

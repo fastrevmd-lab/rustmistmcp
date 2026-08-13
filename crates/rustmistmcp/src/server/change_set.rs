@@ -140,6 +140,14 @@ pub(crate) async fn stage_plan(
         .as_secs();
     let expires_at_unix = now.saturating_add(3600);
 
+    // Store before/after in preview for inspection
+    let preview_artifact = serde_json::json!({
+        "before": &before,
+        "after": &after,
+    })
+    .to_string();
+    let preview_artifact_digest = digest::preview_digest(&preview_artifact);
+
     let record = ChangeSetRecord {
         id: change_set_id.clone(),
         owner: owner.clone(),
@@ -154,7 +162,11 @@ pub(crate) async fn stage_plan(
         operation_id: None,
         policy_signature: String::new(),
         targets: Vec::new(),
-        preview: None,
+        preview: Some(mecmcp_changeset::PreviewRecord {
+            artifact: preview_artifact,
+            digest: preview_artifact_digest,
+            job_id: None,
+        }),
     };
 
     coordinator.insert_change_set(record).await?;

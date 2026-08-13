@@ -33,6 +33,8 @@ use url::Url;
 
 /// Exact MCP tool registry used for token validation and drift tests.
 pub const KNOWN_TOOLS: &[&str] = &[
+    "approve_mist_change_set",
+    "get_mist_change_set",
     "get_mist_device",
     "get_mist_device_stats",
     "get_mist_insight",
@@ -72,6 +74,8 @@ pub const KNOWN_TOOLS: &[&str] = &[
 
 /// Privileged reads excluded from wildcard tool scope.
 pub const RESTRICTED_TOOLS: &[&str] = &[
+    "approve_mist_change_set",
+    "get_mist_change_set",
     "get_mist_device",
     "get_mist_self",
     "get_mist_wan_config",
@@ -1132,6 +1136,28 @@ read_args!(PlanChangeArgs {
     /// replace wholesale, and a null value deletes the field.
     #[serde(skip_serializing)]
     patch: serde_json::Value,
+});
+
+read_args!(GetChangeSetArgs {
+    /// Change-set identifier (64 hex characters).
+    change_set_id: String,
+    /// Which configuration object type. Not sent to Mist.
+    #[serde(skip_serializing)]
+    object: WanObjectArg,
+    /// The object's UUID. Required for update change sets.
+    #[serde(skip_serializing)]
+    object_id: Option<String>,
+});
+
+read_args!(ApproveChangeSetArgs {
+    /// Change-set identifier (64 hex characters).
+    change_set_id: String,
+    /// Which configuration object type. Not sent to Mist.
+    #[serde(skip_serializing)]
+    object: WanObjectArg,
+    /// The object's UUID. Required for update change sets.
+    #[serde(skip_serializing)]
+    object_id: Option<String>,
 });
 
 read_args!(OrgPageArgs {
@@ -2329,6 +2355,197 @@ impl MistHandler {
                 "after": staged.after,
             })
         };
+
+        Ok(audited_tool_result::<serde_json::Value, &str>(
+            &mut audit,
+            Ok(response),
+        ))
+    }
+
+    #[tool(
+        name = "get_mist_change_set",
+        description = "Inspect a staged change set, returning its state, owner, before/after, and approval status."
+    )]
+    async fn get_mist_change_set(
+        &self,
+        Parameters(args): Parameters<GetChangeSetArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let caller = caller_from_extensions::<MistGrant>(&extensions);
+        let mut audit = audit_scope(
+            caller,
+            "get_mist_change_set",
+            "read",
+            vec![args.change_set_id.clone()],
+        );
+
+        let object: wan::WanObject = args.object.into();
+        let device = change_set::object_key(object, args.object_id.as_deref());
+
+        let record = match self
+            .coordinator
+            .change_set(&args.change_set_id, &device)
+            .await
+        {
+            Ok(record) => record,
+            Err(error) => {
+                audit.fail(error.to_string());
+                return Ok(tool_result::<serde_json::Value, _>(
+                    Err::<serde_json::Value, _>(error.to_string()),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        };
+
+        // Extract before/after from the preview artifact
+        let (before, after) = if let Some(preview) = &record.preview {
+            let parsed: serde_json::Value = match serde_json::from_str(&preview.artifact) {
+                Ok(v) => v,
+                Err(error) => {
+                    audit.fail(format!("failed to parse preview: {error}"));
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>(format!("failed to parse preview: {error}")),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            };
+            let before_value = parsed
+                .get("before")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let after_value = parsed
+                .get("after")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            (before_value, after_value)
+        } else {
+            (serde_json::Value::Null, serde_json::Value::Null)
+        };
+
+        let response = serde_json::json!({
+            "change_set_id": record.id,
+            "state": record.state.as_str(),
+            "owner": record.owner,
+            "approver": record.approver,
+            "plan_digest": record.digest,
+            "before": before,
+            "after": after,
+        });
+
+        Ok(audited_tool_result::<serde_json::Value, &str>(
+            &mut audit,
+            Ok(response),
+        ))
+    }
+
+    #[tool(
+        name = "approve_mist_change_set",
+        description = "Grant second-principal approval to a planned change set. The approver must be distinct from the owner."
+    )]
+    async fn approve_mist_change_set(
+        &self,
+        Parameters(args): Parameters<ApproveChangeSetArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let caller = caller_from_extensions::<MistGrant>(&extensions);
+        let approver = match caller {
+            Some(ctx) => ctx.token_name.clone(),
+            None => "stdio".to_owned(),
+        };
+        let mut audit = audit_scope(
+            caller,
+            "approve_mist_change_set",
+            "approve",
+            vec![args.change_set_id.clone()],
+        );
+
+        let object: wan::WanObject = args.object.into();
+        let device = change_set::object_key(object, args.object_id.as_deref());
+
+        let mut record = match self
+            .coordinator
+            .change_set(&args.change_set_id, &device)
+            .await
+        {
+            Ok(record) => record,
+            Err(error) => {
+                audit.fail(error.to_string());
+                return Ok(tool_result::<serde_json::Value, _>(
+                    Err::<serde_json::Value, _>(error.to_string()),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        };
+
+        // CRITICAL: Check self-approval BEFORE any state mutation.
+        if record.owner == approver {
+            audit.deny("self-approval");
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(
+                    "the planning principal cannot approve their own change set",
+                ),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
+        if record.state != mecmcp_changeset::ChangeSetState::Planned {
+            audit.fail(format!(
+                "change set is {}, not planned",
+                record.state.as_str()
+            ));
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(format!(
+                    "change set is {}, not planned",
+                    record.state.as_str()
+                )),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| {
+                audit.fail(format!("time error: {error}"));
+                rmcp::ErrorData::invalid_params(format!("time error: {error}"), None)
+            })?
+            .as_secs();
+
+        let approval_digest = mecmcp_changeset::digest::compute_approval_digest(
+            &record.id,
+            &record.digest,
+            &record.owner,
+            &approver,
+            now,
+        );
+
+        record.approval = Some(mecmcp_changeset::ApprovalRecord {
+            approver: Some(approver.clone()),
+            approved_at_unix: now,
+            digest: approval_digest,
+            waived: None,
+        });
+        record.approver = Some(approver);
+        record.state = mecmcp_changeset::ChangeSetState::Approved;
+
+        if let Err(error) = self.coordinator.update_change_set(record).await {
+            audit.fail(error.to_string());
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(error.to_string()),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
+        let response = serde_json::json!({
+            "change_set_id": args.change_set_id,
+            "state": "approved",
+            "expires_in_seconds": self.coordinator.approval_ttl().as_secs(),
+        });
 
         Ok(audited_tool_result::<serde_json::Value, &str>(
             &mut audit,
