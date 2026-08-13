@@ -44,23 +44,22 @@ tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
+uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
 
-# Every shared crate is pinned to one immutable revision so extension TypeIds
-# cannot diverge across the server process. This revision is the v0.8.7 tag.
-# mecmcp#91 (target-neutral auth scope vocabulary) is the remaining open
-# prerequisite; it is why the shared CLI still spells the profile flag
-# `--device-mapping`.
-mecmcp-audit = { version = "0.8.8", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "850f52972d33bd4c3e33cf4998fc7e821188707c" }
-mecmcp-auth = { version = "0.8.8", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "850f52972d33bd4c3e33cf4998fc7e821188707c" }
-mecmcp-changeset = { version = "0.8.8", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "850f52972d33bd4c3e33cf4998fc7e821188707c" }
-mecmcp-http = { version = "0.8.8", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "850f52972d33bd4c3e33cf4998fc7e821188707c" }
-mecmcp-inventory = { version = "0.8.8", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "850f52972d33bd4c3e33cf4998fc7e821188707c" }
-mecmcp-job = { version = "0.8.8", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "850f52972d33bd4c3e33cf4998fc7e821188707c" }
-mecmcp-runtime = { version = "0.8.8", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "850f52972d33bd4c3e33cf4998fc7e821188707c" }
-mecmcp-secret = { version = "0.8.8", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "850f52972d33bd4c3e33cf4998fc7e821188707c" }
-mecmcp-server = { version = "0.8.8", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "850f52972d33bd4c3e33cf4998fc7e821188707c" }
-mecmcp-transport = { version = "0.8.8", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "850f52972d33bd4c3e33cf4998fc7e821188707c" }
+# Every shared crate is pinned to one immutable tag so extension TypeIds
+# cannot diverge across the server process. The family standardises on tags
+# at v0.9.1.
+mecmcp-audit = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
+mecmcp-auth = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
+mecmcp-changeset = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
+mecmcp-http = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
+mecmcp-inventory = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
+mecmcp-job = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
+mecmcp-runtime = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
+mecmcp-secret = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
+mecmcp-server = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
+mecmcp-transport = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
 
 [profile.release]
 lto = "thin"

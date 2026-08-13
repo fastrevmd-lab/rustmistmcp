@@ -3179,6 +3179,7 @@ mod tests {
 
     fn caller(target: &str) -> CallerCtx<MistGrant> {
         CallerCtx {
+            request_id: uuid::Uuid::new_v4(),
             token_name: "alice".to_owned(),
             devices: ScopeSet::Allowlist(vec![target.to_owned()]),
             tools: ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]),
@@ -3237,6 +3238,7 @@ mod tests {
         )
         .expect("handler");
         let caller = CallerCtx {
+            request_id: uuid::Uuid::new_v4(),
             token_name: "privileged-without-grant".to_owned(),
             devices: ScopeSet::Wildcard,
             tools: ScopeSet::Allowlist(vec!["invoke_mist_privileged_read".to_owned()]),
@@ -3442,6 +3444,7 @@ mod tests {
         .expect("handler");
         let target = format!("site/{site_id}");
         let caller = CallerCtx {
+            request_id: uuid::Uuid::new_v4(),
             token_name: "alice".to_owned(),
             devices: ScopeSet::Allowlist(vec![target.clone()]),
             tools: ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]),
@@ -3555,6 +3558,7 @@ mod tests {
         )
         .expect("handler");
         let caller = CallerCtx {
+            request_id: uuid::Uuid::new_v4(),
             token_name: "wildcard".to_owned(),
             devices: ScopeSet::Wildcard,
             tools: ScopeSet::Wildcard,
@@ -3597,6 +3601,7 @@ mod tests {
         let get_self = handler.catalog.operation("getSelf").expect("getSelf");
 
         let grantless_org = CallerCtx {
+            request_id: uuid::Uuid::new_v4(),
             token_name: "grantless-org".to_owned(),
             devices: ScopeSet::Allowlist(vec![format!("org/{org_id}")]),
             tools: ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]),
@@ -3616,6 +3621,7 @@ mod tests {
             "configured inventory still intersects caller target scope"
         );
         let grantless_site = CallerCtx {
+            request_id: uuid::Uuid::new_v4(),
             token_name: "grantless-site".to_owned(),
             devices: ScopeSet::Allowlist(vec![format!("site/{site_id}")]),
             tools: ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]),
@@ -3654,6 +3660,7 @@ mod tests {
         );
 
         let ordinary_wildcard = CallerCtx {
+            request_id: uuid::Uuid::new_v4(),
             token_name: "ordinary".to_owned(),
             devices: ScopeSet::Wildcard,
             tools: ScopeSet::Wildcard,
