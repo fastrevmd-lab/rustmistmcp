@@ -180,11 +180,29 @@ mod tests {
         assert_eq!(network.id_path_name, "network_id");
         assert!(!network.privileged);
 
+        let service = write_target(WanObject::Service, WriteVerb::Update);
+        assert_eq!(service.write_operation_id, "updateOrgService");
+        assert_eq!(service.read_operation_id, "getOrgService");
+        assert_eq!(service.id_path_name, "service_id");
+        assert!(!service.privileged);
+
+        let service_policy = write_target(WanObject::ServicePolicy, WriteVerb::Update);
+        assert_eq!(service_policy.write_operation_id, "updateOrgServicePolicy");
+        assert_eq!(service_policy.read_operation_id, "getOrgServicePolicy");
+        assert_eq!(service_policy.id_path_name, "servicepolicy_id");
+        assert!(!service_policy.privileged);
+
         let template = write_target(WanObject::GatewayTemplate, WriteVerb::Update);
         assert_eq!(template.write_operation_id, "updateOrgGatewayTemplate");
         assert_eq!(template.read_operation_id, "getOrgGatewayTemplate");
         assert_eq!(template.id_path_name, "gatewaytemplate_id");
         assert!(template.privileged);
+
+        let profile = write_target(WanObject::DeviceProfile, WriteVerb::Update);
+        assert_eq!(profile.write_operation_id, "updateOrgDeviceProfile");
+        assert_eq!(profile.read_operation_id, "getOrgDeviceProfile");
+        assert_eq!(profile.id_path_name, "deviceprofile_id");
+        assert!(profile.privileged);
     }
 
     #[test]

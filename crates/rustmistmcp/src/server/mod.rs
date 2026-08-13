@@ -773,7 +773,7 @@ enum MistCallError {
     Mist(#[from] MistError),
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize)]
 struct ReadEnvelope {
     operation_id: String,
     target: Option<String>,
@@ -2248,6 +2248,23 @@ impl MistHandler {
             ));
         }
 
+        // Validate org against allowed_orgs before issuing any read or creating a change set.
+        if !self
+            .allowed_orgs
+            .iter()
+            .any(|allowed| allowed == &args.org_id)
+        {
+            audit.deny("org not in allowed_orgs");
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(format!(
+                    "organization {} is not in the server's allowed organizations",
+                    args.org_id
+                )),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
         let object: wan::WanObject = args.object.into();
         let verb: wan_write::WriteVerb = args.verb.into();
         let target = wan_write::write_target(object, verb);
@@ -2681,7 +2698,9 @@ impl MistHandler {
                 None => {
                     audit.fail("preview missing org_id");
                     return Ok(tool_result::<serde_json::Value, _>(
-                        Err::<serde_json::Value, _>("preview missing org_id"),
+                        Err::<serde_json::Value, _>(
+                            "change set was planned before org-scope fix and must be re-planned",
+                        ),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
                     ));

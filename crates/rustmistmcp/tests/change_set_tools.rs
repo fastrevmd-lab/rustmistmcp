@@ -210,6 +210,35 @@ async fn plan_refuses_a_patch_that_sets_config_authority() {
 }
 
 #[tokio::test]
+async fn plan_refuses_org_not_in_allowed_orgs() {
+    const DISALLOWED_ORG: &str = "99999999-9999-9999-9999-999999999999";
+    let recorder = Arc::new(ScriptedClient::new(serde_json::json!({"id": NETWORK_ID})));
+    let handler = MistHandler::with_client(
+        "https://api.mist.com/",
+        vec![ORG_ID.to_owned()],
+        site_map(),
+        recorder.clone(),
+    )
+    .expect("handler");
+
+    let refused = call(
+        handler,
+        "plan_mist_change",
+        serde_json::json!({
+            "object": "network", "verb": "create", "org_id": DISALLOWED_ORG,
+            "patch": {"name": "unapproved", "vlan_id": 20}
+        }),
+    )
+    .await;
+
+    assert!(refused.is_err(), "org not in allowed_orgs must be refused");
+    assert!(
+        recorder.requests.lock().expect("recorder").is_empty(),
+        "the refusal must happen before any Mist call"
+    );
+}
+
+#[tokio::test]
 async fn the_planner_cannot_approve_its_own_change_set() {
     let recorder = Arc::new(ScriptedClient::new(serde_json::json!({
         "id": NETWORK_ID, "name": "branch", "vlan_id": 10
