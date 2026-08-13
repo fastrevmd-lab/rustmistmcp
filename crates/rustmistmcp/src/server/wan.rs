@@ -142,6 +142,31 @@ pub(crate) fn service_path_events(mode: StatsMode) -> Resolved {
     }
 }
 
+/// Which SLE impact view to return.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SleImpact {
+    /// Gateways impacted by the metric.
+    Gateways,
+    /// Applications impacted by the metric.
+    Applications,
+    /// Aggregate impact summary.
+    Summary,
+}
+
+/// Resolve an SLE impact view.
+pub(crate) fn sle_impact(impact: SleImpact) -> Resolved {
+    const PATHS: &[&str] = &["site_id", "scope", "scope_id", "metric"];
+    let operation_id = match impact {
+        SleImpact::Gateways => "listSiteSleImpactedGateways",
+        SleImpact::Applications => "listSiteSleImpactedApplications",
+        SleImpact::Summary => "getSiteSleImpactSummary",
+    };
+    Resolved {
+        operation_id,
+        path_names: PATHS,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +297,32 @@ mod tests {
             Resolved {
                 operation_id: "countSiteServicePathEvents",
                 path_names: &["site_id"]
+            }
+        );
+    }
+
+    #[test]
+    fn sle_impact_resolves_per_selector() {
+        const PATHS: &[&str] = &["site_id", "scope", "scope_id", "metric"];
+        assert_eq!(
+            sle_impact(SleImpact::Gateways),
+            Resolved {
+                operation_id: "listSiteSleImpactedGateways",
+                path_names: PATHS
+            }
+        );
+        assert_eq!(
+            sle_impact(SleImpact::Applications),
+            Resolved {
+                operation_id: "listSiteSleImpactedApplications",
+                path_names: PATHS
+            }
+        );
+        assert_eq!(
+            sle_impact(SleImpact::Summary),
+            Resolved {
+                operation_id: "getSiteSleImpactSummary",
+                path_names: PATHS
             }
         );
     }

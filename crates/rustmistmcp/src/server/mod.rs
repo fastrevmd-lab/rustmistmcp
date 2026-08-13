@@ -40,6 +40,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "get_mist_self",
     "get_mist_site",
     "get_mist_sle",
+    "get_mist_sle_impact",
     "get_mist_wan_edge_stats",
     "invoke_mist_privileged_read",
     "invoke_mist_read",
@@ -900,6 +901,28 @@ impl From<StatsModeArg> for wan::StatsMode {
     }
 }
 
+/// Which SLE impact view a caller wants.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum SleImpactArg {
+    /// Gateways impacted by the metric.
+    Gateways,
+    /// Applications impacted by the metric.
+    Applications,
+    /// Aggregate impact summary.
+    Summary,
+}
+
+impl From<SleImpactArg> for wan::SleImpact {
+    fn from(value: SleImpactArg) -> Self {
+        match value {
+            SleImpactArg::Gateways => Self::Gateways,
+            SleImpactArg::Applications => Self::Applications,
+            SleImpactArg::Summary => Self::Summary,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SearchOperationsArgs {
@@ -1003,6 +1026,22 @@ read_args!(SleMetricsArgs {
 read_args!(SleArgs {
     site_id: String, scope: String, scope_id: String, metric: String,
     duration: Option<String>, end: Option<String>, start: Option<String>,
+});
+read_args!(SleImpactArgs {
+    /// Site UUID.
+    site_id: String,
+    /// SLE scope, e.g. `site`.
+    scope: String,
+    /// Identifier for the chosen scope.
+    scope_id: String,
+    /// SLE metric name.
+    metric: String,
+    /// Which impact view to return. Not sent to Mist.
+    #[serde(skip_serializing)]
+    impact: SleImpactArg,
+    start: Option<u64>,
+    end: Option<u64>,
+    duration: Option<String>,
 });
 read_args!(InsightArgs {
     site_id: String, metrics: String, duration: Option<String>, end: Option<String>,
@@ -1310,6 +1349,27 @@ impl MistHandler {
                 "getSiteSleSummary",
                 args,
                 &["site_id", "scope", "scope_id", "metric"],
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "get_mist_sle_impact",
+        description = "Get gateways, applications, or the summary impacted by one site SLE metric."
+    )]
+    async fn get_mist_sle_impact(
+        &self,
+        Parameters(args): Parameters<SleImpactArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let resolved = wan::sle_impact(args.impact.into());
+        Ok(self
+            .dispatch_named(
+                "get_mist_sle_impact",
+                resolved.operation_id,
+                args,
+                resolved.path_names,
                 MistCapability::OrdinaryRead,
                 &extensions,
             )

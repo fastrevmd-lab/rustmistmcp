@@ -122,6 +122,23 @@ impl MistClient for RecordingClient {
                 "total": 0,
                 "results": []
             }),
+            "listSiteSleImpactedGateways" | "listSiteSleImpactedApplications" => {
+                serde_json::json!({
+                    "results": []
+                })
+            }
+            "getSiteSleImpactSummary" => serde_json::json!({
+                "start": 0,
+                "end": 0,
+                "metric": "wan-link-health",
+                "classifier": "",
+                "failure": "",
+                "ap": [],
+                "wlan": [],
+                "device_os": [],
+                "device_type": [],
+                "band": []
+            }),
             _ => serde_json::json!({"results": []}),
         };
         Ok(MistResponse {
@@ -339,4 +356,27 @@ async fn service_path_events_resolve_mode() {
     .expect("count call");
     assert_eq!(counted.operation_id, "countSiteServicePathEvents");
     assert!(!counted.query.contains_key("mode"));
+}
+
+#[tokio::test]
+async fn sle_impact_resolves_selector() {
+    let base = serde_json::json!({
+        "site_id": SITE_ID,
+        "scope": "site",
+        "scope_id": SITE_ID,
+        "metric": "wan-link-health",
+    });
+    for (impact, expected) in [
+        ("gateways", "listSiteSleImpactedGateways"),
+        ("applications", "listSiteSleImpactedApplications"),
+        ("summary", "getSiteSleImpactSummary"),
+    ] {
+        let mut args = base.clone();
+        args["impact"] = serde_json::json!(impact);
+        let request = record_call("get_mist_sle_impact", args)
+            .await
+            .unwrap_or_else(|error| panic!("impact {impact} failed: {error}"));
+        assert_eq!(request.operation_id, expected);
+        assert!(!request.query.contains_key("impact"));
+    }
 }
