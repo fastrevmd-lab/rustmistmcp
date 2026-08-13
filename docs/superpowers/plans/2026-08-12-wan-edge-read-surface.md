@@ -524,6 +524,9 @@ read_args!(WanEdgeStatsArgs {
     site_id: String,
     /// Gateway device UUID. When present, returns per-device insight metrics.
     device_id: Option<String>,
+    /// Insight metric name. Required by `getSiteInsightMetricsForGateway`;
+    /// unused by the site-wide variant, so it is optional here.
+    metrics: Option<String>,
     start: Option<u64>,
     end: Option<u64>,
     duration: Option<String>,
