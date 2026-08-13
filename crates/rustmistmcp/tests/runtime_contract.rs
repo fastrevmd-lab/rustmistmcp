@@ -482,7 +482,16 @@ async fn authenticated_router_uses_strict_bearer_syntax_and_scope_preflight() {
         .header("Mcp-Protocol-Version", "2025-06-18")
         .header(
             axum::http::header::AUTHORIZATION,
-            format!(" Bearer {}", secret.expose_secret()),
+            // NOT a leading space. This test previously sent " Bearer <secret>",
+            // which strict syntax rejects because the empty scheme before the
+            // space is not "bearer". That malformation is unrepresentable over
+            // real HTTP — the space after the colon is the standard separator
+            // and the protocol normalizes it away, so the header arrives valid,
+            // authenticates, and fails on scope with 403 instead.
+            //
+            // A wrong scheme survives the wire and exercises the same strict
+            // rejection path, so it is what this asserts now.
+            format!("NotBearer {}", secret.expose_secret()),
         )
         .body(body.clone())
         .send()
