@@ -56,6 +56,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "list_mist_wan_config",
     "list_mist_wan_edges",
     "list_mist_wlans",
+    "plan_mist_change",
     "search_mist_alarms",
     "search_mist_audit_logs",
     "search_mist_bgp_peers",
@@ -77,6 +78,7 @@ pub const RESTRICTED_TOOLS: &[&str] = &[
     "invoke_mist_privileged_read",
     "list_mist_wan_config",
     "list_mist_wlans",
+    "plan_mist_change",
     "search_mist_audit_logs",
 ];
 
@@ -764,7 +766,7 @@ enum MistCallError {
     Mist(#[from] MistError),
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct ReadEnvelope {
     operation_id: String,
     target: Option<String>,
@@ -1094,6 +1096,43 @@ macro_rules! read_args {
         }
     };
 }
+
+/// Which write a change set performs.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum WriteVerbArg {
+    /// Create a new object.
+    Create,
+    /// Update an existing object.
+    Update,
+}
+
+impl From<WriteVerbArg> for wan_write::WriteVerb {
+    fn from(value: WriteVerbArg) -> Self {
+        match value {
+            WriteVerbArg::Create => Self::Create,
+            WriteVerbArg::Update => Self::Update,
+        }
+    }
+}
+
+read_args!(PlanChangeArgs {
+    /// Which configuration object type to change. Not sent to Mist.
+    #[serde(skip_serializing)]
+    object: WanObjectArg,
+    /// Create or update. Not sent to Mist.
+    #[serde(skip_serializing)]
+    verb: WriteVerbArg,
+    /// Organization UUID.
+    org_id: String,
+    /// The object's UUID. Required for `update`, omitted for `create`.
+    #[serde(skip_serializing)]
+    object_id: Option<String>,
+    /// Fields to change. Merged onto the object's current state: arrays
+    /// replace wholesale, and a null value deletes the field.
+    #[serde(skip_serializing)]
+    patch: serde_json::Value,
+});
 
 read_args!(OrgPageArgs {
     org_id: String,
@@ -2134,6 +2173,141 @@ impl MistHandler {
             )
             .await)
     }
+    #[tool(
+        name = "plan_mist_change",
+        description = "Stage a change set for a WAN edge configuration object (network, service, service policy, gateway template, or device profile). Returns a digest-bound plan ready for approval. Arrays replace wholesale; null deletes a field."
+    )]
+    async fn plan_mist_change(
+        &self,
+        Parameters(args): Parameters<PlanChangeArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let caller = caller_from_extensions::<MistGrant>(&extensions);
+        let owner = match caller {
+            Some(ctx) => ctx.token_name.clone(),
+            None => "stdio".to_owned(),
+        };
+        let mut audit = audit_scope(
+            caller,
+            "plan_mist_change",
+            "plan",
+            vec![args.org_id.clone()],
+        );
+
+        // Reject mist_configured BEFORE anything else.
+        if let Err(wan_write::PatchError::MistConfigured) =
+            wan_write::reject_config_authority(&args.patch)
+        {
+            audit.fail("patch sets mist_configured");
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(
+                    "patch sets mist_configured, which controls who may configure the device",
+                ),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
+        let object: wan::WanObject = args.object.into();
+        let verb: wan_write::WriteVerb = args.verb.into();
+        let target = wan_write::write_target(object, verb);
+
+        // For update, read the object; for create, before is null.
+        let before = if verb == wan_write::WriteVerb::Update {
+            let object_id = match args.object_id.as_deref() {
+                Some(id) => id,
+                None => {
+                    audit.fail("update requires object_id");
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>("update requires object_id"),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            };
+
+            let mut path = PathValues::new();
+            path.insert(target.id_path_name.to_owned(), object_id.to_owned());
+            path.insert("org_id".to_owned(), args.org_id.clone());
+
+            let read = CatalogRead {
+                tool: "plan_mist_change",
+                operation_id: target.read_operation_id.to_owned(),
+                path,
+                query: QueryValues::new(),
+                cursor: None,
+                capability: if target.privileged {
+                    MistCapability::PrivilegedRead
+                } else {
+                    MistCapability::OrdinaryRead
+                },
+            };
+
+            let result = self.dispatch_catalogued_read(read, &extensions).await;
+            if result.is_error == Some(true) {
+                audit.fail("read failed");
+                return Ok(result);
+            }
+
+            let text = result.content[0]
+                .as_text()
+                .expect("text result")
+                .text
+                .clone();
+            let value: serde_json::Value = serde_json::from_str(&text).expect("JSON envelope");
+            value.get("data").expect("data field").clone()
+        } else {
+            serde_json::Value::Null
+        };
+
+        let after = wan_write::merge_patch(&before, &args.patch);
+
+        let staged = match change_set::stage_plan(
+            &self.coordinator,
+            owner,
+            object,
+            args.object_id.as_deref(),
+            before.clone(),
+            after.clone(),
+        )
+        .await
+        {
+            Ok(staged) => staged,
+            Err(error) => {
+                audit.fail(error.to_string());
+                return Ok(tool_result::<serde_json::Value, _>(
+                    Err::<serde_json::Value, _>(error.to_string()),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        };
+
+        let response = if before.is_null() {
+            serde_json::json!({
+                "change_set_id": staged.change_set_id,
+                "plan_digest": staged.plan_digest,
+                "preview_digest": staged.preview_digest,
+                "before": null,
+                "before_state": "absent (create)",
+                "after": staged.after,
+            })
+        } else {
+            serde_json::json!({
+                "change_set_id": staged.change_set_id,
+                "plan_digest": staged.plan_digest,
+                "preview_digest": staged.preview_digest,
+                "before": staged.before,
+                "after": staged.after,
+            })
+        };
+
+        Ok(audited_tool_result::<serde_json::Value, &str>(
+            &mut audit,
+            Ok(response),
+        ))
+    }
+
     #[tool(
         name = "troubleshoot_mist",
         description = "List site troubleshoot calls."

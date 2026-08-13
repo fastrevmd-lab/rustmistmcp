@@ -44,6 +44,7 @@ async fn registry_contains_only_the_approved_read_tools() {
         "list_mist_wan_config",
         "list_mist_wan_edges",
         "list_mist_wlans",
+        "plan_mist_change",
         "search_mist_alarms",
         "search_mist_audit_logs",
         "search_mist_bgp_peers",
@@ -63,6 +64,7 @@ async fn registry_contains_only_the_approved_read_tools() {
         "invoke_mist_privileged_read",
         "list_mist_wan_config",
         "list_mist_wlans",
+        "plan_mist_change",
         "search_mist_audit_logs",
     ];
 

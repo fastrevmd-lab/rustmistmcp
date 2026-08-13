@@ -10,7 +10,6 @@ use crate::server::wan::WanObject;
 
 /// Which write a change set performs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
 pub(crate) enum WriteVerb {
     /// Create a new object. Has no prior state.
     Create,
@@ -20,7 +19,6 @@ pub(crate) enum WriteVerb {
 
 /// One write operation and the read that produces its `before` state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
 pub(crate) struct WriteTarget {
     /// Catalog operation ID for the write.
     pub write_operation_id: &'static str,
@@ -37,7 +35,6 @@ pub(crate) struct WriteTarget {
 }
 
 /// Resolve the write target for an object and verb.
-#[allow(dead_code)]
 pub(crate) fn write_target(object: WanObject, verb: WriteVerb) -> WriteTarget {
     match (object, verb) {
         (WanObject::Network, WriteVerb::Create) => WriteTarget {
@@ -105,7 +102,6 @@ pub(crate) fn write_target(object: WanObject, verb: WriteVerb) -> WriteTarget {
 
 /// Why a patch was refused before a change set was created.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
 pub(crate) enum PatchError {
     /// The patch tried to set `mist_configured`.
     MistConfigured,
@@ -119,7 +115,6 @@ pub(crate) enum PatchError {
 /// spans two capabilities (`update` and `create`), so no capability-based gate
 /// can contain it; refusing the field is the only control that holds. The
 /// refusal happens before a change set exists so approval cannot override it.
-#[allow(dead_code)]
 pub(crate) fn reject_config_authority(patch: &serde_json::Value) -> Result<(), PatchError> {
     match patch {
         serde_json::Value::Object(map) => {
@@ -149,7 +144,6 @@ pub(crate) fn reject_config_authority(patch: &serde_json::Value) -> Result<(), P
 /// behaviours must be documented wherever this is exposed: **arrays replace
 /// wholesale** (there is no element-wise edit), and **`null` deletes a field**
 /// rather than setting it to null.
-#[allow(dead_code)]
 pub(crate) fn merge_patch(
     before: &serde_json::Value,
     patch: &serde_json::Value,
