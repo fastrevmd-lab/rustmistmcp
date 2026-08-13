@@ -2249,13 +2249,41 @@ impl MistHandler {
                 return Ok(result);
             }
 
-            let text = result.content[0]
-                .as_text()
-                .expect("text result")
-                .text
-                .clone();
-            let value: serde_json::Value = serde_json::from_str(&text).expect("JSON envelope");
-            value.get("data").expect("data field").clone()
+            let text = match result.content[0].as_text() {
+                Some(text_content) => text_content.text.clone(),
+                None => {
+                    audit.fail("read result was not text");
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>("read result was not text"),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            };
+            let value: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(error) => {
+                    audit.fail(format!("failed to parse read response: {error}"));
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>(format!(
+                            "failed to parse read response: {error}"
+                        )),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            };
+            match value.get("data") {
+                Some(data) => data.clone(),
+                None => {
+                    audit.fail("read response missing data field");
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>("read response missing data field"),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            }
         } else {
             serde_json::Value::Null
         };

@@ -166,7 +166,7 @@ async fn plan_digest_changes_when_the_object_changes() {
             "plan_mist_change",
             serde_json::json!({
                 "object": "network", "verb": "update", "org_id": ORG_ID,
-                "object_id": NETWORK_ID, "patch": {"name": "branch"}
+                "object_id": NETWORK_ID, "patch": {"vlan_id": 100}
             }),
         )
         .await
