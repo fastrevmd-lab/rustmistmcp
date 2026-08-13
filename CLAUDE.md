@@ -21,10 +21,14 @@ and 610 no longer exists in the cluster.
 What that does *not* establish: the deployment is loopback-only with no TLS, one
 org, one grant-bearing token, and three read tools. The `/api/v1/self` *startup*
 identity probe is still unimplemented — the operator-facing `get_mist_self` tool
-is a different thing. No mutating tool exists. Do not characterize local
-contract tests, an image build, or packaging as v1, and do not read one
-successful read run as full packaging acceptance — that checklist lives in
-`docs/PACKAGING_ACCEPTANCE.md` and is not complete.
+is a different thing. Mutating tools now exist for batch-1 WAN edge configuration
+objects (networks, services, service policies, gateway templates, device
+profiles), reachable only through the plan → digest → approve → apply lifecycle.
+Delete operations and `mist_configured` device-profile assignment/unassignment
+remain out of reach. Do not characterize local contract tests, an image build, or
+packaging as v1, and do not read one successful read run as full packaging
+acceptance — that checklist lives in `docs/PACKAGING_ACCEPTANCE.md` and is not
+complete.
 
 ## Packaging boundary
 

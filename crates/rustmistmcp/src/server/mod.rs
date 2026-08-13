@@ -1,6 +1,8 @@
 //! Curated read-only Mist MCP handler.
 
+mod change_set;
 mod wan;
+mod wan_write;
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -27,10 +29,14 @@ use rustmistmcp_core::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use url::Url;
 
 /// Exact MCP tool registry used for token validation and drift tests.
 pub const KNOWN_TOOLS: &[&str] = &[
+    "apply_mist_change_set",
+    "approve_mist_change_set",
+    "get_mist_change_set",
     "get_mist_device",
     "get_mist_device_stats",
     "get_mist_insight",
@@ -54,6 +60,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "list_mist_wan_config",
     "list_mist_wan_edges",
     "list_mist_wlans",
+    "plan_mist_change",
     "search_mist_alarms",
     "search_mist_audit_logs",
     "search_mist_bgp_peers",
@@ -69,12 +76,16 @@ pub const KNOWN_TOOLS: &[&str] = &[
 
 /// Privileged reads excluded from wildcard tool scope.
 pub const RESTRICTED_TOOLS: &[&str] = &[
+    "apply_mist_change_set",
+    "approve_mist_change_set",
+    "get_mist_change_set",
     "get_mist_device",
     "get_mist_self",
     "get_mist_wan_config",
     "invoke_mist_privileged_read",
     "list_mist_wan_config",
     "list_mist_wlans",
+    "plan_mist_change",
     "search_mist_audit_logs",
 ];
 
@@ -134,9 +145,16 @@ pub enum MistServerError {
     /// Failed to construct HTTP client.
     #[error("HTTP client construction failed: {0}")]
     ClientConstruction(String),
+    /// Failed to load change-set lifecycle state.
+    #[error("change-set state load failed: {0}")]
+    ChangeSetState(String),
 }
 
-/// Read-only Mist MCP handler with an injected catalog-bound client.
+/// Mist MCP handler with catalogued reads and change-set-gated writes.
+///
+/// Serves read-only Mist tools and mutating tools gated through the
+/// plan → approve → apply → verify change-set lifecycle. Write tools do not
+/// exist yet, but the coordinator is mounted to prepare for them.
 #[derive(Clone)]
 pub struct MistHandler {
     #[allow(dead_code)]
@@ -148,7 +166,43 @@ pub struct MistHandler {
     #[allow(dead_code)]
     catalog: Arc<Catalog>,
     client: Arc<dyn MistClient>,
+    /// Change-set lifecycle state for gated writes.
+    #[allow(dead_code)]
+    coordinator: Arc<mecmcp_changeset::ChangesetCoordinator>,
     tool_router: ToolRouter<Self>,
+}
+
+/// Default change-set limits for this consumer.
+///
+/// A Mist change set holds one action over one object, so the per-set ceilings
+/// are deliberately small; the store ceiling is what bounds a runaway client.
+fn change_set_limits() -> mecmcp_changeset::OperationLimits {
+    mecmcp_changeset::OperationLimits {
+        max_operations: 64,
+        max_change_sets: 64,
+        max_actions_per_set: 1,
+        max_change_set_bytes: 256 * 1024,
+        max_state_bytes: 4 * 1024 * 1024,
+        max_targets_per_set: 1,
+        max_preview_bytes: 128 * 1024,
+    }
+}
+
+/// Load the coordinator for a handler.
+///
+/// `None` keeps state in memory, which is what tests want. Production passes
+/// `/var/lib/rustmistmcp/changeset-state.json`, the path packaging reserves.
+fn load_coordinator(
+    path: Option<&std::path::Path>,
+) -> Result<Arc<mecmcp_changeset::ChangesetCoordinator>, MistServerError> {
+    let coordinator = mecmcp_changeset::ChangesetCoordinator::load(
+        path,
+        change_set_limits(),
+        std::time::Duration::from_secs(3600),
+        false,
+    )
+    .map_err(|error| MistServerError::ChangeSetState(error.to_string()))?;
+    Ok(Arc::new(coordinator))
 }
 
 impl MistHandler {
@@ -202,12 +256,45 @@ impl MistHandler {
         )
         .map_err(|error| MistServerError::ClientConstruction(error.to_string()))?;
 
-        Self::with_client(
-            &config.endpoint,
-            config.allowed_orgs.clone(),
-            sites,
-            Arc::new(http_client),
-        )
+        // Load change-set coordinator with production path
+        let coordinator = load_coordinator(Some(std::path::Path::new(
+            "/var/lib/rustmistmcp/changeset-state.json",
+        )))?;
+
+        let origin = validate_mist_endpoint(&config.endpoint)
+            .map_err(|_| MistServerError::InvalidEndpoint)?;
+        let allowed_orgs = &config.allowed_orgs;
+        if allowed_orgs.is_empty()
+            || allowed_orgs.len() > 256
+            || allowed_orgs
+                .iter()
+                .any(|org_id| MistTarget::org(org_id).is_err())
+            || allowed_orgs
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != allowed_orgs.len()
+        {
+            return Err(MistServerError::InvalidOrganization);
+        }
+        if sites.len() > 4096
+            || sites.iter().any(|(site_id, org_id)| {
+                MistTarget::site(site_id).is_err()
+                    || MistTarget::org(org_id).is_err()
+                    || !allowed_orgs.iter().any(|allowed| allowed == org_id)
+            })
+        {
+            return Err(MistServerError::InvalidOrganization);
+        }
+        Ok(Self {
+            origin,
+            allowed_orgs: allowed_orgs.clone().into(),
+            sites: Arc::new(sites),
+            catalog,
+            client: Arc::new(http_client),
+            coordinator,
+            tool_router: Self::mist_tool_router(),
+        })
     }
 
     /// Construct a handler around an injected Mist client.
@@ -247,6 +334,7 @@ impl MistHandler {
             sites: Arc::new(sites),
             catalog: Arc::new(Catalog::embedded()?),
             client,
+            coordinator: load_coordinator(None)?,
             tool_router: Self::mist_tool_router(),
         })
     }
@@ -1015,6 +1103,76 @@ macro_rules! read_args {
         }
     };
 }
+
+/// Which write a change set performs.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum WriteVerbArg {
+    /// Create a new object.
+    Create,
+    /// Update an existing object.
+    Update,
+}
+
+impl From<WriteVerbArg> for wan_write::WriteVerb {
+    fn from(value: WriteVerbArg) -> Self {
+        match value {
+            WriteVerbArg::Create => Self::Create,
+            WriteVerbArg::Update => Self::Update,
+        }
+    }
+}
+
+read_args!(PlanChangeArgs {
+    /// Which configuration object type to change. Not sent to Mist.
+    #[serde(skip_serializing)]
+    object: WanObjectArg,
+    /// Create or update. Not sent to Mist.
+    #[serde(skip_serializing)]
+    verb: WriteVerbArg,
+    /// Organization UUID.
+    org_id: String,
+    /// The object's UUID. Required for `update`, omitted for `create`.
+    #[serde(skip_serializing)]
+    object_id: Option<String>,
+    /// Fields to change. Merged onto the object's current state: arrays
+    /// replace wholesale, and a null value deletes the field.
+    #[serde(skip_serializing)]
+    patch: serde_json::Value,
+});
+
+read_args!(GetChangeSetArgs {
+    /// Change-set identifier (64 hex characters).
+    change_set_id: String,
+    /// Which configuration object type. Not sent to Mist.
+    #[serde(skip_serializing)]
+    object: WanObjectArg,
+    /// The object's UUID. Required for update change sets.
+    #[serde(skip_serializing)]
+    object_id: Option<String>,
+});
+
+read_args!(ApproveChangeSetArgs {
+    /// Change-set identifier (64 hex characters).
+    change_set_id: String,
+    /// Which configuration object type. Not sent to Mist.
+    #[serde(skip_serializing)]
+    object: WanObjectArg,
+    /// The object's UUID. Required for update change sets.
+    #[serde(skip_serializing)]
+    object_id: Option<String>,
+});
+
+read_args!(ApplyChangeSetArgs {
+    /// Change-set identifier (64 hex characters).
+    change_set_id: String,
+    /// Which configuration object type. Not sent to Mist.
+    #[serde(skip_serializing)]
+    object: WanObjectArg,
+    /// The object's UUID. Required for update change sets.
+    #[serde(skip_serializing)]
+    object_id: Option<String>,
+});
 
 read_args!(OrgPageArgs {
     org_id: String,
@@ -2055,6 +2213,789 @@ impl MistHandler {
             )
             .await)
     }
+    #[tool(
+        name = "plan_mist_change",
+        description = "Stage a change set for a WAN edge configuration object (network, service, service policy, gateway template, or device profile). Returns a digest-bound plan ready for approval. Arrays replace wholesale; null deletes a field."
+    )]
+    async fn plan_mist_change(
+        &self,
+        Parameters(args): Parameters<PlanChangeArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let caller = caller_from_extensions::<MistGrant>(&extensions);
+        let owner = match caller {
+            Some(ctx) => ctx.token_name.clone(),
+            None => "stdio".to_owned(),
+        };
+        let mut audit = audit_scope(
+            caller,
+            "plan_mist_change",
+            "plan",
+            vec![args.org_id.clone()],
+        );
+
+        // Reject mist_configured BEFORE anything else.
+        if let Err(wan_write::PatchError::MistConfigured) =
+            wan_write::reject_config_authority(&args.patch)
+        {
+            audit.fail("patch sets mist_configured");
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(
+                    "patch sets mist_configured, which controls who may configure the device",
+                ),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
+        // Validate org against allowed_orgs before issuing any read or creating a change set.
+        if !self
+            .allowed_orgs
+            .iter()
+            .any(|allowed| allowed == &args.org_id)
+        {
+            audit.deny("org not in allowed_orgs");
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(format!(
+                    "organization {} is not in the server's allowed organizations",
+                    args.org_id
+                )),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
+        let object: wan::WanObject = args.object.into();
+        let verb: wan_write::WriteVerb = args.verb.into();
+        let target = wan_write::write_target(object, verb);
+
+        // For update, read the object; for create, before is null.
+        let before = if verb == wan_write::WriteVerb::Update {
+            let object_id = match args.object_id.as_deref() {
+                Some(id) => id,
+                None => {
+                    audit.fail("update requires object_id");
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>("update requires object_id"),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            };
+
+            let mut path = PathValues::new();
+            path.insert(target.id_path_name.to_owned(), object_id.to_owned());
+            path.insert("org_id".to_owned(), args.org_id.clone());
+
+            let read = CatalogRead {
+                tool: "plan_mist_change",
+                operation_id: target.read_operation_id.to_owned(),
+                path,
+                query: QueryValues::new(),
+                cursor: None,
+                capability: if target.privileged {
+                    MistCapability::PrivilegedRead
+                } else {
+                    MistCapability::OrdinaryRead
+                },
+            };
+
+            let result = self.dispatch_catalogued_read(read, &extensions).await;
+            if result.is_error == Some(true) {
+                audit.fail("read failed");
+                return Ok(result);
+            }
+
+            let text = match result.content[0].as_text() {
+                Some(text_content) => text_content.text.clone(),
+                None => {
+                    audit.fail("read result was not text");
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>("read result was not text"),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            };
+            let value: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(error) => {
+                    audit.fail(format!("failed to parse read response: {error}"));
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>(format!(
+                            "failed to parse read response: {error}"
+                        )),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            };
+            match value.get("data") {
+                Some(data) => data.clone(),
+                None => {
+                    audit.fail("read response missing data field");
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>("read response missing data field"),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            }
+        } else {
+            serde_json::Value::Null
+        };
+
+        let after = wan_write::merge_patch(&before, &args.patch);
+
+        let staged = match change_set::stage_plan(
+            &self.coordinator,
+            owner,
+            object,
+            args.object_id.as_deref(),
+            args.org_id.clone(),
+            before.clone(),
+            after.clone(),
+        )
+        .await
+        {
+            Ok(staged) => staged,
+            Err(error) => {
+                audit.fail(error.to_string());
+                return Ok(tool_result::<serde_json::Value, _>(
+                    Err::<serde_json::Value, _>(error.to_string()),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        };
+
+        let response = if before.is_null() {
+            serde_json::json!({
+                "change_set_id": staged.change_set_id,
+                "plan_digest": staged.plan_digest,
+                "preview_digest": staged.preview_digest,
+                "before": null,
+                "before_state": "absent (create)",
+                "after": staged.after,
+            })
+        } else {
+            serde_json::json!({
+                "change_set_id": staged.change_set_id,
+                "plan_digest": staged.plan_digest,
+                "preview_digest": staged.preview_digest,
+                "before": staged.before,
+                "after": staged.after,
+            })
+        };
+
+        Ok(audited_tool_result::<serde_json::Value, &str>(
+            &mut audit,
+            Ok(response),
+        ))
+    }
+
+    #[tool(
+        name = "get_mist_change_set",
+        description = "Inspect a staged change set, returning its state, owner, before/after, and approval status."
+    )]
+    async fn get_mist_change_set(
+        &self,
+        Parameters(args): Parameters<GetChangeSetArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let caller = caller_from_extensions::<MistGrant>(&extensions);
+        let mut audit = audit_scope(
+            caller,
+            "get_mist_change_set",
+            "read",
+            vec![args.change_set_id.clone()],
+        );
+
+        let object: wan::WanObject = args.object.into();
+        let device = change_set::object_key(object, args.object_id.as_deref());
+
+        let record = match self
+            .coordinator
+            .change_set(&args.change_set_id, &device)
+            .await
+        {
+            Ok(record) => record,
+            Err(error) => {
+                audit.fail(error.to_string());
+                return Ok(tool_result::<serde_json::Value, _>(
+                    Err::<serde_json::Value, _>(error.to_string()),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        };
+
+        // Extract before/after from the preview artifact
+        let (before, after) = if let Some(preview) = &record.preview {
+            let parsed: serde_json::Value = match serde_json::from_str(&preview.artifact) {
+                Ok(v) => v,
+                Err(error) => {
+                    audit.fail(format!("failed to parse preview: {error}"));
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>(format!("failed to parse preview: {error}")),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            };
+            let before_value = parsed
+                .get("before")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let after_value = parsed
+                .get("after")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            (before_value, after_value)
+        } else {
+            (serde_json::Value::Null, serde_json::Value::Null)
+        };
+
+        let response = serde_json::json!({
+            "change_set_id": record.id,
+            "state": record.state.as_str(),
+            "owner": record.owner,
+            "approver": record.approver,
+            "plan_digest": record.digest,
+            "before": before,
+            "after": after,
+        });
+
+        Ok(audited_tool_result::<serde_json::Value, &str>(
+            &mut audit,
+            Ok(response),
+        ))
+    }
+
+    #[tool(
+        name = "approve_mist_change_set",
+        description = "Grant second-principal approval to a planned change set. The approver must be distinct from the owner."
+    )]
+    async fn approve_mist_change_set(
+        &self,
+        Parameters(args): Parameters<ApproveChangeSetArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let caller = caller_from_extensions::<MistGrant>(&extensions);
+        let approver = match caller {
+            Some(ctx) => ctx.token_name.clone(),
+            None => "stdio".to_owned(),
+        };
+        let mut audit = audit_scope(
+            caller,
+            "approve_mist_change_set",
+            "approve",
+            vec![args.change_set_id.clone()],
+        );
+
+        let object: wan::WanObject = args.object.into();
+        let device = change_set::object_key(object, args.object_id.as_deref());
+
+        let mut record = match self
+            .coordinator
+            .change_set(&args.change_set_id, &device)
+            .await
+        {
+            Ok(record) => record,
+            Err(error) => {
+                audit.fail(error.to_string());
+                return Ok(tool_result::<serde_json::Value, _>(
+                    Err::<serde_json::Value, _>(error.to_string()),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        };
+
+        // CRITICAL: Check self-approval BEFORE any state mutation.
+        if record.owner == approver {
+            audit.deny("self-approval");
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(
+                    "the planning principal cannot approve their own change set",
+                ),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
+        if record.state != mecmcp_changeset::ChangeSetState::Planned {
+            audit.fail(format!(
+                "change set is {}, not planned",
+                record.state.as_str()
+            ));
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(format!(
+                    "change set is {}, not planned",
+                    record.state.as_str()
+                )),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| {
+                audit.fail(format!("time error: {error}"));
+                rmcp::ErrorData::invalid_params(format!("time error: {error}"), None)
+            })?
+            .as_secs();
+
+        let approval_digest = mecmcp_changeset::digest::compute_approval_digest(
+            &record.id,
+            &record.digest,
+            &record.owner,
+            &approver,
+            now,
+        );
+
+        record.approval = Some(mecmcp_changeset::ApprovalRecord {
+            approver: Some(approver.clone()),
+            approved_at_unix: now,
+            digest: approval_digest,
+            waived: None,
+        });
+        record.approver = Some(approver);
+        record.state = mecmcp_changeset::ChangeSetState::Approved;
+
+        if let Err(error) = self.coordinator.update_change_set(record).await {
+            audit.fail(error.to_string());
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(error.to_string()),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
+        let response = serde_json::json!({
+            "change_set_id": args.change_set_id,
+            "state": "approved",
+            "expires_in_seconds": self.coordinator.approval_ttl().as_secs(),
+        });
+
+        Ok(audited_tool_result::<serde_json::Value, &str>(
+            &mut audit,
+            Ok(response),
+        ))
+    }
+
+    #[tool(
+        name = "apply_mist_change_set",
+        description = "Apply an approved change set to Mist. Verifies approval, checks for drift, issues the mutation, and verifies the result."
+    )]
+    async fn apply_mist_change_set(
+        &self,
+        Parameters(args): Parameters<ApplyChangeSetArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let caller = caller_from_extensions::<MistGrant>(&extensions);
+        let mut audit = audit_scope(
+            caller,
+            "apply_mist_change_set",
+            "apply",
+            vec![args.change_set_id.clone()],
+        );
+
+        let object: wan::WanObject = args.object.into();
+        let device = change_set::object_key(object, args.object_id.as_deref());
+
+        // Step 1: Take the device guard for concurrency control.
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let _guard = match self.coordinator.device_guard(&device, &cancellation).await {
+            Ok(guard) => guard,
+            Err(error) => {
+                audit.fail(error.to_string());
+                return Ok(tool_result::<serde_json::Value, _>(
+                    Err::<serde_json::Value, _>(error.to_string()),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        };
+
+        // Step 2: Fetch the record and refuse unless state is Approved.
+        let mut record = match self
+            .coordinator
+            .change_set(&args.change_set_id, &device)
+            .await
+        {
+            Ok(record) => record,
+            Err(error) => {
+                audit.fail(error.to_string());
+                return Ok(tool_result::<serde_json::Value, _>(
+                    Err::<serde_json::Value, _>(error.to_string()),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        };
+
+        if record.state != mecmcp_changeset::ChangeSetState::Approved {
+            audit.fail(format!(
+                "change set is {}, not approved",
+                record.state.as_str()
+            ));
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(format!(
+                    "change set is {}, not approved",
+                    record.state.as_str()
+                )),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
+        // Step 3: Check if the approval has expired.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| {
+                audit.fail(format!("time error: {error}"));
+                rmcp::ErrorData::invalid_params(format!("time error: {error}"), None)
+            })?
+            .as_secs();
+
+        if now > record.expires_at_unix {
+            audit.fail("approval has expired");
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(format!(
+                    "approval expired at unix timestamp {}",
+                    record.expires_at_unix
+                )),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
+        // Extract before/after/org_id from the preview artifact.
+        let (_before, after, org_id) = if let Some(preview) = &record.preview {
+            let parsed: serde_json::Value = match serde_json::from_str(&preview.artifact) {
+                Ok(v) => v,
+                Err(error) => {
+                    audit.fail(format!("failed to parse preview: {error}"));
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>(format!("failed to parse preview: {error}")),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            };
+            let before_value = parsed
+                .get("before")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let after_value = parsed
+                .get("after")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let org_id_value = match parsed.get("org_id").and_then(|v| v.as_str()) {
+                Some(id) => id.to_owned(),
+                None => {
+                    audit.fail("preview missing org_id");
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>(
+                            "change set was planned before org-scope fix and must be re-planned",
+                        ),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            };
+            (before_value, after_value, org_id_value)
+        } else {
+            audit.fail("change set has no preview");
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>("change set has no preview"),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        };
+
+        // Determine the verb from the expected fingerprint.
+        let is_create = record.expected_candidate_fingerprint == "create";
+        let verb = if is_create {
+            wan_write::WriteVerb::Create
+        } else {
+            wan_write::WriteVerb::Update
+        };
+        let target = wan_write::write_target(object, verb);
+
+        // Validate and bind object_id for updates.
+        let object_id = if !is_create {
+            match args.object_id.as_deref() {
+                Some(id) => id.to_owned(),
+                None => {
+                    audit.fail("update requires object_id");
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>("update requires object_id"),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            }
+        } else {
+            String::new() // Placeholder for creates; will be populated from response
+        };
+
+        // Step 4: For updates, re-read the object and compare fingerprints.
+        let drift_checked = if !is_create {
+            let mut path = PathValues::new();
+            path.insert(target.id_path_name.to_owned(), object_id.clone());
+            path.insert("org_id".to_owned(), org_id.clone());
+
+            let read = CatalogRead {
+                tool: "apply_mist_change_set",
+                operation_id: target.read_operation_id.to_owned(),
+                path,
+                query: QueryValues::new(),
+                cursor: None,
+                capability: if target.privileged {
+                    MistCapability::PrivilegedRead
+                } else {
+                    MistCapability::OrdinaryRead
+                },
+            };
+
+            let result = self.dispatch_catalogued_read(read, &extensions).await;
+            if result.is_error == Some(true) {
+                audit.fail("drift check read failed");
+                return Ok(result);
+            }
+
+            let text = match result.content[0].as_text() {
+                Some(text_content) => text_content.text.clone(),
+                None => {
+                    audit.fail("drift check result was not text");
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>("drift check result was not text"),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            };
+            let value: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(error) => {
+                    audit.fail(format!("failed to parse drift check response: {error}"));
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>(format!(
+                            "failed to parse drift check response: {error}"
+                        )),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            };
+            let current = match value.get("data") {
+                Some(data) => data.clone(),
+                None => {
+                    audit.fail("drift check response missing data field");
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>("drift check response missing data field"),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            };
+
+            // Compute fingerprint of current state.
+            let canonical = match serde_json::to_vec(&current) {
+                Ok(v) => v,
+                Err(error) => {
+                    audit.fail(format!("failed to serialize current state: {error}"));
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>(format!(
+                            "failed to serialize current state: {error}"
+                        )),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            };
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(&canonical);
+            let current_fingerprint = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+            // Compare with expected fingerprint.
+            if current_fingerprint != record.expected_candidate_fingerprint {
+                record.state = mecmcp_changeset::ChangeSetState::Failed;
+                if let Err(error) = self.coordinator.update_change_set(record).await {
+                    audit.fail(format!("failed to mark drift failure: {error}"));
+                } else {
+                    audit.fail("object moved since planning (drift detected)");
+                }
+                return Ok(tool_result::<serde_json::Value, _>(
+                    Err::<serde_json::Value, _>(
+                        "object has been modified since planning; fingerprint mismatch",
+                    ),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+            true
+        } else {
+            false
+        };
+
+        // Validate org against allowed_orgs before issuing the write.
+        if !self.allowed_orgs.iter().any(|allowed| allowed == &org_id) {
+            audit.deny("org not in allowed_orgs");
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(format!(
+                    "organization {} is not in the server's allowed organizations",
+                    org_id
+                )),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
+        // Step 5: Mark Applying and persist before issuing the write.
+        record.state = mecmcp_changeset::ChangeSetState::Applying;
+        if let Err(error) = self.coordinator.update_change_set(record.clone()).await {
+            audit.fail(error.to_string());
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(error.to_string()),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
+        // Step 6: Issue the write with json: Some(after).
+        let mut path = PathValues::new();
+        path.insert("org_id".to_owned(), org_id.clone());
+        if !is_create {
+            path.insert(target.id_path_name.to_owned(), object_id.clone());
+        }
+
+        let write_request = MistRequest {
+            operation_id: target.write_operation_id.to_owned(),
+            path,
+            query: QueryValues::new(),
+            json: Some(after.clone()),
+            cursor: None,
+        };
+
+        let write_result = self.client.execute(write_request).await;
+        let write_response = match write_result {
+            Ok(response) => response,
+            Err(error) => {
+                audit.fail(format!("write failed: {error}"));
+                record.state = mecmcp_changeset::ChangeSetState::Failed;
+                let _ = self.coordinator.update_change_set(record).await;
+                return Ok(tool_result::<serde_json::Value, _>(
+                    Err::<serde_json::Value, _>(format!("write failed: {error}")),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        };
+
+        // Step 7: Re-read and verify against after.
+        let final_object_id = if is_create {
+            // Extract the ID from the write response.
+            match &write_response.body {
+                MistResponseBody::Json(json) => match json.get("id") {
+                    Some(serde_json::Value::String(id)) => id.clone(),
+                    _ => {
+                        audit.fail("create response missing id field");
+                        record.state = mecmcp_changeset::ChangeSetState::Failed;
+                        let _ = self.coordinator.update_change_set(record).await;
+                        return Ok(tool_result::<serde_json::Value, _>(
+                            Err::<serde_json::Value, _>("create response missing id field"),
+                            ResultFormat::PrettyJson,
+                            RESULT_LIMITS,
+                        ));
+                    }
+                },
+                _ => {
+                    audit.fail("create response was not JSON");
+                    record.state = mecmcp_changeset::ChangeSetState::Failed;
+                    let _ = self.coordinator.update_change_set(record).await;
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>("create response was not JSON"),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            }
+        } else {
+            object_id.clone()
+        };
+
+        let mut verify_path = PathValues::new();
+        verify_path.insert(target.id_path_name.to_owned(), final_object_id.clone());
+        verify_path.insert("org_id".to_owned(), org_id.clone());
+
+        let verify_read = CatalogRead {
+            tool: "apply_mist_change_set",
+            operation_id: target.read_operation_id.to_owned(),
+            path: verify_path,
+            query: QueryValues::new(),
+            cursor: None,
+            capability: if target.privileged {
+                MistCapability::PrivilegedRead
+            } else {
+                MistCapability::OrdinaryRead
+            },
+        };
+
+        let verify_result = self
+            .dispatch_catalogued_read(verify_read, &extensions)
+            .await;
+        let verified = if verify_result.is_error != Some(true) {
+            if let Some(text_content) = verify_result.content[0].as_text() {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text_content.text) {
+                    if let Some(data) = value.get("data") {
+                        data == &after
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // Step 8: Mark Applied or Failed and persist.
+        record.state = if verified {
+            mecmcp_changeset::ChangeSetState::Applied
+        } else {
+            mecmcp_changeset::ChangeSetState::Failed
+        };
+
+        if let Err(error) = self.coordinator.update_change_set(record.clone()).await {
+            audit.fail(format!("failed to persist final state: {error}"));
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(format!("failed to persist final state: {error}")),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
+        let response = serde_json::json!({
+            "change_set_id": args.change_set_id,
+            "state": record.state.as_str(),
+            "object_id": final_object_id,
+            "drift_checked": drift_checked,
+            "verified": verified,
+        });
+
+        Ok(audited_tool_result::<serde_json::Value, &str>(
+            &mut audit,
+            Ok(response),
+        ))
+    }
+
     #[tool(
         name = "troubleshoot_mist",
         description = "List site troubleshoot calls."

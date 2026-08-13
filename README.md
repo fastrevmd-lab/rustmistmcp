@@ -119,8 +119,12 @@ What is *not* done, and must not be described as done:
 - **No `/api/v1/self` *startup* identity probe.** The `get_mist_self` tool works
   against a live tenant; nothing probes `/self` during startup, and
   `LIVE_MIST_BLOCKER` still names that gap.
-- **No mutating tools.** The registered tools are all reads. Mutations are
-  designed in issue #14 and land only behind `mecmcp-changeset`.
+- **Mutations exist only for batch-1 WAN edge objects.** Batch-1 covers create
+  and update for networks, services, service policies, gateway templates, and
+  device profiles, reachable only through the plan → digest → approve → apply
+  lifecycle. Delete operations and `mist_configured` device-profile
+  assignment/unassignment remain out of reach. No live-tenant apply has been
+  performed.
 
 A handler constructed without a credential uses `BlockedMistClient`, which
 performs no I/O; `LIVE_MIST_BLOCKER` is the message it refuses with.
@@ -136,8 +140,9 @@ packaging only**. A lab LXC built from them has served live read-only tenant
 traffic (issue #11), which is not the same as packaging acceptance: that run
 used no TLS and no off-loopback bind, so the TLS, Host/Origin, and bad-bearer
 rows of `docs/PACKAGING_ACCEPTANCE.md` remain unproven. The `/api/v1/self`
-startup probe is unimplemented and no mutating tool is registered. No v1 release
-label may be claimed until that checklist is complete.
+startup probe is unimplemented, and mutations exist only for batch-1 WAN edge
+objects behind the change-set lifecycle; no live-tenant apply has been performed.
+No v1 release label may be claimed until that checklist is complete.
 
 The OCI image is a multi-stage build with a digest-pinned Rust builder and a
 digest-pinned distroless Debian 13 runtime. It runs only
@@ -282,12 +287,16 @@ targets SRX/SSR gateways and their overlay connectivity. See `KNOWN_TOOLS` in
 
 | Tool | Description |
 |---|---|
+| `apply_mist_change_set` | Apply an approved change set to Mist. Verifies approval, checks for drift, issues the mutation, and verifies the result. |
+| `approve_mist_change_set` | Grant second-principal approval to a planned change set. The approver must be distinct from the owner. |
+| `get_mist_change_set` | Inspect a staged change set, returning its state, owner, before/after, and approval status. |
 | `get_mist_sle_impact` | Get gateways, applications, or the summary impacted by one site SLE metric. |
 | `get_mist_wan_config` | Get one WAN edge configuration object by ID. |
 | `get_mist_wan_edge_stats` | Get WAN edge gateway metrics for a site, or insight metrics for one gateway. |
 | `list_mist_applications` | List applications seen at a site, count them, or list the gateway application catalog. |
 | `list_mist_wan_config` | List WAN edge configuration objects: networks, services, service policies, gateway templates, or device profiles. |
 | `list_mist_wan_edges` | List WAN edge gateways (SRX/SSR) in an organization or site. |
+| `plan_mist_change` | Stage a change set for a WAN edge configuration object (network, service, service policy, gateway template, or device profile). Returns a digest-bound plan ready for approval. Arrays replace wholesale; null deletes a field. |
 | `search_mist_bgp_peers` | Search WAN edge BGP peer stats in an organization or site, or count them. |
 | `search_mist_peer_paths` | Search SD-WAN overlay peer path stats, or count them by a distinct field. |
 | `search_mist_service_path_events` | Search WAN edge service path events for a site, or count them. |

@@ -966,11 +966,10 @@ fn example_uses_absolute_operator_paths_and_runtime_is_honest_about_blockers() {
     assert!(!LIVE_MIST_BLOCKER.contains("mecmcp#90"));
     assert!(LIVE_MIST_BLOCKER.contains("credential"));
     assert!(LIVE_MIST_BLOCKER.contains("/api/v1/self"));
-    assert!(
-        !KNOWN_TOOLS
-            .iter()
-            .any(|tool| tool.contains("change") || tool.contains("apply"))
-    );
+    // Change-set write tools now exist (plan_mist_change and its apply path),
+    // even though mecmcp#90 (live outbound Mist client) remains open. The
+    // coordinator-gated lifecycle works without a production Mist client.
+    assert!(KNOWN_TOOLS.contains(&"plan_mist_change"));
 }
 
 #[test]
