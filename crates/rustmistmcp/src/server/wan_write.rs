@@ -1,0 +1,155 @@
+//! Write targets for WAN edge configuration objects.
+//!
+//! Each write operation is paired with the read that produces the `before`
+//! state its digest binds to. That pairing is the reason this module exists:
+//! a change set whose `before` came from the wrong read binds its digest to
+//! the wrong object's state, which is worse than no digest because the audit
+//! record still says the change was digest-bound.
+
+use crate::server::wan::WanObject;
+
+/// Which write a change set performs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+pub(crate) enum WriteVerb {
+    /// Create a new object. Has no prior state.
+    Create,
+    /// Update an existing object.
+    Update,
+}
+
+/// One write operation and the read that produces its `before` state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+pub(crate) struct WriteTarget {
+    /// Catalog operation ID for the write.
+    pub write_operation_id: &'static str,
+    /// Catalog operation ID for the read that produces `before`.
+    ///
+    /// For a create this is the read that would fetch the object once it
+    /// exists; it is not called at plan time, because a create has no prior
+    /// state.
+    pub read_operation_id: &'static str,
+    /// Path parameter name carrying the object's own identifier.
+    pub id_path_name: &'static str,
+    /// Whether this object's operations are `privileged_read`/privileged write.
+    pub privileged: bool,
+}
+
+/// Resolve the write target for an object and verb.
+#[allow(dead_code)]
+pub(crate) fn write_target(object: WanObject, verb: WriteVerb) -> WriteTarget {
+    match (object, verb) {
+        (WanObject::Network, WriteVerb::Create) => WriteTarget {
+            write_operation_id: "createOrgNetwork",
+            read_operation_id: "getOrgNetwork",
+            id_path_name: "network_id",
+            privileged: false,
+        },
+        (WanObject::Network, WriteVerb::Update) => WriteTarget {
+            write_operation_id: "updateOrgNetwork",
+            read_operation_id: "getOrgNetwork",
+            id_path_name: "network_id",
+            privileged: false,
+        },
+        (WanObject::Service, WriteVerb::Create) => WriteTarget {
+            write_operation_id: "createOrgService",
+            read_operation_id: "getOrgService",
+            id_path_name: "service_id",
+            privileged: false,
+        },
+        (WanObject::Service, WriteVerb::Update) => WriteTarget {
+            write_operation_id: "updateOrgService",
+            read_operation_id: "getOrgService",
+            id_path_name: "service_id",
+            privileged: false,
+        },
+        (WanObject::ServicePolicy, WriteVerb::Create) => WriteTarget {
+            write_operation_id: "createOrgServicePolicy",
+            read_operation_id: "getOrgServicePolicy",
+            id_path_name: "servicepolicy_id",
+            privileged: false,
+        },
+        (WanObject::ServicePolicy, WriteVerb::Update) => WriteTarget {
+            write_operation_id: "updateOrgServicePolicy",
+            read_operation_id: "getOrgServicePolicy",
+            id_path_name: "servicepolicy_id",
+            privileged: false,
+        },
+        (WanObject::GatewayTemplate, WriteVerb::Create) => WriteTarget {
+            write_operation_id: "createOrgGatewayTemplate",
+            read_operation_id: "getOrgGatewayTemplate",
+            id_path_name: "gatewaytemplate_id",
+            privileged: true,
+        },
+        (WanObject::GatewayTemplate, WriteVerb::Update) => WriteTarget {
+            write_operation_id: "updateOrgGatewayTemplate",
+            read_operation_id: "getOrgGatewayTemplate",
+            id_path_name: "gatewaytemplate_id",
+            privileged: true,
+        },
+        (WanObject::DeviceProfile, WriteVerb::Create) => WriteTarget {
+            write_operation_id: "createOrgDeviceProfile",
+            read_operation_id: "getOrgDeviceProfile",
+            id_path_name: "deviceprofile_id",
+            privileged: true,
+        },
+        (WanObject::DeviceProfile, WriteVerb::Update) => WriteTarget {
+            write_operation_id: "updateOrgDeviceProfile",
+            read_operation_id: "getOrgDeviceProfile",
+            id_path_name: "deviceprofile_id",
+            privileged: true,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_targets_pair_each_write_with_its_own_read() {
+        let network = write_target(WanObject::Network, WriteVerb::Update);
+        assert_eq!(network.write_operation_id, "updateOrgNetwork");
+        assert_eq!(network.read_operation_id, "getOrgNetwork");
+        assert_eq!(network.id_path_name, "network_id");
+        assert!(!network.privileged);
+
+        let template = write_target(WanObject::GatewayTemplate, WriteVerb::Update);
+        assert_eq!(template.write_operation_id, "updateOrgGatewayTemplate");
+        assert_eq!(template.read_operation_id, "getOrgGatewayTemplate");
+        assert_eq!(template.id_path_name, "gatewaytemplate_id");
+        assert!(template.privileged);
+    }
+
+    #[test]
+    fn create_targets_use_the_collection_endpoint() {
+        let service = write_target(WanObject::Service, WriteVerb::Create);
+        assert_eq!(service.write_operation_id, "createOrgService");
+        assert_eq!(service.read_operation_id, "getOrgService");
+
+        let profile = write_target(WanObject::DeviceProfile, WriteVerb::Create);
+        assert_eq!(profile.write_operation_id, "createOrgDeviceProfile");
+        assert!(profile.privileged);
+    }
+
+    #[test]
+    fn every_object_and_verb_resolves() {
+        for object in [
+            WanObject::Network,
+            WanObject::Service,
+            WanObject::ServicePolicy,
+            WanObject::GatewayTemplate,
+            WanObject::DeviceProfile,
+        ] {
+            for verb in [WriteVerb::Create, WriteVerb::Update] {
+                let target = write_target(object, verb);
+                assert!(target.write_operation_id.starts_with(match verb {
+                    WriteVerb::Create => "create",
+                    WriteVerb::Update => "update",
+                }));
+                assert!(target.read_operation_id.starts_with("get"));
+            }
+        }
+    }
+}

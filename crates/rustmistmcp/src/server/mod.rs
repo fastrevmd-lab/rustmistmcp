@@ -1,6 +1,7 @@
 //! Curated read-only Mist MCP handler.
 
 mod wan;
+mod wan_write;
 
 use std::{collections::BTreeMap, sync::Arc};
 
