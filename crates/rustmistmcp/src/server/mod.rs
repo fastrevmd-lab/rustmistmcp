@@ -1,5 +1,6 @@
 //! Curated read-only Mist MCP handler.
 
+mod change_set;
 mod wan;
 mod wan_write;
 
@@ -135,9 +136,16 @@ pub enum MistServerError {
     /// Failed to construct HTTP client.
     #[error("HTTP client construction failed: {0}")]
     ClientConstruction(String),
+    /// Failed to load change-set lifecycle state.
+    #[error("change-set state load failed: {0}")]
+    ChangeSetState(String),
 }
 
-/// Read-only Mist MCP handler with an injected catalog-bound client.
+/// Mist MCP handler with catalogued reads and change-set-gated writes.
+///
+/// Serves read-only Mist tools and mutating tools gated through the
+/// plan → approve → apply → verify change-set lifecycle. Write tools do not
+/// exist yet, but the coordinator is mounted to prepare for them.
 #[derive(Clone)]
 pub struct MistHandler {
     #[allow(dead_code)]
@@ -149,7 +157,43 @@ pub struct MistHandler {
     #[allow(dead_code)]
     catalog: Arc<Catalog>,
     client: Arc<dyn MistClient>,
+    /// Change-set lifecycle state for gated writes.
+    #[allow(dead_code)]
+    coordinator: Arc<mecmcp_changeset::ChangesetCoordinator>,
     tool_router: ToolRouter<Self>,
+}
+
+/// Default change-set limits for this consumer.
+///
+/// A Mist change set holds one action over one object, so the per-set ceilings
+/// are deliberately small; the store ceiling is what bounds a runaway client.
+fn change_set_limits() -> mecmcp_changeset::OperationLimits {
+    mecmcp_changeset::OperationLimits {
+        max_operations: 64,
+        max_change_sets: 64,
+        max_actions_per_set: 1,
+        max_change_set_bytes: 256 * 1024,
+        max_state_bytes: 4 * 1024 * 1024,
+        max_targets_per_set: 1,
+        max_preview_bytes: 128 * 1024,
+    }
+}
+
+/// Load the coordinator for a handler.
+///
+/// `None` keeps state in memory, which is what tests want. Production passes
+/// `/var/lib/rustmistmcp/changeset-state.json`, the path packaging reserves.
+fn load_coordinator(
+    path: Option<&std::path::Path>,
+) -> Result<Arc<mecmcp_changeset::ChangesetCoordinator>, MistServerError> {
+    let coordinator = mecmcp_changeset::ChangesetCoordinator::load(
+        path,
+        change_set_limits(),
+        std::time::Duration::from_secs(3600),
+        false,
+    )
+    .map_err(|error| MistServerError::ChangeSetState(error.to_string()))?;
+    Ok(Arc::new(coordinator))
 }
 
 impl MistHandler {
@@ -203,12 +247,45 @@ impl MistHandler {
         )
         .map_err(|error| MistServerError::ClientConstruction(error.to_string()))?;
 
-        Self::with_client(
-            &config.endpoint,
-            config.allowed_orgs.clone(),
-            sites,
-            Arc::new(http_client),
-        )
+        // Load change-set coordinator with production path
+        let coordinator = load_coordinator(Some(std::path::Path::new(
+            "/var/lib/rustmistmcp/changeset-state.json",
+        )))?;
+
+        let origin = validate_mist_endpoint(&config.endpoint)
+            .map_err(|_| MistServerError::InvalidEndpoint)?;
+        let allowed_orgs = &config.allowed_orgs;
+        if allowed_orgs.is_empty()
+            || allowed_orgs.len() > 256
+            || allowed_orgs
+                .iter()
+                .any(|org_id| MistTarget::org(org_id).is_err())
+            || allowed_orgs
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != allowed_orgs.len()
+        {
+            return Err(MistServerError::InvalidOrganization);
+        }
+        if sites.len() > 4096
+            || sites.iter().any(|(site_id, org_id)| {
+                MistTarget::site(site_id).is_err()
+                    || MistTarget::org(org_id).is_err()
+                    || !allowed_orgs.iter().any(|allowed| allowed == org_id)
+            })
+        {
+            return Err(MistServerError::InvalidOrganization);
+        }
+        Ok(Self {
+            origin,
+            allowed_orgs: allowed_orgs.clone().into(),
+            sites: Arc::new(sites),
+            catalog,
+            client: Arc::new(http_client),
+            coordinator,
+            tool_router: Self::mist_tool_router(),
+        })
     }
 
     /// Construct a handler around an injected Mist client.
@@ -248,6 +325,7 @@ impl MistHandler {
             sites: Arc::new(sites),
             catalog: Arc::new(Catalog::embedded()?),
             client,
+            coordinator: load_coordinator(None)?,
             tool_router: Self::mist_tool_router(),
         })
     }
