@@ -285,6 +285,10 @@ async fn bgp_peers_resolve_scope_and_mode() {
             .await
             .unwrap_or_else(|error| panic!("call {args} failed: {error}"));
         assert_eq!(request.operation_id, expected, "for {args}");
+        assert!(
+            !request.query.contains_key("mode"),
+            "mode is a tool selector and must not reach Mist, for {args}"
+        );
     }
 
     assert!(
