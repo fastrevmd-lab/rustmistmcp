@@ -90,6 +90,7 @@ pub(crate) async fn stage_plan(
     owner: String,
     object: WanObject,
     object_id: Option<&str>,
+    org_id: String,
     before: serde_json::Value,
     after: serde_json::Value,
 ) -> Result<StagedPlan, CoordinatorError> {
@@ -140,10 +141,11 @@ pub(crate) async fn stage_plan(
         .as_secs();
     let expires_at_unix = now.saturating_add(3600);
 
-    // Store before/after in preview for inspection
+    // Store before/after/org_id in preview for inspection and apply-time validation
     let preview_artifact = serde_json::json!({
         "before": &before,
         "after": &after,
+        "org_id": &org_id,
     })
     .to_string();
     let preview_artifact_digest = digest::preview_digest(&preview_artifact);

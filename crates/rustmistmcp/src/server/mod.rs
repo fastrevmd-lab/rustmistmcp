@@ -1172,8 +1172,6 @@ read_args!(ApplyChangeSetArgs {
     /// The object's UUID. Required for update change sets.
     #[serde(skip_serializing)]
     object_id: Option<String>,
-    /// Organization UUID.
-    org_id: String,
 });
 
 read_args!(OrgPageArgs {
@@ -2337,6 +2335,7 @@ impl MistHandler {
             owner,
             object,
             args.object_id.as_deref(),
+            args.org_id.clone(),
             before.clone(),
             after.clone(),
         )
@@ -2656,8 +2655,8 @@ impl MistHandler {
             ));
         }
 
-        // Extract before/after from the preview artifact.
-        let (_before, after) = if let Some(preview) = &record.preview {
+        // Extract before/after/org_id from the preview artifact.
+        let (_before, after, org_id) = if let Some(preview) = &record.preview {
             let parsed: serde_json::Value = match serde_json::from_str(&preview.artifact) {
                 Ok(v) => v,
                 Err(error) => {
@@ -2677,7 +2676,18 @@ impl MistHandler {
                 .get("after")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            (before_value, after_value)
+            let org_id_value = match parsed.get("org_id").and_then(|v| v.as_str()) {
+                Some(id) => id.to_owned(),
+                None => {
+                    audit.fail("preview missing org_id");
+                    return Ok(tool_result::<serde_json::Value, _>(
+                        Err::<serde_json::Value, _>("preview missing org_id"),
+                        ResultFormat::PrettyJson,
+                        RESULT_LIMITS,
+                    ));
+                }
+            };
+            (before_value, after_value, org_id_value)
         } else {
             audit.fail("change set has no preview");
             return Ok(tool_result::<serde_json::Value, _>(
@@ -2696,10 +2706,10 @@ impl MistHandler {
         };
         let target = wan_write::write_target(object, verb);
 
-        // Step 4: For updates, re-read the object and compare fingerprints.
-        let drift_checked = if !is_create {
-            let object_id = match args.object_id.as_deref() {
-                Some(id) => id,
+        // Validate and bind object_id for updates.
+        let object_id = if !is_create {
+            match args.object_id.as_deref() {
+                Some(id) => id.to_owned(),
                 None => {
                     audit.fail("update requires object_id");
                     return Ok(tool_result::<serde_json::Value, _>(
@@ -2708,11 +2718,16 @@ impl MistHandler {
                         RESULT_LIMITS,
                     ));
                 }
-            };
+            }
+        } else {
+            String::new() // Placeholder for creates; will be populated from response
+        };
 
+        // Step 4: For updates, re-read the object and compare fingerprints.
+        let drift_checked = if !is_create {
             let mut path = PathValues::new();
-            path.insert(target.id_path_name.to_owned(), object_id.to_owned());
-            path.insert("org_id".to_owned(), args.org_id.clone());
+            path.insert(target.id_path_name.to_owned(), object_id.clone());
+            path.insert("org_id".to_owned(), org_id.clone());
 
             let read = CatalogRead {
                 tool: "apply_mist_change_set",
@@ -2808,6 +2823,19 @@ impl MistHandler {
             false
         };
 
+        // Validate org against allowed_orgs before issuing the write.
+        if !self.allowed_orgs.iter().any(|allowed| allowed == &org_id) {
+            audit.deny("org not in allowed_orgs");
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(format!(
+                    "organization {} is not in the server's allowed organizations",
+                    org_id
+                )),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
         // Step 5: Mark Applying and persist before issuing the write.
         record.state = mecmcp_changeset::ChangeSetState::Applying;
         if let Err(error) = self.coordinator.update_change_set(record.clone()).await {
@@ -2821,9 +2849,9 @@ impl MistHandler {
 
         // Step 6: Issue the write with json: Some(after).
         let mut path = PathValues::new();
-        path.insert("org_id".to_owned(), args.org_id.clone());
-        if let Some(object_id) = args.object_id.as_deref() {
-            path.insert(target.id_path_name.to_owned(), object_id.to_owned());
+        path.insert("org_id".to_owned(), org_id.clone());
+        if !is_create {
+            path.insert(target.id_path_name.to_owned(), object_id.clone());
         }
 
         let write_request = MistRequest {
@@ -2850,7 +2878,7 @@ impl MistHandler {
         };
 
         // Step 7: Re-read and verify against after.
-        let object_id = if is_create {
+        let final_object_id = if is_create {
             // Extract the ID from the write response.
             match &write_response.body {
                 MistResponseBody::Json(json) => match json.get("id") {
@@ -2878,15 +2906,12 @@ impl MistHandler {
                 }
             }
         } else {
-            args.object_id
-                .as_deref()
-                .expect("object_id required for update")
-                .to_owned()
+            object_id.clone()
         };
 
         let mut verify_path = PathValues::new();
-        verify_path.insert(target.id_path_name.to_owned(), object_id.clone());
-        verify_path.insert("org_id".to_owned(), args.org_id.clone());
+        verify_path.insert(target.id_path_name.to_owned(), final_object_id.clone());
+        verify_path.insert("org_id".to_owned(), org_id.clone());
 
         let verify_read = CatalogRead {
             tool: "apply_mist_change_set",
@@ -2941,7 +2966,7 @@ impl MistHandler {
         let response = serde_json::json!({
             "change_set_id": args.change_set_id,
             "state": record.state.as_str(),
-            "object_id": object_id,
+            "object_id": final_object_id,
             "drift_checked": drift_checked,
             "verified": verified,
         });
