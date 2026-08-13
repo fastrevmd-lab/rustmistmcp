@@ -34,6 +34,7 @@ async fn registry_contains_only_the_approved_read_tools() {
         "get_mist_wan_edge_stats",
         "invoke_mist_privileged_read",
         "invoke_mist_read",
+        "list_mist_applications",
         "list_mist_orgs",
         "list_mist_rogues",
         "list_mist_sites",

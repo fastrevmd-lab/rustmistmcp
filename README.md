@@ -282,7 +282,9 @@ targets SRX/SSR gateways and their overlay connectivity. See `KNOWN_TOOLS` in
 
 | Tool | Description |
 |---|---|
+| `get_mist_sle_impact` | Get gateways, applications, or the summary impacted by one site SLE metric. |
 | `get_mist_wan_edge_stats` | Get WAN edge gateway metrics for a site, or insight metrics for one gateway. |
+| `list_mist_applications` | List applications seen at a site, count them, or list the gateway application catalog. |
 | `list_mist_wan_edges` | List WAN edge gateways (SRX/SSR) in an organization or site. |
 | `search_mist_bgp_peers` | Search WAN edge BGP peer stats in an organization or site, or count them. |
 | `search_mist_peer_paths` | Search SD-WAN overlay peer path stats, or count them by a distinct field. |

@@ -139,6 +139,16 @@ impl MistClient for RecordingClient {
                 "device_type": [],
                 "band": []
             }),
+            "listSiteApps" => serde_json::json!([]),
+            "countSiteApps" => serde_json::json!({
+                "distinct": "name",
+                "start": 0,
+                "end": 0,
+                "limit": 10,
+                "total": 0,
+                "results": []
+            }),
+            "listGatewayApplications" => serde_json::json!([]),
             _ => serde_json::json!({"results": []}),
         };
         Ok(MistResponse {
@@ -379,4 +389,56 @@ async fn sle_impact_resolves_selector() {
         assert_eq!(request.operation_id, expected);
         assert!(!request.query.contains_key("impact"));
     }
+}
+
+#[tokio::test]
+async fn applications_resolve_source_and_mode() {
+    let site = record_call(
+        "list_mist_applications",
+        serde_json::json!({"source": "site", "site_id": SITE_ID}),
+    )
+    .await
+    .expect("site call");
+    assert_eq!(site.operation_id, "listSiteApps");
+    assert!(
+        !site.query.contains_key("source"),
+        "source is a tool selector and must not reach Mist"
+    );
+    assert!(
+        !site.query.contains_key("mode"),
+        "mode is a tool selector and must not reach Mist"
+    );
+
+    let counted = record_call(
+        "list_mist_applications",
+        serde_json::json!({"source": "site", "site_id": SITE_ID, "mode": "count"}),
+    )
+    .await
+    .expect("count call");
+    assert_eq!(counted.operation_id, "countSiteApps");
+    assert!(!counted.query.contains_key("source"));
+    assert!(!counted.query.contains_key("mode"));
+
+    let catalog = record_call(
+        "list_mist_applications",
+        serde_json::json!({"source": "catalog"}),
+    )
+    .await
+    .expect("catalog call");
+    assert_eq!(catalog.operation_id, "listGatewayApplications");
+    assert!(!catalog.query.contains_key("source"));
+    assert!(!catalog.query.contains_key("mode"));
+}
+
+#[tokio::test]
+async fn applications_require_site_id_for_the_site_source() {
+    assert!(
+        record_call(
+            "list_mist_applications",
+            serde_json::json!({"source": "site"})
+        )
+        .await
+        .is_err(),
+        "site source without site_id must be refused"
+    );
 }

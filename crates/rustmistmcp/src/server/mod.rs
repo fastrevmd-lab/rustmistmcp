@@ -44,6 +44,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "get_mist_wan_edge_stats",
     "invoke_mist_privileged_read",
     "invoke_mist_read",
+    "list_mist_applications",
     "list_mist_orgs",
     "list_mist_rogues",
     "list_mist_sites",
@@ -923,6 +924,25 @@ impl From<SleImpactArg> for wan::SleImpact {
     }
 }
 
+/// Where a caller wants the application list from.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum AppSourceArg {
+    /// Applications observed at a site. Requires `site_id`.
+    Site,
+    /// The constant gateway application catalog. Takes no scope.
+    Catalog,
+}
+
+impl From<AppSourceArg> for wan::AppSource {
+    fn from(value: AppSourceArg) -> Self {
+        match value {
+            AppSourceArg::Site => Self::Site,
+            AppSourceArg::Catalog => Self::Catalog,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SearchOperationsArgs {
@@ -1156,6 +1176,20 @@ read_args!(ServicePathEventArgs {
     start: Option<u64>,
     end: Option<u64>,
     duration: Option<String>,
+    distinct: Option<String>,
+});
+
+read_args!(ApplicationListArgs {
+    /// Where to read applications from. Not sent to Mist.
+    #[serde(skip_serializing)]
+    source: AppSourceArg,
+    /// Site UUID. Required when `source` is `site`.
+    site_id: Option<String>,
+    /// Records or count distribution. Ignored for the constant catalog.
+    #[serde(default, skip_serializing)]
+    mode: StatsModeArg,
+    #[schemars(range(min = 1, max = 100))]
+    limit: Option<u32>,
     distinct: Option<String>,
 });
 
@@ -1427,6 +1461,34 @@ impl MistHandler {
             .invoke_dispatcher(
                 "invoke_mist_read",
                 args,
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "list_mist_applications",
+        description = "List applications seen at a site, count them, or list the gateway application catalog."
+    )]
+    async fn list_mist_applications(
+        &self,
+        Parameters(args): Parameters<ApplicationListArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if matches!(args.source, AppSourceArg::Site) && args.site_id.is_none() {
+            return Ok(tool_result::<ReadEnvelope, _>(
+                Err(MistCallError::AmbiguousScope),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+        let resolved = wan::applications(args.source.into(), args.mode.into());
+        Ok(self
+            .dispatch_named(
+                "list_mist_applications",
+                resolved.operation_id,
+                args,
+                resolved.path_names,
                 MistCapability::OrdinaryRead,
                 &extensions,
             )

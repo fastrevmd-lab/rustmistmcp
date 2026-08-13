@@ -167,6 +167,36 @@ pub(crate) fn sle_impact(impact: SleImpact) -> Resolved {
     }
 }
 
+/// Where the application list comes from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AppSource {
+    /// Applications observed at a site.
+    Site,
+    /// The constant gateway application catalog.
+    Catalog,
+}
+
+/// Resolve an application listing.
+///
+/// The constant catalog is org- and site-independent and has no count variant,
+/// so `mode` is ignored for [`AppSource::Catalog`].
+pub(crate) fn applications(source: AppSource, mode: StatsMode) -> Resolved {
+    match (source, mode) {
+        (AppSource::Site, StatsMode::Records) => Resolved {
+            operation_id: "listSiteApps",
+            path_names: &["site_id"],
+        },
+        (AppSource::Site, StatsMode::Count) => Resolved {
+            operation_id: "countSiteApps",
+            path_names: &["site_id"],
+        },
+        (AppSource::Catalog, _) => Resolved {
+            operation_id: "listGatewayApplications",
+            path_names: &[],
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +353,32 @@ mod tests {
             Resolved {
                 operation_id: "getSiteSleImpactSummary",
                 path_names: PATHS
+            }
+        );
+    }
+
+    #[test]
+    fn applications_resolve_source_and_mode() {
+        assert_eq!(
+            applications(AppSource::Site, StatsMode::Records),
+            Resolved {
+                operation_id: "listSiteApps",
+                path_names: &["site_id"]
+            }
+        );
+        assert_eq!(
+            applications(AppSource::Site, StatsMode::Count),
+            Resolved {
+                operation_id: "countSiteApps",
+                path_names: &["site_id"]
+            }
+        );
+        // The constant catalog has no scope and no count variant; mode is ignored.
+        assert_eq!(
+            applications(AppSource::Catalog, StatsMode::Count),
+            Resolved {
+                operation_id: "listGatewayApplications",
+                path_names: &[]
             }
         );
     }
