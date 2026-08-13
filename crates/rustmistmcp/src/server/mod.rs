@@ -1,5 +1,7 @@
 //! Curated read-only Mist MCP handler.
 
+mod wan;
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use mecmcp_auth::CallerCtx;
@@ -38,6 +40,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "get_mist_self",
     "get_mist_site",
     "get_mist_sle",
+    "get_mist_wan_edge_stats",
     "invoke_mist_privileged_read",
     "invoke_mist_read",
     "list_mist_orgs",
@@ -45,13 +48,18 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "list_mist_sites",
     "list_mist_sle_metrics",
     "list_mist_upgrades",
+    "list_mist_wan_edges",
     "list_mist_wlans",
     "search_mist_alarms",
     "search_mist_audit_logs",
+    "search_mist_bgp_peers",
     "search_mist_clients",
     "search_mist_events",
     "search_mist_inventory",
     "search_mist_operations",
+    "search_mist_peer_paths",
+    "search_mist_service_path_events",
+    "search_mist_tunnels",
     "troubleshoot_mist",
 ];
 
@@ -665,6 +673,8 @@ enum MistCallError {
     InvalidLimit,
     #[error("catalog search requires a 1-128 byte query and a result limit from 1 through 50")]
     InvalidSearch,
+    #[error("exactly one of org_id or site_id is required")]
+    AmbiguousScope,
     #[error(transparent)]
     Mist(#[from] MistError),
 }
@@ -870,6 +880,26 @@ impl From<SearchTarget> for TargetSelector {
     }
 }
 
+/// Whether a stats tool returns records or a count distribution.
+#[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum StatsModeArg {
+    /// Return matching records.
+    #[default]
+    Records,
+    /// Return a count distribution. The response shape differs from records.
+    Count,
+}
+
+impl From<StatsModeArg> for wan::StatsMode {
+    fn from(value: StatsModeArg) -> Self {
+        match value {
+            StatsModeArg::Records => Self::Records,
+            StatsModeArg::Count => Self::Count,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SearchOperationsArgs {
@@ -991,6 +1021,104 @@ read_args!(RogueArgs {
     #[serde(rename = "type")] r#type: Option<String>,
 });
 read_args!(UpgradeArgs { site_id: String, status: Option<String> });
+
+/// The device type this tool is permitted to enumerate.
+fn gateway_device_type() -> String {
+    "gateway".to_owned()
+}
+
+read_args!(WanEdgeListArgs {
+    /// Organization UUID. Mutually exclusive with `site_id`.
+    org_id: Option<String>,
+    /// Site UUID. Mutually exclusive with `org_id`.
+    site_id: Option<String>,
+    #[schemars(range(min = 1, max = 100))]
+    limit: Option<u32>,
+    search_after: Option<String>,
+    hostname: Option<String>,
+    mac: Option<String>,
+    model: Option<String>,
+    version: Option<String>,
+    /// Always `gateway`. Not caller-settable: this tool must not enumerate
+    /// APs or switches.
+    #[serde(rename = "type", skip_deserializing, default = "gateway_device_type")]
+    #[schemars(skip)]
+    r#type: String,
+});
+
+read_args!(WanEdgeStatsArgs {
+    /// Site UUID.
+    site_id: String,
+    /// Gateway device UUID. When present, returns per-device insight metrics.
+    device_id: Option<String>,
+    /// Metrics to retrieve. Required when `device_id` is present.
+    metrics: Option<String>,
+    start: Option<u64>,
+    end: Option<u64>,
+    duration: Option<String>,
+});
+
+read_args!(TunnelSearchArgs {
+    /// Organization UUID.
+    org_id: String,
+    /// Records or count distribution. Not sent to Mist.
+    #[serde(default, skip_serializing)]
+    mode: StatsModeArg,
+    #[schemars(range(min = 1, max = 100))]
+    limit: Option<u32>,
+    search_after: Option<String>,
+    start: Option<u64>,
+    end: Option<u64>,
+    duration: Option<String>,
+    distinct: Option<String>,
+});
+
+read_args!(PeerPathSearchArgs {
+    /// Organization UUID.
+    org_id: String,
+    /// Records or count distribution. Not sent to Mist.
+    #[serde(default, skip_serializing)]
+    mode: StatsModeArg,
+    #[schemars(range(min = 1, max = 100))]
+    limit: Option<u32>,
+    search_after: Option<String>,
+    start: Option<u64>,
+    end: Option<u64>,
+    duration: Option<String>,
+    distinct: Option<String>,
+});
+
+read_args!(BgpPeerSearchArgs {
+    /// Organization UUID. Mutually exclusive with `site_id`.
+    org_id: Option<String>,
+    /// Site UUID. Mutually exclusive with `org_id`.
+    site_id: Option<String>,
+    /// Records or count distribution. Not sent to Mist.
+    #[serde(default, skip_serializing)]
+    mode: StatsModeArg,
+    #[schemars(range(min = 1, max = 100))]
+    limit: Option<u32>,
+    search_after: Option<String>,
+    start: Option<u64>,
+    end: Option<u64>,
+    duration: Option<String>,
+    distinct: Option<String>,
+});
+
+read_args!(ServicePathEventArgs {
+    /// Site UUID.
+    site_id: String,
+    /// Records or count distribution. Not sent to Mist.
+    #[serde(default, skip_serializing)]
+    mode: StatsModeArg,
+    #[schemars(range(min = 1, max = 100))]
+    limit: Option<u32>,
+    search_after: Option<String>,
+    start: Option<u64>,
+    end: Option<u64>,
+    duration: Option<String>,
+    distinct: Option<String>,
+});
 
 #[tool_router(router = mist_tool_router, vis = "pub(crate)")]
 impl MistHandler {
@@ -1188,6 +1316,27 @@ impl MistHandler {
             .await)
     }
     #[tool(
+        name = "get_mist_wan_edge_stats",
+        description = "Get WAN edge gateway metrics for a site, or insight metrics for one gateway."
+    )]
+    async fn get_mist_wan_edge_stats(
+        &self,
+        Parameters(args): Parameters<WanEdgeStatsArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let resolved = wan::wan_edge_stats(args.device_id.is_some());
+        Ok(self
+            .dispatch_named(
+                "get_mist_wan_edge_stats",
+                resolved.operation_id,
+                args,
+                resolved.path_names,
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
         name = "invoke_mist_privileged_read",
         description = "Invoke one privileged read selected only by catalog operation ID."
     )]
@@ -1344,6 +1493,37 @@ impl MistHandler {
             .await)
     }
     #[tool(
+        name = "list_mist_wan_edges",
+        description = "List WAN edge gateways (SRX/SSR) in an organization or site."
+    )]
+    async fn list_mist_wan_edges(
+        &self,
+        Parameters(args): Parameters<WanEdgeListArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = match wan::resolve_scope(args.org_id.as_deref(), args.site_id.as_deref()) {
+            Ok(scope) => scope,
+            Err(_) => {
+                return Ok(tool_result::<ReadEnvelope, _>(
+                    Err(MistCallError::AmbiguousScope),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        };
+        let resolved = wan::wan_edges(scope);
+        Ok(self
+            .dispatch_named(
+                "list_mist_wan_edges",
+                resolved.operation_id,
+                args,
+                resolved.path_names,
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
         name = "list_mist_wlans",
         description = "List privileged site WLAN configuration."
     )]
@@ -1396,6 +1576,37 @@ impl MistHandler {
                 args,
                 &["org_id"],
                 MistCapability::PrivilegedRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "search_mist_bgp_peers",
+        description = "Search WAN edge BGP peer stats in an organization or site, or count them."
+    )]
+    async fn search_mist_bgp_peers(
+        &self,
+        Parameters(args): Parameters<BgpPeerSearchArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = match wan::resolve_scope(args.org_id.as_deref(), args.site_id.as_deref()) {
+            Ok(scope) => scope,
+            Err(_) => {
+                return Ok(tool_result::<ReadEnvelope, _>(
+                    Err(MistCallError::AmbiguousScope),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        };
+        let resolved = wan::bgp_peers(scope, args.mode.into());
+        Ok(self
+            .dispatch_named(
+                "search_mist_bgp_peers",
+                resolved.operation_id,
+                args,
+                resolved.path_names,
+                MistCapability::OrdinaryRead,
                 &extensions,
             )
             .await)
@@ -1526,6 +1737,69 @@ impl MistHandler {
             &mut audit,
             Ok::<_, MistCallError>(matches),
         ))
+    }
+    #[tool(
+        name = "search_mist_peer_paths",
+        description = "Search SD-WAN overlay peer path stats, or count them by a distinct field."
+    )]
+    async fn search_mist_peer_paths(
+        &self,
+        Parameters(args): Parameters<PeerPathSearchArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let resolved = wan::peer_paths(args.mode.into());
+        Ok(self
+            .dispatch_named(
+                "search_mist_peer_paths",
+                resolved.operation_id,
+                args,
+                resolved.path_names,
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "search_mist_service_path_events",
+        description = "Search WAN edge service path events for a site, or count them."
+    )]
+    async fn search_mist_service_path_events(
+        &self,
+        Parameters(args): Parameters<ServicePathEventArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let resolved = wan::service_path_events(args.mode.into());
+        Ok(self
+            .dispatch_named(
+                "search_mist_service_path_events",
+                resolved.operation_id,
+                args,
+                resolved.path_names,
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "search_mist_tunnels",
+        description = "Search WAN edge IPsec tunnel stats, or count them by a distinct field."
+    )]
+    async fn search_mist_tunnels(
+        &self,
+        Parameters(args): Parameters<TunnelSearchArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let resolved = wan::tunnels(args.mode.into());
+        Ok(self
+            .dispatch_named(
+                "search_mist_tunnels",
+                resolved.operation_id,
+                args,
+                resolved.path_names,
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
     }
     #[tool(
         name = "troubleshoot_mist",
