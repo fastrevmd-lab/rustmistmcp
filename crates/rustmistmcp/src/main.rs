@@ -111,6 +111,7 @@ async fn main() -> Result<()> {
                 mecmcp_transport::LimitsConfig::default(),
                 false,
                 tls,
+                args.allow_insecure_bind,
                 shutdown,
                 shutdown_timeout,
             )
