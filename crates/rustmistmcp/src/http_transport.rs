@@ -3,8 +3,8 @@
 use mecmcp_auth::{BearerSyntax, CallerCtx, TokenStoreFile};
 use mecmcp_transport::{
     BearerAuthenticator, BearerBoundary, BearerResponseProfile, CallerScopes, HostOriginPolicy,
-    HttpServeError, HttpTransportBuildError, HttpTransportConfig, LimitsConfig,
-    NoAuthAcknowledgement, ScopePreflight, ServePlan, TransportIdentity,
+    HttpServeError, HttpTransportBuildError, HttpTransportConfig, InsecureBindAcknowledgement,
+    LimitsConfig, NoAuthAcknowledgement, ScopePreflight, ServePlan, TransportIdentity,
     build_streamable_http_router, serve_router,
 };
 use rustmistmcp_core::{MistGrant, MistTarget};
@@ -146,6 +146,7 @@ impl ScopePreflight for MistScopePreflight {
 /// # Errors
 ///
 /// Returns an error when shared HTTP limits or router composition are invalid.
+#[allow(clippy::too_many_arguments)]
 pub fn build_http_router(
     handler: MistHandler,
     auth_config: AuthConfig,
@@ -153,6 +154,7 @@ pub fn build_http_router(
     allowed_origins: Vec<String>,
     limits: LimitsConfig,
     enable_metrics: bool,
+    allow_insecure_bind: bool,
     shutdown: CancellationToken,
 ) -> Result<ServePlan, HttpTransportBuildError> {
     let identity =
@@ -182,6 +184,16 @@ pub fn build_http_router(
         ),
     }
     .with_metrics(enable_metrics);
+
+    // Carry --allow-insecure-bind through to the transport. Parsing a flag and
+    // never converting it is the defect class mecmcp#273 exists to close, and
+    // it took the sibling Junos server's production host down when exactly this
+    // wiring was missing there.
+    let config = if allow_insecure_bind {
+        config.with_insecure_bind(InsecureBindAcknowledgement::operator_allowed_insecure_bind())
+    } else {
+        config
+    };
 
     build_streamable_http_router(move || Ok::<_, std::io::Error>(handler.clone()), config)
 }
@@ -219,6 +231,7 @@ pub async fn serve_http(
     limits: LimitsConfig,
     enable_metrics: bool,
     tls: Option<Arc<rustls::ServerConfig>>,
+    allow_insecure_bind: bool,
     shutdown: CancellationToken,
     shutdown_timeout: std::time::Duration,
 ) -> Result<(), HttpServeError> {
@@ -229,6 +242,7 @@ pub async fn serve_http(
         allowed_origins,
         limits,
         enable_metrics,
+        allow_insecure_bind,
         shutdown,
     )
     .map_err(|error| HttpServeError::Serve {

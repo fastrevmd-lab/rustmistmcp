@@ -123,6 +123,7 @@ async fn tool_call_reaches_http_client_and_sends_correct_auth_header() {
         vec![],
         mecmcp_transport::LimitsConfig::default(),
         false,
+        false, // allow_insecure_bind: tests bind loopback, which is exempt
         shutdown,
     )
     .expect("build router");
@@ -274,6 +275,7 @@ async fn blocked_client_still_available_for_no_credential_mode() {
         vec![],
         mecmcp_transport::LimitsConfig::default(),
         false,
+        false, // allow_insecure_bind: tests bind loopback, which is exempt
         shutdown,
     )
     .expect("build router");

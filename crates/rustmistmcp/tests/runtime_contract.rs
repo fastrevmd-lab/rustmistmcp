@@ -437,6 +437,7 @@ async fn authenticated_router_uses_strict_bearer_syntax_and_scope_preflight() {
         Vec::new(),
         LimitsConfig::default(),
         false,
+        false, // allow_insecure_bind: tests bind loopback, which is exempt
         shutdown,
     )
     .expect("HTTP router");
@@ -541,6 +542,7 @@ async fn unauthenticated_loopback_http_exposes_only_ordinary_tools_and_denies_re
         Vec::new(),
         LimitsConfig::default(),
         false,
+        false, // allow_insecure_bind: tests bind loopback, which is exempt
         shutdown,
     )
     .expect("HTTP router");
@@ -1078,5 +1080,80 @@ fn binary_reports_its_own_name_and_version() {
         reported.contains(env!("CARGO_PKG_VERSION")),
         "--version must report {}, got {reported:?}",
         env!("CARGO_PKG_VERSION")
+    );
+}
+
+/// `--allow-insecure-bind` must reach the transport.
+///
+/// Regression test for the wiring gap that took the sibling Junos server's
+/// production host (LXC 950) down during its 0.20.0 upgrade: the flag was
+/// parsed and shown in `--help`, but never converted into an
+/// `InsecureBindAcknowledgement`, so mecmcp 0.9.x refused a plaintext
+/// off-loopback listener the operator had explicitly asked for.
+///
+/// Latent in this server — every deployment binds loopback, which is exempt
+/// from all four admission checks — so only a test keeps it fixed.
+///
+/// Three properties make this prove something, each learned by getting the
+/// equivalent test wrong first in the sibling repos:
+///   * an AUTHENTICATED store, because `UnauthenticatedOffLoopback` is checked
+///     before the insecure-bind branch and would otherwise mask it entirely;
+///   * a NON-loopback address, because loopback short-circuits every check;
+///   * an assertion on `InsecureBindNotAcknowledged` specifically rather than
+///     on `Refused` in general.
+///
+/// Verified by sabotage: remove the conversion in `build_http_router` and this
+/// fails; restore it and it passes.
+#[tokio::test]
+async fn insecure_bind_acknowledgement_reaches_the_transport() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("tokens.json");
+    let known = KnownNames {
+        devices: None,
+        tools: KNOWN_TOOLS,
+    };
+    TokenStoreFile::<MistGrant>::add(
+        &path,
+        "operator",
+        ScopeSet::Allowlist(vec![format!("org/{ORG_ID}")]),
+        ScopeSet::Allowlist(vec!["get_mist_org".to_owned()]),
+        &known,
+    )
+    .expect("token");
+    let store = Arc::new(TokenStoreFile::<MistGrant>::load(&path).expect("token store"));
+    let shutdown = tokio_util::sync::CancellationToken::new();
+
+    let plan = build_http_router(
+        handler(),
+        AuthConfig::Authenticated(store),
+        Vec::new(),
+        Vec::new(),
+        LimitsConfig::default(),
+        false,
+        true, // allow_insecure_bind — the flag under test
+        shutdown.clone(),
+    )
+    .expect("router");
+
+    // 192.0.2.1 is TEST-NET-1: non-loopback and unbindable here. A refusal means
+    // the acknowledgement never arrived; a bind failure means it did.
+    let error = mecmcp_transport::serve_router(
+        plan,
+        "192.0.2.1:30030".parse().expect("address"),
+        None,
+        std::time::Duration::from_millis(50),
+    )
+    .await
+    .expect_err("TEST-NET-1 cannot be bound");
+
+    assert!(
+        !matches!(
+            error,
+            mecmcp_transport::HttpServeError::Refused(
+                mecmcp_transport::ListenerRefusal::InsecureBindNotAcknowledged { .. }
+            )
+        ),
+        "refused for want of an insecure-bind acknowledgement despite \
+         allow_insecure_bind = true, so the flag never reached the transport: {error:?}"
     );
 }
