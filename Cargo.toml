@@ -49,20 +49,20 @@ zeroize = "1"
 
 # Every shared crate is pinned to one immutable tag so extension TypeIds
 # cannot diverge across the server process. The family standardises on tags
-# at v0.9.1.
+# at v0.10.0.
 # mecmcp#91 (target-neutral auth scope vocabulary) is the remaining open
 # prerequisite; it is why the shared CLI still spells the profile flag
 # `--device-mapping`.
-mecmcp-audit = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
-mecmcp-auth = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
-mecmcp-changeset = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
-mecmcp-http = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
-mecmcp-inventory = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
-mecmcp-job = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
-mecmcp-runtime = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
-mecmcp-secret = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
-mecmcp-server = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
-mecmcp-transport = { version = "0.9.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.1" }
+mecmcp-audit = { version = "0.10.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.10.0" }
+mecmcp-auth = { version = "0.10.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.10.0" }
+mecmcp-changeset = { version = "0.10.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.10.0" }
+mecmcp-http = { version = "0.10.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.10.0" }
+mecmcp-inventory = { version = "0.10.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.10.0" }
+mecmcp-job = { version = "0.10.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.10.0" }
+mecmcp-runtime = { version = "0.10.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.10.0" }
+mecmcp-secret = { version = "0.10.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.10.0" }
+mecmcp-server = { version = "0.10.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.10.0" }
+mecmcp-transport = { version = "0.10.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.10.0" }
 
 [profile.release]
 lto = "thin"
