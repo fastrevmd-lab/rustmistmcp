@@ -418,3 +418,119 @@ async fn apply_refuses_an_unapproved_change_set() {
         "no write may be issued for an unapproved change set"
     );
 }
+
+/// Lab mode approves on creation, and says so in a way an auditor can read.
+///
+/// `approver: null` on its own is ambiguous — it looks the same as a change set
+/// nobody has approved yet. mecmcp's packaging standard requires the waiver to
+/// be visible alongside it, so this asserts both.
+#[tokio::test]
+async fn lab_mode_approves_on_creation_without_inventing_an_approver() {
+    let recorder = Arc::new(ScriptedClient::new(serde_json::json!({
+        "id": NETWORK_ID, "name": "branch", "vlan_id": 10
+    })));
+    let handler = MistHandler::with_client_options(
+        "https://api.mist.com/",
+        vec![ORG_ID.to_owned()],
+        site_map(),
+        recorder,
+        None,
+        true,
+    )
+    .expect("handler");
+
+    let planned = call(
+        handler.clone(),
+        "plan_mist_change",
+        serde_json::json!({
+            "object": "network", "verb": "update", "org_id": ORG_ID,
+            "object_id": NETWORK_ID, "patch": {"vlan_id": 20}
+        }),
+    )
+    .await
+    .expect("plan");
+    let id = planned["change_set_id"].as_str().expect("id").to_owned();
+
+    let fetched = call(
+        handler,
+        "get_mist_change_set",
+        serde_json::json!({"change_set_id": id, "object": "network", "object_id": NETWORK_ID}),
+    )
+    .await
+    .expect("get");
+
+    assert_eq!(
+        fetched["state"], "approved",
+        "lab mode approves on creation"
+    );
+    assert_eq!(
+        fetched["approver"],
+        serde_json::Value::Null,
+        "lab mode must never fabricate an approver"
+    );
+    assert_eq!(
+        fetched["approval_waiver"], "lab-mode",
+        "the waiver must be visible, or approver:null is indistinguishable from unapproved"
+    );
+}
+
+/// The waiver mecmcp writes must still validate after a save and reload.
+///
+/// This is what catches a hand-rolled or wrong-schema waiver digest: `read_state`
+/// re-verifies every approval digest, so a record built outside the library
+/// fails here even though it looked right in memory.
+#[tokio::test]
+async fn a_lab_mode_waiver_survives_a_state_reload() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_path = dir.path().join("changeset-state.json");
+
+    let recorder = Arc::new(ScriptedClient::new(serde_json::json!({
+        "id": NETWORK_ID, "name": "branch", "vlan_id": 10
+    })));
+    let handler = MistHandler::with_client_options(
+        "https://api.mist.com/",
+        vec![ORG_ID.to_owned()],
+        site_map(),
+        recorder,
+        Some(state_path.as_path()),
+        true,
+    )
+    .expect("handler");
+
+    let planned = call(
+        handler,
+        "plan_mist_change",
+        serde_json::json!({
+            "object": "network", "verb": "update", "org_id": ORG_ID,
+            "object_id": NETWORK_ID, "patch": {"vlan_id": 20}
+        }),
+    )
+    .await
+    .expect("plan");
+    let id = planned["change_set_id"].as_str().expect("id").to_owned();
+
+    // A second handler over the same file re-reads and re-validates every
+    // approval digest on the way in.
+    let reopened = Arc::new(ScriptedClient::new(serde_json::json!({
+        "id": NETWORK_ID, "name": "branch", "vlan_id": 10
+    })));
+    let reloaded = MistHandler::with_client_options(
+        "https://api.mist.com/",
+        vec![ORG_ID.to_owned()],
+        site_map(),
+        reopened,
+        Some(state_path.as_path()),
+        true,
+    )
+    .expect("the persisted lab-mode waiver must still validate on reload");
+
+    let fetched = call(
+        reloaded,
+        "get_mist_change_set",
+        serde_json::json!({"change_set_id": id, "object": "network", "object_id": NETWORK_ID}),
+    )
+    .await
+    .expect("get after reload");
+    assert_eq!(fetched["approval_waiver"], "lab-mode");
+    assert_eq!(fetched["approver"], serde_json::Value::Null);
+}

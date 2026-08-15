@@ -328,6 +328,23 @@ impl MistHandler {
         sites: BTreeMap<String, String>,
         client: Arc<dyn MistClient>,
     ) -> Result<Self, MistServerError> {
+        Self::with_client_options(endpoint, allowed_orgs, sites, client, None, false)
+    }
+
+    /// Same as [`Self::with_client`], but lets a caller pick the change-set
+    /// state file and enable lab mode.
+    ///
+    /// Exists so tests can exercise the `--lab-mode` waive path and prove the
+    /// resulting record survives a save/reload cycle. `state_path` of `None`
+    /// keeps state in memory, which is what most tests want.
+    pub fn with_client_options(
+        endpoint: &str,
+        allowed_orgs: Vec<String>,
+        sites: BTreeMap<String, String>,
+        client: Arc<dyn MistClient>,
+        state_path: Option<&std::path::Path>,
+        lab_mode: bool,
+    ) -> Result<Self, MistServerError> {
         let origin =
             validate_mist_endpoint(endpoint).map_err(|_| MistServerError::InvalidEndpoint)?;
         if allowed_orgs.is_empty()
@@ -358,8 +375,8 @@ impl MistHandler {
             sites: Arc::new(sites),
             catalog: Arc::new(Catalog::embedded()?),
             client,
-            coordinator: load_coordinator(None, false)?,
-            lab_mode: false,
+            coordinator: load_coordinator(state_path, lab_mode)?,
+            lab_mode,
             tool_router: Self::mist_tool_router(),
         })
     }
@@ -2503,11 +2520,22 @@ impl MistHandler {
             (serde_json::Value::Null, serde_json::Value::Null)
         };
 
+        // `approver: null` alone does not tell an operator whether a second
+        // person reviewed this or whether lab mode waived the requirement.
+        // mecmcp's packaging standard requires both fields, so surface the
+        // waiver reason alongside the (absent) approver.
+        let approval_waiver = record
+            .approval
+            .as_ref()
+            .and_then(|approval| approval.waived.as_ref())
+            .map(|waiver| waiver.reason.clone());
+
         let response = serde_json::json!({
             "change_set_id": record.id,
             "state": record.state.as_str(),
             "owner": record.owner,
             "approver": record.approver,
+            "approval_waiver": approval_waiver,
             "plan_digest": record.digest,
             "before": before,
             "after": after,
