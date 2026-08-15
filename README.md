@@ -305,3 +305,51 @@ targets SRX/SSR gateways and their overlay connectivity. See `KNOWN_TOOLS` in
 ## License
 
 Licensed under [MIT](LICENSE).
+
+## `--lab-mode`
+
+`--lab-mode` waives the second principal, for a single-operator lab where two-person control is theatre rather than a control. **It is off by default and should stay off anywhere the estate matters.**
+
+What it does and does not change:
+
+- The waiver is applied automatically when the change set is created. There is no waive tool, and the flow stays prepare → apply, identical to production.
+- Planning, the plan digest, drift detection, and apply-time revalidation all still run. Lab mode removes the *second reviewer*, not the change record.
+- **No approver is ever fabricated.** A waived change set records `approver: null` in the approval record alongside `waived: { reason: "lab-mode" }`. It is cryptographically distinguishable from a genuine two-person approval and cannot be relabelled afterwards — which matters if anyone later has to prove which changes had real separation of duties.
+- The server warns loudly at startup whenever it is enabled.
+
+If you want solo write-testing *without* waiving the control, mint two tokens with different names and use one to prepare and the other to approve: the principal is the token name, and self-approval is refused. That gives one person the complete lifecycle with the control intact, and is the better choice wherever the ceremony has any value.
+
+### Enabling it
+
+Add the flag to the service unit. On a package install, use a drop-in rather than editing the shipped unit, so an upgrade does not silently drop it:
+
+```console
+sudo systemctl edit rustmistmcp
+```
+
+Replacing `ExecStart` means restating it in full, so **copy the shipped command and append the flag** rather than writing a shorter one:
+
+```ini
+[Service]
+# Clear the shipped ExecStart before replacing it; systemd appends otherwise.
+ExecStart=
+ExecStart=/usr/local/bin/rustmistmcp \
+    --device-mapping /path/to/mist-profile.json \
+    --transport streamable-http \
+    --host 127.0.0.1 \
+    --port 30030 \
+    --tokens-file /path/to/tokens.json \
+    --lab-mode
+```
+
+```console
+sudo systemctl daemon-reload && sudo systemctl restart rustmistmcp
+```
+
+Confirm it took effect by checking the audit log for the startup warning:
+
+```console
+sudo journalctl -u rustmistmcp --since "1 minute ago" | grep -i "lab mode"
+```
+
+You should see: `lab mode enabled: change sets are approved on creation with no second principal. Records carry approval_waiver=lab-mode. Do not run this against production devices.`

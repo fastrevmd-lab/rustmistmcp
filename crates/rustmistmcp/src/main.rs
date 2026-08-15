@@ -1,8 +1,11 @@
 //! HPE Juniper Mist MCP server executable.
 
+mod cli;
+
 use anyhow::{Context as _, Result};
+use clap::Parser as _;
+use cli::{Command, MistCli, Transport};
 use mecmcp_auth::TokenStoreFile;
-use mecmcp_runtime::cli::{Cli, Command, Transport};
 use rmcp::ServiceExt as _;
 use rustmistmcp::{AuthConfig, KNOWN_TOOLS, MistHandler, install_token_reload_handler, serve_http};
 use rustmistmcp_core::{MistConfig, MistGrant};
@@ -10,14 +13,14 @@ use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // The shared `Cli` carries no version of its own; `parse_for` stamps this
-    // binary's name and version onto it so `--version` answers instead of
-    // exiting 2 (mecmcp#159).
-    let args = mecmcp_runtime::cli::parse_for("rustmistmcp", env!("CARGO_PKG_VERSION"));
-    mecmcp_runtime::cli_validate::validate(&args).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let args = MistCli::parse();
+
+    // Validate the flattened shared CLI
+    mecmcp_runtime::cli_validate::validate(&args.shared)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
     init_audit(&args)?;
 
-    if let Some(Command::Token { action }) = args.command {
+    if let Some(Command::Token { action }) = args.shared.command {
         // Management is deliberately local: it validates against the fixed
         // tool registry and neither loads Mist profile/credential data nor
         // contacts the Mist service.
@@ -28,6 +31,17 @@ async fn main() -> Result<()> {
             None, // No grant for basic token operations
         )
         .map_err(|error| anyhow::anyhow!("{error}"));
+    }
+
+    // Lab mode removes two-person control, so say so where an operator will
+    // actually see it. Reading it off flags typed weeks ago is not visibility.
+    if args.lab_mode {
+        tracing::warn!(
+            target: "audit",
+            "lab mode enabled: change sets are approved on creation with no second \
+             principal. Records carry approval_waiver=lab-mode. Do not run this against \
+             production devices."
+        );
     }
 
     // mecmcp decision D4: the consumer installs the process-global rustls crypto
@@ -44,18 +58,18 @@ async fn main() -> Result<()> {
 
     // The shared CLI retains the historic `device_mapping` spelling. Here it
     // selects the singleton Mist profile until mecmcp#91 lands.
-    let config = MistConfig::from_path(&args.device_mapping)
-        .with_context(|| format!("loading {}", args.device_mapping.display()))?;
+    let config = MistConfig::from_path(&args.shared.device_mapping)
+        .with_context(|| format!("loading {}", args.shared.device_mapping.display()))?;
 
     // Construct real HTTP client when credential is available
-    let handler = MistHandler::from_config(&config, BTreeMap::new())
+    let handler = MistHandler::from_config_with_lab_mode(&config, BTreeMap::new(), args.lab_mode)
         .context("constructing Mist handler with HTTP client")?;
     tracing::info!(
         "Mist handler constructed with HttpMistClient for endpoint {}",
         config.endpoint
     );
 
-    match args.transport {
+    match args.shared.transport {
         Transport::Stdio => serve_stdio(handler).await,
         Transport::StreamableHttp => {
             let auth_config = load_http_token_store(&args)?;
@@ -65,10 +79,11 @@ async fn main() -> Result<()> {
             }
             let tls = load_listener_tls(&args)?;
             let host = args
+                .shared
                 .host
                 .parse::<std::net::IpAddr>()
                 .context("invalid --host IP address")?;
-            let address = SocketAddr::new(host, args.port);
+            let address = SocketAddr::new(host, args.shared.port);
             let shutdown = tokio_util::sync::CancellationToken::new();
 
             // Install signal handlers
@@ -106,12 +121,12 @@ async fn main() -> Result<()> {
                 handler,
                 address,
                 auth_config,
-                args.allowed_host,
-                args.allowed_origin,
+                args.shared.allowed_host,
+                args.shared.allowed_origin,
                 mecmcp_transport::LimitsConfig::default(),
                 false,
                 tls,
-                args.allow_insecure_bind,
+                args.shared.allow_insecure_bind,
                 shutdown,
                 shutdown_timeout,
             )
@@ -121,23 +136,23 @@ async fn main() -> Result<()> {
     }
 }
 
-fn init_audit(args: &Cli) -> Result<()> {
-    let redaction = if args.audit_redact.trim().is_empty() {
+fn init_audit(args: &MistCli) -> Result<()> {
+    let redaction = if args.shared.audit_redact.trim().is_empty() {
         None
     } else {
         Some(
             mecmcp_audit::AuditRedaction::parse(
-                &args.audit_redact,
-                args.audit_hmac_key_file.as_deref(),
+                &args.shared.audit_redact,
+                args.shared.audit_hmac_key_file.as_deref(),
             )
             .map_err(|error| anyhow::anyhow!("invalid --audit-redact: {error}"))?,
         )
     };
     mecmcp_audit::init_tracing(&mecmcp_audit::AuditConfig {
-        format: mecmcp_audit::AuditFormat::parse(&args.audit_format),
-        audit_log_file: args.audit_log_file.clone(),
+        format: mecmcp_audit::AuditFormat::parse(&args.shared.audit_format),
+        audit_log_file: args.shared.audit_log_file.clone(),
         redaction,
-        journald: args.audit_journald,
+        journald: args.shared.audit_journald,
     })
     .context("initializing audit tracing")?;
     mecmcp_audit::install_duration_metric_name("rustmistmcp_tool_duration_seconds");
@@ -156,8 +171,8 @@ async fn serve_stdio(handler: MistHandler) -> Result<()> {
         .context("MCP stdio service exited with error")
 }
 
-fn load_http_token_store(args: &Cli) -> Result<AuthConfig> {
-    match (&args.tokens_file, args.allow_no_auth) {
+fn load_http_token_store(args: &MistCli) -> Result<AuthConfig> {
+    match (&args.shared.tokens_file, args.shared.allow_no_auth) {
         (Some(path), _) => {
             let store = Arc::new(
                 TokenStoreFile::<MistGrant>::load(path)
@@ -182,8 +197,8 @@ fn load_http_token_store(args: &Cli) -> Result<AuthConfig> {
     }
 }
 
-fn load_listener_tls(args: &Cli) -> Result<Option<Arc<rustls::ServerConfig>>> {
-    let (Some(cert), Some(key)) = (&args.tls_cert, &args.tls_key) else {
+fn load_listener_tls(args: &MistCli) -> Result<Option<Arc<rustls::ServerConfig>>> {
+    let (Some(cert), Some(key)) = (&args.shared.tls_cert, &args.shared.tls_key) else {
         return Ok(None);
     };
     // The process-global provider is installed in `main`; do not install again —
@@ -206,24 +221,30 @@ mod tests {
     /// unauthenticated.
     #[test]
     fn none_false_refuses_to_serve_unauthenticated() {
-        let args = Cli {
-            transport: Transport::StreamableHttp,
-            host: "127.0.0.1".to_owned(),
-            port: 8080,
-            tokens_file: None,
-            allow_no_auth: false,
-            allowed_host: vec![],
-            allowed_origin: vec![],
-            allow_insecure_bind: false,
-            tls_cert: None,
-            tls_key: None,
-            device_mapping: PathBuf::from("/dev/null"),
-            audit_format: String::new(),
-            audit_redact: String::new(),
-            audit_log_file: None,
-            audit_hmac_key_file: None,
-            audit_journald: false,
-            command: None,
+        let args = MistCli {
+            shared: mecmcp_runtime::cli::Cli {
+                transport: Transport::StreamableHttp,
+                host: "127.0.0.1".to_owned(),
+                port: 8080,
+                tokens_file: None,
+                allow_no_auth: false,
+                allowed_host: vec![],
+                allowed_origin: vec![],
+                allow_insecure_bind: false,
+                tls_cert: None,
+                tls_key: None,
+                device_mapping: PathBuf::from("/dev/null"),
+                audit_format: String::new(),
+                audit_redact: String::new(),
+                audit_log_file: None,
+                audit_hmac_key_file: None,
+                audit_journald: false,
+                command: None,
+            },
+            state_file: PathBuf::from("/dev/null/changeset-state.json"),
+            approval_timeout_secs: 3600,
+            lab_mode: false,
+            web_approver: Default::default(),
         };
 
         let result = load_http_token_store(&args);
@@ -243,24 +264,30 @@ mod tests {
     /// Verify that --allow-no-auth explicitly permits unauthenticated serving.
     #[test]
     fn explicit_no_auth_is_permitted() {
-        let args = Cli {
-            transport: Transport::StreamableHttp,
-            host: "127.0.0.1".to_owned(),
-            port: 8080,
-            tokens_file: None,
-            allow_no_auth: true,
-            allowed_host: vec![],
-            allowed_origin: vec![],
-            allow_insecure_bind: false,
-            tls_cert: None,
-            tls_key: None,
-            device_mapping: PathBuf::from("/dev/null"),
-            audit_format: String::new(),
-            audit_redact: String::new(),
-            audit_log_file: None,
-            audit_hmac_key_file: None,
-            audit_journald: false,
-            command: None,
+        let args = MistCli {
+            shared: mecmcp_runtime::cli::Cli {
+                transport: Transport::StreamableHttp,
+                host: "127.0.0.1".to_owned(),
+                port: 8080,
+                tokens_file: None,
+                allow_no_auth: true,
+                allowed_host: vec![],
+                allowed_origin: vec![],
+                allow_insecure_bind: false,
+                tls_cert: None,
+                tls_key: None,
+                device_mapping: PathBuf::from("/dev/null"),
+                audit_format: String::new(),
+                audit_redact: String::new(),
+                audit_log_file: None,
+                audit_hmac_key_file: None,
+                audit_journald: false,
+                command: None,
+            },
+            state_file: PathBuf::from("/dev/null/changeset-state.json"),
+            approval_timeout_secs: 3600,
+            lab_mode: false,
+            web_approver: Default::default(),
         };
 
         let result = load_http_token_store(&args);
