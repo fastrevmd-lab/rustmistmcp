@@ -169,6 +169,8 @@ pub struct MistHandler {
     /// Change-set lifecycle state for gated writes.
     #[allow(dead_code)]
     coordinator: Arc<mecmcp_changeset::ChangesetCoordinator>,
+    /// Whether lab mode is enabled (auto-waive on creation).
+    lab_mode: bool,
     tool_router: ToolRouter<Self>,
 }
 
@@ -194,12 +196,13 @@ fn change_set_limits() -> mecmcp_changeset::OperationLimits {
 /// `/var/lib/rustmistmcp/changeset-state.json`, the path packaging reserves.
 fn load_coordinator(
     path: Option<&std::path::Path>,
+    lab_mode: bool,
 ) -> Result<Arc<mecmcp_changeset::ChangesetCoordinator>, MistServerError> {
     let coordinator = mecmcp_changeset::ChangesetCoordinator::load(
         path,
         change_set_limits(),
         std::time::Duration::from_secs(3600),
-        false,
+        lab_mode,
     )
     .map_err(|error| MistServerError::ChangeSetState(error.to_string()))?;
     Ok(Arc::new(coordinator))
@@ -239,6 +242,23 @@ impl MistHandler {
         config: &rustmistmcp_core::MistConfig,
         sites: BTreeMap<String, String>,
     ) -> Result<Self, MistServerError> {
+        Self::from_config_with_lab_mode(config, sites, false)
+    }
+
+    /// Construct a production handler with optional lab mode.
+    ///
+    /// When `lab_mode` is true, change sets are waived on creation with no
+    /// second-principal approval required.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors for invalid config, credential load failure, or client
+    /// construction failure.
+    pub fn from_config_with_lab_mode(
+        config: &rustmistmcp_core::MistConfig,
+        sites: BTreeMap<String, String>,
+        lab_mode: bool,
+    ) -> Result<Self, MistServerError> {
         // Load credential using mecmcp-secret (enforces mode 0600)
         let credential = mecmcp_secret::load_from_file(
             &config.credential_file,
@@ -257,9 +277,12 @@ impl MistHandler {
         .map_err(|error| MistServerError::ClientConstruction(error.to_string()))?;
 
         // Load change-set coordinator with production path
-        let coordinator = load_coordinator(Some(std::path::Path::new(
-            "/var/lib/rustmistmcp/changeset-state.json",
-        )))?;
+        let coordinator = load_coordinator(
+            Some(std::path::Path::new(
+                "/var/lib/rustmistmcp/changeset-state.json",
+            )),
+            lab_mode,
+        )?;
 
         let origin = validate_mist_endpoint(&config.endpoint)
             .map_err(|_| MistServerError::InvalidEndpoint)?;
@@ -293,6 +316,7 @@ impl MistHandler {
             catalog,
             client: Arc::new(http_client),
             coordinator,
+            lab_mode,
             tool_router: Self::mist_tool_router(),
         })
     }
@@ -334,7 +358,8 @@ impl MistHandler {
             sites: Arc::new(sites),
             catalog: Arc::new(Catalog::embedded()?),
             client,
-            coordinator: load_coordinator(None)?,
+            coordinator: load_coordinator(None, false)?,
+            lab_mode: false,
             tool_router: Self::mist_tool_router(),
         })
     }
@@ -2349,7 +2374,7 @@ impl MistHandler {
 
         let staged = match change_set::stage_plan(
             &self.coordinator,
-            owner,
+            owner.clone(),
             object,
             args.object_id.as_deref(),
             args.org_id.clone(),
@@ -2368,6 +2393,28 @@ impl MistHandler {
                 ));
             }
         };
+
+        // Auto-waive if lab mode is enabled
+        if self.lab_mode {
+            let device = change_set::object_key(object, args.object_id.as_deref());
+            if let Err(error) = self
+                .coordinator
+                .waive_approval(
+                    staged.change_set_id.clone(),
+                    device,
+                    owner.clone(),
+                    staged.plan_digest.clone(),
+                )
+                .await
+            {
+                audit.fail(format!("lab mode waive failed: {error}"));
+                return Ok(tool_result::<serde_json::Value, _>(
+                    Err::<serde_json::Value, _>(format!("lab mode waive failed: {error}")),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        }
 
         let response = if before.is_null() {
             serde_json::json!({

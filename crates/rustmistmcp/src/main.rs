@@ -1,8 +1,11 @@
 //! HPE Juniper Mist MCP server executable.
 
+mod cli;
+
 use anyhow::{Context as _, Result};
+use clap::Parser as _;
+use cli::{Cli, Command, Transport};
 use mecmcp_auth::TokenStoreFile;
-use mecmcp_runtime::cli::{Cli, Command, Transport};
 use rmcp::ServiceExt as _;
 use rustmistmcp::{AuthConfig, KNOWN_TOOLS, MistHandler, install_token_reload_handler, serve_http};
 use rustmistmcp_core::{MistConfig, MistGrant};
@@ -10,24 +13,115 @@ use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // The shared `Cli` carries no version of its own; `parse_for` stamps this
-    // binary's name and version onto it so `--version` answers instead of
-    // exiting 2 (mecmcp#159).
-    let args = mecmcp_runtime::cli::parse_for("rustmistmcp", env!("CARGO_PKG_VERSION"));
-    mecmcp_runtime::cli_validate::validate(&args).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let args = Cli::parse();
+
+    // Convert to shared CLI for validation
+    let shared_cli = mecmcp_runtime::cli::Cli {
+        command: None, // Not checked by validate
+        device_mapping: args.device_mapping.clone(),
+        transport: args.transport,
+        host: args.host.clone(),
+        port: args.port,
+        tokens_file: args.tokens_file.clone(),
+        tls_cert: args.tls_cert.clone(),
+        tls_key: args.tls_key.clone(),
+        allow_no_auth: args.allow_no_auth,
+        allow_insecure_bind: args.allow_insecure_bind,
+        allowed_host: args.allowed_host.clone(),
+        allowed_origin: args.allowed_origin.clone(),
+        audit_format: args.audit_format.clone(),
+        audit_log_file: args.audit_log_file.clone(),
+        audit_journald: args.audit_journald,
+        audit_redact: args.audit_redact.clone(),
+        audit_hmac_key_file: args.audit_hmac_key_file.clone(),
+    };
+    mecmcp_runtime::cli_validate::validate(&shared_cli)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
     init_audit(&args)?;
 
     if let Some(Command::Token { action }) = args.command {
         // Management is deliberately local: it validates against the fixed
         // tool registry and neither loads Mist profile/credential data nor
         // contacts the Mist service.
+        //
+        // Convert our CLI's TokenAction to the runtime's version for the handler.
+        let runtime_action = match action {
+            cli::TokenAction::Add {
+                tokens_file,
+                name,
+                devices,
+                tools,
+                provider,
+                provider_tier,
+                on_behalf_of,
+                actor_type,
+                server_pid,
+            } => mecmcp_runtime::cli::TokenAction::Add {
+                tokens_file,
+                name,
+                devices,
+                tools,
+                provider,
+                provider_tier,
+                on_behalf_of,
+                actor_type,
+                server_pid,
+            },
+            cli::TokenAction::SetScopes {
+                tokens_file,
+                name,
+                devices,
+                tools,
+                yes,
+                server_pid,
+            } => mecmcp_runtime::cli::TokenAction::SetScopes {
+                tokens_file,
+                name,
+                devices,
+                tools,
+                yes,
+                server_pid,
+            },
+            cli::TokenAction::List { tokens_file } => {
+                mecmcp_runtime::cli::TokenAction::List { tokens_file }
+            }
+            cli::TokenAction::Revoke {
+                tokens_file,
+                name,
+                server_pid,
+            } => mecmcp_runtime::cli::TokenAction::Revoke {
+                tokens_file,
+                name,
+                server_pid,
+            },
+            cli::TokenAction::Rotate {
+                tokens_file,
+                name,
+                server_pid,
+            } => mecmcp_runtime::cli::TokenAction::Rotate {
+                tokens_file,
+                name,
+                server_pid,
+            },
+        };
         return mecmcp_runtime::token_cmd::run_with_grant::<MistGrant>(
-            action,
+            runtime_action,
             &[], // No known devices - Mist uses org/site targets
             KNOWN_TOOLS,
             None, // No grant for basic token operations
         )
         .map_err(|error| anyhow::anyhow!("{error}"));
+    }
+
+    // Lab mode removes two-person control, so say so where an operator will
+    // actually see it. Reading it off flags typed weeks ago is not visibility.
+    if args.lab_mode {
+        tracing::warn!(
+            target: "audit",
+            "lab mode enabled: change sets are approved on creation with no second \
+             principal. Records carry approval_waiver=lab-mode. Do not run this against \
+             production devices."
+        );
     }
 
     // mecmcp decision D4: the consumer installs the process-global rustls crypto
@@ -48,7 +142,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("loading {}", args.device_mapping.display()))?;
 
     // Construct real HTTP client when credential is available
-    let handler = MistHandler::from_config(&config, BTreeMap::new())
+    let handler = MistHandler::from_config_with_lab_mode(&config, BTreeMap::new(), args.lab_mode)
         .context("constructing Mist handler with HTTP client")?;
     tracing::info!(
         "Mist handler constructed with HttpMistClient for endpoint {}",
@@ -224,6 +318,10 @@ mod tests {
             audit_hmac_key_file: None,
             audit_journald: false,
             command: None,
+            state_file: PathBuf::from("/dev/null/changeset-state.json"),
+            approval_timeout_secs: 3600,
+            lab_mode: false,
+            web_approver: Default::default(),
         };
 
         let result = load_http_token_store(&args);
@@ -261,6 +359,10 @@ mod tests {
             audit_hmac_key_file: None,
             audit_journald: false,
             command: None,
+            state_file: PathBuf::from("/dev/null/changeset-state.json"),
+            approval_timeout_secs: 3600,
+            lab_mode: false,
+            web_approver: Default::default(),
         };
 
         let result = load_http_token_store(&args);
