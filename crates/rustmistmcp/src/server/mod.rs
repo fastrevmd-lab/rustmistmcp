@@ -3268,6 +3268,8 @@ mod tests {
             on_behalf_of: None,
             actor_type: ActorType::Human,
             client_name: None,
+            model_id: None,
+            session_id: None,
         }
     }
 
@@ -3323,6 +3325,8 @@ mod tests {
             on_behalf_of: None,
             actor_type: ActorType::Human,
             client_name: None,
+            model_id: None,
+            session_id: None,
         };
 
         let result = handler
@@ -3533,6 +3537,8 @@ mod tests {
             on_behalf_of: None,
             actor_type: ActorType::Human,
             client_name: None,
+            model_id: None,
+            session_id: None,
         };
         let result = handler
             .dispatch_catalogued_read(
@@ -3643,6 +3649,8 @@ mod tests {
             on_behalf_of: None,
             actor_type: ActorType::Human,
             client_name: None,
+            model_id: None,
+            session_id: None,
         };
         let visible = filter_tools_for_scope(
             handler.tool_router.list_all(),
@@ -3686,6 +3694,8 @@ mod tests {
             on_behalf_of: None,
             actor_type: ActorType::Human,
             client_name: None,
+            model_id: None,
+            session_id: None,
         };
         assert!(
             handler.operation_visible(Some(&grantless_org), get_org),
@@ -3706,6 +3716,8 @@ mod tests {
             on_behalf_of: None,
             actor_type: ActorType::Human,
             client_name: None,
+            model_id: None,
+            session_id: None,
         };
         assert!(handler.operation_visible(Some(&grantless_site), get_site));
         let missing_dispatcher_scope = CallerCtx {
@@ -3749,6 +3761,8 @@ mod tests {
             on_behalf_of: None,
             actor_type: ActorType::Human,
             client_name: None,
+            model_id: None,
+            session_id: None,
         };
         assert!(handler.operation_visible(Some(&ordinary_wildcard), get_org));
         assert!(
