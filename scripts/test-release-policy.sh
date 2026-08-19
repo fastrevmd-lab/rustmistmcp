@@ -6,12 +6,12 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-"$root/scripts/verify-rc-tag.sh" v0.1.0-rc1
+"$root/scripts/verify-rc-tag.sh" v0.1.1-rc1
 if "$root/scripts/verify-rc-tag.sh" v9.0.0-rc1 >/dev/null 2>&1; then
     printf '%s\n' 'mismatched RC tag was accepted' >&2
     exit 1
 fi
-if "$root/scripts/verify-rc-tag.sh" v0.1.0 >/dev/null 2>&1; then
+if "$root/scripts/verify-rc-tag.sh" v0.1.1 >/dev/null 2>&1; then
     printf '%s\n' 'production tag was accepted by pre-release workflow' >&2
     exit 1
 fi
