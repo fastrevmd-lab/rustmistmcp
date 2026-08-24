@@ -16,7 +16,6 @@ make_payload() {
         "$payload/bin" \
         "$payload/docs" \
         "$payload/packaging/examples" \
-        "$payload/packaging/journald" \
         "$payload/packaging/lxc" \
         "$payload/packaging/systemd"
     printf '#!/usr/bin/env sh\nexit 0\n' > "$payload/bin/rustmistmcp"
@@ -28,7 +27,6 @@ make_payload() {
     printf '%s\n' '# acceptance' > "$payload/docs/PACKAGING_ACCEPTANCE.md"
     printf '%s\n' '{}' > "$payload/packaging/examples/mist.example.json"
     printf '%s\n' '{"version":1,"tokens":[]}' > "$payload/packaging/examples/tokens.example.json"
-    printf '%s\n' '[Journal]' > "$payload/packaging/journald/mecmcp.conf"
     printf '#!/usr/bin/env sh\nexit 0\n' > "$payload/packaging/lxc/install.sh"
     chmod 0755 "$payload/packaging/lxc/install.sh"
     printf '%s\n' '[Service]' > "$payload/packaging/systemd/rustmistmcp.service"
