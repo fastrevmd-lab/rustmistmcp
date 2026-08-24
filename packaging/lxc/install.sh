@@ -191,12 +191,43 @@ install -D -m 0644 "$payload/packaging/examples/tokens.example.json" /etc/rustmi
 require_safe_live_secret /var/lib/rustmistmcp/tokens.json
 require_safe_live_secret /etc/rustmistmcp/audit-hmac.key
 require_safe_live_secret /etc/rustmistmcp/mist-api-token
+# tokens.json moved from /etc/rustmistmcp to /var/lib/rustmistmcp (#42).
+#
+# Create an empty store ONLY when no legacy store exists. The runtime prefers an
+# existing primary, so writing an empty file here while the live tokens are still
+# at /etc/rustmistmcp/tokens.json would shadow them: the service starts and
+# rejects every existing bearer token. A silent auth wipe on upgrade is worse
+# than a refusal.
+#
+# The file is never copied automatically — that would leave a duplicate secret
+# behind, which is what the stale-secret scan exists to flag.
 if [[ ! -e /var/lib/rustmistmcp/tokens.json ]]; then
-    install -m 0600 -o rustmistmcp -g rustmistmcp /dev/null /var/lib/rustmistmcp/tokens.json
-    printf '%s\n' '{"version":1,"tokens":[]}' > /var/lib/rustmistmcp/tokens.json
+    if [[ -e /etc/rustmistmcp/tokens.json ]]; then
+        printf '%s\n' '>> Not creating /var/lib/rustmistmcp/tokens.json: a token store already'
+        printf '%s\n' '>> exists at /etc/rustmistmcp/tokens.json. The server reads it via the'
+        printf '%s\n' '>> legacy fallback and warns. Migrate it deliberately, then remove it:'
+        printf '%s\n' '>>   install -m 0600 -o rustmistmcp -g rustmistmcp'
+        printf '%s\n' '>>     /etc/rustmistmcp/tokens.json /var/lib/rustmistmcp/tokens.json'
+        printf '%s\n' '>>   rm /etc/rustmistmcp/tokens.json'
+    else
+        install -m 0600 -o rustmistmcp -g rustmistmcp /dev/null /var/lib/rustmistmcp/tokens.json
+        printf '%s\n' '{"version":1,"tokens":[]}' > /var/lib/rustmistmcp/tokens.json
+    fi
 fi
-chown rustmistmcp:rustmistmcp -- /var/lib/rustmistmcp/tokens.json
-chmod 0600 -- /var/lib/rustmistmcp/tokens.json
+
+# Re-check immediately before changing ownership and mode, not only at the top of
+# the script. /var/lib/rustmistmcp is owned and writable by the service account, so
+# a compromised or adversarial service process could replace tokens.json with a
+# symlink between the earlier check and here — and root's chown/chmod would follow
+# it to an arbitrary file. `chown -h` acts on the link rather than its target, and
+# chmod has no such option, so a symlink is refused outright.
+if [[ -e /var/lib/rustmistmcp/tokens.json ]]; then
+    require_safe_live_secret /var/lib/rustmistmcp/tokens.json
+    chown -h rustmistmcp:rustmistmcp -- /var/lib/rustmistmcp/tokens.json
+    [[ ! -L /var/lib/rustmistmcp/tokens.json ]] ||
+        die "tokens.json became a symlink during install: refusing to chmod"
+    chmod 0600 -- /var/lib/rustmistmcp/tokens.json
+fi
 if [[ -e /etc/rustmistmcp/audit-hmac.key ]]; then
     chown rustmistmcp:rustmistmcp -- /etc/rustmistmcp/audit-hmac.key
     chmod 0600 -- /etc/rustmistmcp/audit-hmac.key

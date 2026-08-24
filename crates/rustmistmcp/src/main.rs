@@ -223,26 +223,37 @@ async fn serve_stdio(handler: MistHandler) -> Result<()> {
 fn load_http_token_store(args: &MistCli) -> Result<AuthConfig> {
     match (&args.shared.tokens_file, args.shared.allow_no_auth) {
         (Some(path), _) => {
-            // Issue #42: resolve between primary (/var/lib) and fallback (/etc)
-            // paths to support upgrades without locking out existing clients.
-            // The primary path is always /var/lib/rustmistmcp/tokens.json per
-            // mecmcp/docs/FILESYSTEM-LAYOUT.md; the CLI path acts as fallback.
-            let primary = std::path::PathBuf::from("/var/lib/rustmistmcp/tokens.json");
-            let resolved = mecmcp_auth::resolve_token_path(&primary, path).with_context(|| {
-                format!(
-                    "resolving token path (primary: {}, fallback: {})",
-                    primary.display(),
-                    path.display()
-                )
-            })?;
+            // Issue #42: the configured path is the primary; the legacy /etc
+            // location is the fallback, so an upgrade whose tokens have not been
+            // moved yet still starts.
+            //
+            // Do NOT hardcode /var/lib as the primary and pass the CLI value as
+            // the fallback. The shipped unit passes
+            // `--tokens-file /var/lib/rustmistmcp/tokens.json`, so both arguments
+            // collapse to the same path and there is no fallback at all — an
+            // upgraded server with tokens still in /etc fails to start, which is
+            // the client lockout this issue exists to prevent. The OCI smoke test
+            // catches exactly this: it mounts tokens at /etc/rustmistmcp:ro and an
+            // empty /var/lib/rustmistmcp:rw.
+            const LEGACY_TOKENS: &str = "/etc/rustmistmcp/tokens.json";
+            let primary = path.clone();
+            let fallback = std::path::PathBuf::from(LEGACY_TOKENS);
+            let resolved =
+                mecmcp_auth::resolve_token_path(&primary, &fallback).with_context(|| {
+                    format!(
+                        "resolving token path (primary: {}, fallback: {})",
+                        primary.display(),
+                        fallback.display()
+                    )
+                })?;
 
             if resolved.used_fallback {
                 tracing::warn!(
                     primary = %primary.display(),
-                    fallback = %path.display(),
-                    "tokens.json: primary path not found, using fallback from --tokens-file. \
-                     Upgraded servers should migrate tokens to /var/lib/rustmistmcp/tokens.json \
-                     and update the systemd override."
+                    fallback = %fallback.display(),
+                    "tokens.json: configured path not found, reading the legacy /etc location. \
+                     Migrate the file to the configured path; it is NOT copied automatically, \
+                     and /etc is read-only to the service under ProtectSystem=strict."
                 );
             }
 
