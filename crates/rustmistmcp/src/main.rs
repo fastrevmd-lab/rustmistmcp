@@ -220,14 +220,82 @@ async fn serve_stdio(handler: MistHandler) -> Result<()> {
         .context("MCP stdio service exited with error")
 }
 
+/// The migration fallback exists so an upgrade that has not yet moved
+/// `/etc/rustmistmcp/tokens.json` still starts. It must not apply to an operator's
+/// own path: if `--tokens-file /srv/custom.json` is missing — a typo, or a deleted
+/// store — falling back to the legacy file would silently reactivate unrelated
+/// or revoked credentials. A non-canonical path is loaded directly and fails if
+/// absent, which is the honest outcome.
+fn resolve_tokens(configured: &std::path::Path) -> Result<mecmcp_auth::ResolvedTokenPath> {
+    resolve_tokens_with(
+        configured,
+        std::path::Path::new("/var/lib/rustmistmcp/tokens.json"),
+        std::path::Path::new("/etc/rustmistmcp/tokens.json"),
+    )
+}
+
+/// The rule behind [`resolve_tokens`], with the two well-known paths injected so
+/// it can be exercised against real files in a test rather than against absolute
+/// paths that never exist there.
+fn resolve_tokens_with(
+    configured: &std::path::Path,
+    canonical: &std::path::Path,
+    legacy: &std::path::Path,
+) -> Result<mecmcp_auth::ResolvedTokenPath> {
+    // Byte-exact, not `Path` equality. `Path` comparison normalizes away trailing
+    // separators and `.` components, so `/var/lib/<svc>/tokens.json/` compares
+    // EQUAL to the canonical path — while `metadata()` on that spelling returns
+    // NotFound when the file is absent, indistinguishable from the plain form.
+    // A typo would therefore pass this gate and activate the legacy store, which
+    // is exactly the fail-closed behaviour this check exists to provide.
+    if configured.as_os_str() != canonical.as_os_str() {
+        return Ok(mecmcp_auth::ResolvedTokenPath {
+            path: configured.to_path_buf(),
+            used_fallback: false,
+            fallback_from: None,
+        });
+    }
+
+    mecmcp_auth::resolve_token_path(configured, legacy).context("resolving token file path")
+}
+
 fn load_http_token_store(args: &MistCli) -> Result<AuthConfig> {
     match (&args.shared.tokens_file, args.shared.allow_no_auth) {
         (Some(path), _) => {
+            // Issue #42: the configured path is the primary; the legacy /etc
+            // location is the fallback, so an upgrade whose tokens have not been
+            // moved yet still starts.
+            //
+            // The migration fallback applies ONLY when the configured path is
+            // exactly `/var/lib/rustmistmcp/tokens.json` — the path the shipped
+            // unit passes. Any other path is used verbatim and fails if absent,
+            // which is the honest outcome for a typo or a deleted custom store.
+            let resolved = resolve_tokens(path)
+                .with_context(|| format!("resolving token path for {}", path.display()))?;
+
+            if resolved.used_fallback {
+                tracing::warn!(
+                    primary = %path.display(),
+                    fallback = %resolved.path.display(),
+                    "tokens.json: configured path not found, reading the legacy /etc location. \
+                     Migrate the file to the configured path; it is NOT copied automatically, \
+                     and /etc is read-only to the service under ProtectSystem=strict."
+                );
+            }
+
             let store = Arc::new(
-                TokenStoreFile::<MistGrant>::load(path)
-                    .with_context(|| format!("loading {}", path.display()))?,
+                TokenStoreFile::<MistGrant>::load(&resolved.path)
+                    .with_context(|| format!("loading {}", resolved.path.display()))?,
             );
-            tracing::info!(tokens = store.store().len(), "token store loaded");
+            tracing::info!(
+                path = %resolved.path.display(),
+                tokens = store.store().len(),
+                "token store loaded"
+            );
+
+            // Issue #43: warn about stale secrets alongside the live token file
+            warn_about_stale_secrets(&resolved.path);
+
             Ok(AuthConfig::Authenticated(store))
         }
         (None, true) => {
@@ -246,6 +314,52 @@ fn load_http_token_store(args: &MistCli) -> Result<AuthConfig> {
     }
 }
 
+/// Detect and warn about superseded token files alongside the live one.
+///
+/// Issue #43: root-owned superseded token files bypass permission checks and
+/// accumulate revoked credentials. Warn only — deletion is a production
+/// change-window task.
+/// Infallible by design: this is advisory. Nothing it can discover — or fail to
+/// discover — justifies refusing to start a server whose token store loaded fine.
+fn warn_about_stale_secrets(live_path: &std::path::Path) {
+    let Some(parent) = live_path.parent() else {
+        tracing::debug!(
+            path = %live_path.display(),
+            "skipping stale-secret scan: token path has no parent directory"
+        );
+        return;
+    };
+
+    // A non-UTF-8 basename is legal on Unix. The token store itself loads fine in
+    // that case, so refusing to start because an advisory scan cannot render the
+    // name would turn a warning-only feature into an availability failure. Skip
+    // the scan and say why.
+    let Some(live_file_name) = live_path.file_name().and_then(|n| n.to_str()) else {
+        tracing::debug!(
+            path = %live_path.display(),
+            "skipping stale-secret scan: token filename is not valid UTF-8"
+        );
+        return;
+    };
+
+    let stale = mecmcp_auth::find_stale_secrets(parent, &[live_file_name]);
+    if !stale.is_empty() {
+        tracing::warn!(
+            count = stale.len(),
+            directory = %parent.display(),
+            "found stale secret files — these may contain revoked credentials and \
+             should be deleted after confirming the live file carries all active tokens"
+        );
+        for item in &stale {
+            tracing::warn!(
+                path = %item.path.display(),
+                reason = ?item.reason,
+                "stale secret detected"
+            );
+        }
+    }
+}
+
 fn load_listener_tls(args: &MistCli) -> Result<Option<Arc<rustls::ServerConfig>>> {
     let (Some(cert), Some(key)) = (&args.shared.tls_cert, &args.shared.tls_key) else {
         return Ok(None);
@@ -260,6 +374,7 @@ fn load_listener_tls(args: &MistCli) -> Result<Option<Arc<rustls::ServerConfig>>
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use mecmcp_runtime::cli::Transport;
@@ -352,6 +467,80 @@ mod tests {
                 AuthConfig::ExplicitlyUnauthenticated
             ),
             "result should be ExplicitlyUnauthenticated"
+        );
+    }
+
+    /// The canonical path is absent and the legacy store exists: the fallback
+    /// must fire, so an upgrade that has not migrated yet still starts.
+    #[test]
+    fn canonical_path_falls_back_to_an_existing_legacy_store() {
+        let dir = tempfile::tempdir().expect("creating tempdir");
+        let canonical = dir.path().join("var-lib-tokens.json");
+        let legacy = dir.path().join("etc-tokens.json");
+        std::fs::write(&legacy, "{}").expect("writing legacy token file");
+
+        let resolved =
+            resolve_tokens_with(&canonical, &canonical, &legacy).expect("resolving token path");
+        assert_eq!(
+            resolved.path, legacy,
+            "the legacy store should have been used"
+        );
+        assert!(
+            resolved.used_fallback,
+            "fallback should have been triggered"
+        );
+    }
+
+    /// The same legacy store exists, but the operator configured a DIFFERENT
+    /// path. Falling back here would silently reactivate credentials they did
+    /// not ask for — a typo or a deleted store must fail, not resurrect tokens.
+    #[test]
+    fn a_custom_path_never_falls_back_to_the_legacy_store() {
+        let dir = tempfile::tempdir().expect("creating tempdir");
+        let canonical = dir.path().join("var-lib-tokens.json");
+        let legacy = dir.path().join("etc-tokens.json");
+        std::fs::write(&legacy, "{}").expect("writing legacy token file");
+        let custom = dir.path().join("operator-chosen.json");
+
+        let resolved =
+            resolve_tokens_with(&custom, &canonical, &legacy).expect("resolving token path");
+        assert_eq!(
+            resolved.path, custom,
+            "an operator-supplied path must be used verbatim"
+        );
+        assert!(
+            !resolved.used_fallback,
+            "a custom path must never resolve to the legacy /etc store"
+        );
+    }
+
+    /// A malformed spelling of the canonical path must NOT reach the fallback.
+    ///
+    /// `Path` equality normalizes away a trailing separator, so
+    /// `.../tokens.json/` compares equal to the canonical path; and when the
+    /// file is absent `metadata()` returns NotFound for that spelling too,
+    /// indistinguishable from the plain form. A typo would therefore activate
+    /// the legacy store — the opposite of fail-closed. The comparison is
+    /// byte-exact for this reason.
+    #[test]
+    fn a_trailing_slash_spelling_does_not_reach_the_legacy_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join("var-lib-tokens.json");
+        let legacy = dir.path().join("etc-tokens.json");
+        std::fs::write(&legacy, "{}").unwrap();
+
+        let mut malformed = canonical.clone().into_os_string();
+        malformed.push("/");
+        let malformed = std::path::PathBuf::from(malformed);
+
+        let resolved = resolve_tokens_with(&malformed, &canonical, &legacy).unwrap();
+        assert!(
+            !resolved.used_fallback,
+            "a trailing-slash spelling must not activate the legacy store"
+        );
+        assert_eq!(
+            resolved.path, malformed,
+            "the given path must be used verbatim"
         );
     }
 }
