@@ -2577,9 +2577,13 @@ impl MistHandler {
         ))
     }
 
-    /// Record that a write which reached Mist did not succeed.
+    /// Record that a write which reached Mist **definitively** did not succeed.
     ///
-    /// Every terminal path *after* the write has to emit one. Mist may already
+    /// Only for outcomes Mist itself reported -- a response that arrived and
+    /// was unusable. A request that was sent and then timed out is *not* one of
+    /// these: Mist may have applied it, and saying otherwise is false evidence.
+    ///
+    /// Every terminal path after a *received* response has to emit one. Mist may already
     /// have created or changed the object by the time the response turns out to
     /// be unusable, so a branch that returns without a receipt leaves the chain
     /// ending at apply intent -- an attempt with no outcome, which says someone
@@ -3053,7 +3057,24 @@ impl MistHandler {
             Ok(response) => response,
             Err(error) => {
                 audit.fail(format!("write failed: {error}"));
-                self.failure_receipt(&record, "write failed");
+                // Deliberately **no** receipt here. This branch covers a
+                // request that was sent and then failed -- a timeout, an
+                // oversized body, a read error partway through the response --
+                // so Mist may well have applied the mutation. A failure receipt
+                // would state that it did not, which is materially false
+                // evidence and worse than none: it tells an auditor the change
+                // did not happen when it may have.
+                //
+                // Leaving the chain at apply intent is the honest encoding of
+                // "attempted, outcome unknown, someone must go and look". It is
+                // indistinguishable from a crash between intent and receipt,
+                // and that is correct -- both mean exactly that.
+                tracing::error!(
+                    %error,
+                    change_set_id = %record.id,
+                    "the Mist write failed after the request was sent; the outcome is \
+                     indeterminate and no result receipt is emitted"
+                );
                 record.state = mecmcp_changeset::ChangeSetState::Failed;
                 let _ = self.coordinator.update_change_set(record).await;
                 return Ok(tool_result::<serde_json::Value, _>(
