@@ -62,14 +62,52 @@ async fn main() -> Result<()> {
         .with_context(|| format!("loading {}", args.shared.device_mapping.display()))?;
 
     // Construct real HTTP client when credential is available
-    let handler = MistHandler::from_config_with_lab_mode(&config, BTreeMap::new(), args.lab_mode)
-        .context("constructing Mist handler with HTTP client")?;
+    // Built before the handler because its coordinator takes the recorder, and
+    // started eagerly so a misconfiguration stops the server here rather than
+    // at the first change.
+    let evidence = match args.shared.evidence.into_config() {
+        Ok(Some(evidence_config)) => {
+            tracing::info!(
+                server_id = %evidence_config.server_id,
+                run_id = %evidence_config.run_id,
+                "SSDF evidence pipeline enabled"
+            );
+            let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+            let transport = std::sync::Arc::new(
+                mecmcp_transport::evidence_transport::EvidenceHttpTransport::new(
+                    args.shared.evidence.ca_file(),
+                    provider,
+                )
+                .map_err(|error| {
+                    anyhow::anyhow!("building the SSDF evidence transport: {error}")
+                })?,
+            );
+            Some(
+                mecmcp_audit::EvidenceService::start_with_transport(evidence_config, transport)
+                    .map_err(|error| {
+                        anyhow::anyhow!("starting the SSDF evidence pipeline: {error}")
+                    })?,
+            )
+        }
+        Ok(None) => None,
+        Err(error) => anyhow::bail!("SSDF evidence configuration: {error}"),
+    };
+
+    let handler = MistHandler::from_config_with_lab_mode(
+        &config,
+        BTreeMap::new(),
+        args.lab_mode,
+        evidence
+            .as_ref()
+            .map(mecmcp_audit::EvidenceService::recorder),
+    )
+    .context("constructing Mist handler with HTTP client")?;
     tracing::info!(
         "Mist handler constructed with HttpMistClient for endpoint {}",
         config.endpoint
     );
 
-    match args.shared.transport {
+    let served = match args.shared.transport {
         Transport::Stdio => serve_stdio(handler).await,
         Transport::StreamableHttp => {
             let auth_config = load_http_token_store(&args)?;
@@ -133,7 +171,18 @@ async fn main() -> Result<()> {
             .await
             .map_err(anyhow::Error::from)
         }
+    };
+
+    // Deliver what is still spooled before leaving, whichever way serving
+    // ended. Bound rather than returned directly so the flush runs even when
+    // the transport returned an error -- that is exactly when the trail matters.
+    if let Some(service) = evidence
+        && let Err(error) = service.shutdown()
+    {
+        tracing::error!(%error, "the SSDF evidence pipeline did not flush cleanly");
     }
+
+    served
 }
 
 fn init_audit(args: &MistCli) -> Result<()> {
@@ -223,6 +272,7 @@ mod tests {
     fn none_false_refuses_to_serve_unauthenticated() {
         let args = MistCli {
             shared: mecmcp_runtime::cli::Cli {
+                evidence: mecmcp_runtime::cli::EvidenceArgs::default(),
                 transport: Transport::StreamableHttp,
                 host: "127.0.0.1".to_owned(),
                 port: 8080,
@@ -266,6 +316,7 @@ mod tests {
     fn explicit_no_auth_is_permitted() {
         let args = MistCli {
             shared: mecmcp_runtime::cli::Cli {
+                evidence: mecmcp_runtime::cli::EvidenceArgs::default(),
                 transport: Transport::StreamableHttp,
                 host: "127.0.0.1".to_owned(),
                 port: 8080,

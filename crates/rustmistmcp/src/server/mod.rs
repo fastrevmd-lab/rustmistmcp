@@ -197,14 +197,18 @@ fn change_set_limits() -> mecmcp_changeset::OperationLimits {
 fn load_coordinator(
     path: Option<&std::path::Path>,
     lab_mode: bool,
+    evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
 ) -> Result<Arc<mecmcp_changeset::ChangesetCoordinator>, MistServerError> {
-    let coordinator = mecmcp_changeset::ChangesetCoordinator::load(
+    let mut coordinator = mecmcp_changeset::ChangesetCoordinator::load(
         path,
         change_set_limits(),
         std::time::Duration::from_secs(3600),
         lab_mode,
     )
     .map_err(|error| MistServerError::ChangeSetState(error.to_string()))?;
+    if let Some(recorder) = evidence {
+        coordinator = coordinator.with_evidence(recorder);
+    }
     Ok(Arc::new(coordinator))
 }
 
@@ -242,7 +246,7 @@ impl MistHandler {
         config: &rustmistmcp_core::MistConfig,
         sites: BTreeMap<String, String>,
     ) -> Result<Self, MistServerError> {
-        Self::from_config_with_lab_mode(config, sites, false)
+        Self::from_config_with_lab_mode(config, sites, false, None)
     }
 
     /// Construct a production handler with optional lab mode.
@@ -258,6 +262,7 @@ impl MistHandler {
         config: &rustmistmcp_core::MistConfig,
         sites: BTreeMap<String, String>,
         lab_mode: bool,
+        evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
     ) -> Result<Self, MistServerError> {
         // Load credential using mecmcp-secret (enforces mode 0600)
         let credential = mecmcp_secret::load_from_file(
@@ -282,6 +287,7 @@ impl MistHandler {
                 "/var/lib/rustmistmcp/changeset-state.json",
             )),
             lab_mode,
+            evidence,
         )?;
 
         let origin = validate_mist_endpoint(&config.endpoint)
@@ -375,7 +381,7 @@ impl MistHandler {
             sites: Arc::new(sites),
             catalog: Arc::new(Catalog::embedded()?),
             client,
-            coordinator: load_coordinator(state_path, lab_mode)?,
+            coordinator: load_coordinator(state_path, lab_mode, None)?,
             lab_mode,
             tool_router: Self::mist_tool_router(),
         })
