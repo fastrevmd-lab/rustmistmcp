@@ -108,7 +108,10 @@ pub(crate) async fn stage_plan(
     // Generate change-set ID.
     let change_set_id = {
         let mut id_bytes = [0u8; 32];
-        getrandom::getrandom(&mut id_bytes)
+        // getrandom 0.3 renamed `getrandom()` to `fill()`. Same system CSPRNG,
+        // same error-on-partial-read contract — which matters here, because a
+        // change-set id that is not unpredictable is a forgeable handle.
+        getrandom::fill(&mut id_bytes)
             .map_err(|error| CoordinatorError::new("id", error.to_string()))?;
         hex::encode(id_bytes)
     };
