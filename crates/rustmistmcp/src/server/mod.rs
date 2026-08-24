@@ -2591,12 +2591,19 @@ impl MistHandler {
     fn failure_receipt(
         &self,
         request_id: &str,
+        principal: &str,
         record: &mecmcp_changeset::ChangeSetRecord,
         reason: &str,
     ) {
         if let Some(recorder) = &self.evidence
-            && let Err(error) =
-                recorder.result_receipt(request_id, &record.id, &record.device, false, reason)
+            && let Err(error) = recorder.result_receipt(
+                request_id,
+                &record.id,
+                &record.device,
+                principal,
+                false,
+                reason,
+            )
         {
             tracing::error!(
                 %error,
@@ -3110,6 +3117,7 @@ impl MistHandler {
                         audit.fail("create response missing id field");
                         self.failure_receipt(
                             &apply_request_id,
+                            &applying_principal,
                             &record,
                             "create response missing id field",
                         );
@@ -3126,6 +3134,7 @@ impl MistHandler {
                     audit.fail("create response was not JSON");
                     self.failure_receipt(
                         &apply_request_id,
+                        &applying_principal,
                         &record,
                         "create response was not JSON",
                     );
@@ -3189,6 +3198,7 @@ impl MistHandler {
                 &apply_request_id,
                 &record.id,
                 &record.device,
+                &applying_principal,
                 verified,
                 if verified { "" } else { "write not verified" },
             )
