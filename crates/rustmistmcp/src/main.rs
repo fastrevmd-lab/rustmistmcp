@@ -374,6 +374,7 @@ fn load_listener_tls(args: &MistCli) -> Result<Option<Arc<rustls::ServerConfig>>
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use mecmcp_runtime::cli::Transport;
