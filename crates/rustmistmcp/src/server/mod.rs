@@ -2588,10 +2588,15 @@ impl MistHandler {
     /// be unusable, so a branch that returns without a receipt leaves the chain
     /// ending at apply intent -- an attempt with no outcome, which says someone
     /// must go and look while saying nothing about what to look for.
-    fn failure_receipt(&self, record: &mecmcp_changeset::ChangeSetRecord, reason: &str) {
+    fn failure_receipt(
+        &self,
+        request_id: &str,
+        record: &mecmcp_changeset::ChangeSetRecord,
+        reason: &str,
+    ) {
         if let Some(recorder) = &self.evidence
             && let Err(error) =
-                recorder.result_receipt(&record.id, &record.id, &record.device, false, reason)
+                recorder.result_receipt(request_id, &record.id, &record.device, false, reason)
         {
             tracing::error!(
                 %error,
@@ -2739,6 +2744,12 @@ impl MistHandler {
         // trail whose whole purpose is saying who did what.
         let applying_principal =
             caller.map_or_else(|| "stdio".to_owned(), |ctx| ctx.token_name.clone());
+        // `request_id` is the join key transport audit uses, so it must name
+        // *this call*. Putting the change-set id there makes two attempts on one
+        // set indistinguishable and breaks correlation with the tool call that
+        // actually did it.
+        let apply_request_id =
+            caller.map_or_else(|| "stdio".to_owned(), |ctx| ctx.request_id.to_string());
         let mut audit = audit_scope(
             caller,
             "apply_mist_change_set",
@@ -3011,8 +3022,12 @@ impl MistHandler {
         // `Approved`, so the change set would be stranded with no Mist write and
         // no way forward. Refusing here leaves it exactly as it was.
         if let Some(recorder) = &self.evidence
-            && let Err(error) =
-                recorder.apply_intent(&record.id, &record.id, &record.device, &applying_principal)
+            && let Err(error) = recorder.apply_intent(
+                &apply_request_id,
+                &record.id,
+                &record.device,
+                &applying_principal,
+            )
         {
             let message = format!(
                 "apply refused: the apply-intent evidence record could not be persisted \
@@ -3093,7 +3108,11 @@ impl MistHandler {
                     Some(serde_json::Value::String(id)) => id.clone(),
                     _ => {
                         audit.fail("create response missing id field");
-                        self.failure_receipt(&record, "create response missing id field");
+                        self.failure_receipt(
+                            &apply_request_id,
+                            &record,
+                            "create response missing id field",
+                        );
                         record.state = mecmcp_changeset::ChangeSetState::Failed;
                         let _ = self.coordinator.update_change_set(record).await;
                         return Ok(tool_result::<serde_json::Value, _>(
@@ -3105,7 +3124,11 @@ impl MistHandler {
                 },
                 _ => {
                     audit.fail("create response was not JSON");
-                    self.failure_receipt(&record, "create response was not JSON");
+                    self.failure_receipt(
+                        &apply_request_id,
+                        &record,
+                        "create response was not JSON",
+                    );
                     record.state = mecmcp_changeset::ChangeSetState::Failed;
                     let _ = self.coordinator.update_change_set(record).await;
                     return Ok(tool_result::<serde_json::Value, _>(
@@ -3163,7 +3186,7 @@ impl MistHandler {
         // success.
         if let Some(recorder) = &self.evidence
             && let Err(error) = recorder.result_receipt(
-                &record.id,
+                &apply_request_id,
                 &record.id,
                 &record.device,
                 verified,
