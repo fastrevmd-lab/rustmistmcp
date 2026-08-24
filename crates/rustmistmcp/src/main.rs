@@ -220,6 +220,39 @@ async fn serve_stdio(handler: MistHandler) -> Result<()> {
         .context("MCP stdio service exited with error")
 }
 
+/// The migration fallback exists so an upgrade that has not yet moved
+/// `/etc/rustmistmcp/tokens.json` still starts. It must not apply to an operator's
+/// own path: if `--tokens-file /srv/custom.json` is missing — a typo, or a deleted
+/// store — falling back to the legacy file would silently reactivate unrelated
+/// or revoked credentials. A non-canonical path is loaded directly and fails if
+/// absent, which is the honest outcome.
+fn resolve_tokens(configured: &std::path::Path) -> Result<mecmcp_auth::ResolvedTokenPath> {
+    resolve_tokens_with(
+        configured,
+        std::path::Path::new("/var/lib/rustmistmcp/tokens.json"),
+        std::path::Path::new("/etc/rustmistmcp/tokens.json"),
+    )
+}
+
+/// The rule behind [`resolve_tokens`], with the two well-known paths injected so
+/// it can be exercised against real files in a test rather than against absolute
+/// paths that never exist there.
+fn resolve_tokens_with(
+    configured: &std::path::Path,
+    canonical: &std::path::Path,
+    legacy: &std::path::Path,
+) -> Result<mecmcp_auth::ResolvedTokenPath> {
+    if configured != canonical {
+        return Ok(mecmcp_auth::ResolvedTokenPath {
+            path: configured.to_path_buf(),
+            used_fallback: false,
+            fallback_from: None,
+        });
+    }
+
+    mecmcp_auth::resolve_token_path(configured, legacy).context("resolving token file path")
+}
+
 fn load_http_token_store(args: &MistCli) -> Result<AuthConfig> {
     match (&args.shared.tokens_file, args.shared.allow_no_auth) {
         (Some(path), _) => {
@@ -227,30 +260,17 @@ fn load_http_token_store(args: &MistCli) -> Result<AuthConfig> {
             // location is the fallback, so an upgrade whose tokens have not been
             // moved yet still starts.
             //
-            // Do NOT hardcode /var/lib as the primary and pass the CLI value as
-            // the fallback. The shipped unit passes
-            // `--tokens-file /var/lib/rustmistmcp/tokens.json`, so both arguments
-            // collapse to the same path and there is no fallback at all — an
-            // upgraded server with tokens still in /etc fails to start, which is
-            // the client lockout this issue exists to prevent. The OCI smoke test
-            // catches exactly this: it mounts tokens at /etc/rustmistmcp:ro and an
-            // empty /var/lib/rustmistmcp:rw.
-            const LEGACY_TOKENS: &str = "/etc/rustmistmcp/tokens.json";
-            let primary = path.clone();
-            let fallback = std::path::PathBuf::from(LEGACY_TOKENS);
-            let resolved =
-                mecmcp_auth::resolve_token_path(&primary, &fallback).with_context(|| {
-                    format!(
-                        "resolving token path (primary: {}, fallback: {})",
-                        primary.display(),
-                        fallback.display()
-                    )
-                })?;
+            // The migration fallback applies ONLY when the configured path is
+            // exactly `/var/lib/rustmistmcp/tokens.json` — the path the shipped
+            // unit passes. Any other path is used verbatim and fails if absent,
+            // which is the honest outcome for a typo or a deleted custom store.
+            let resolved = resolve_tokens(path)
+                .with_context(|| format!("resolving token path for {}", path.display()))?;
 
             if resolved.used_fallback {
                 tracing::warn!(
-                    primary = %primary.display(),
-                    fallback = %fallback.display(),
+                    primary = %path.display(),
+                    fallback = %resolved.path.display(),
                     "tokens.json: configured path not found, reading the legacy /etc location. \
                      Migrate the file to the configured path; it is NOT copied automatically, \
                      and /etc is read-only to the service under ProtectSystem=strict."
@@ -440,6 +460,50 @@ mod tests {
                 AuthConfig::ExplicitlyUnauthenticated
             ),
             "result should be ExplicitlyUnauthenticated"
+        );
+    }
+
+    /// The canonical path is absent and the legacy store exists: the fallback
+    /// must fire, so an upgrade that has not migrated yet still starts.
+    #[test]
+    fn canonical_path_falls_back_to_an_existing_legacy_store() {
+        let dir = tempfile::tempdir().expect("creating tempdir");
+        let canonical = dir.path().join("var-lib-tokens.json");
+        let legacy = dir.path().join("etc-tokens.json");
+        std::fs::write(&legacy, "{}").expect("writing legacy token file");
+
+        let resolved =
+            resolve_tokens_with(&canonical, &canonical, &legacy).expect("resolving token path");
+        assert_eq!(
+            resolved.path, legacy,
+            "the legacy store should have been used"
+        );
+        assert!(
+            resolved.used_fallback,
+            "fallback should have been triggered"
+        );
+    }
+
+    /// The same legacy store exists, but the operator configured a DIFFERENT
+    /// path. Falling back here would silently reactivate credentials they did
+    /// not ask for — a typo or a deleted store must fail, not resurrect tokens.
+    #[test]
+    fn a_custom_path_never_falls_back_to_the_legacy_store() {
+        let dir = tempfile::tempdir().expect("creating tempdir");
+        let canonical = dir.path().join("var-lib-tokens.json");
+        let legacy = dir.path().join("etc-tokens.json");
+        std::fs::write(&legacy, "{}").expect("writing legacy token file");
+        let custom = dir.path().join("operator-chosen.json");
+
+        let resolved =
+            resolve_tokens_with(&custom, &canonical, &legacy).expect("resolving token path");
+        assert_eq!(
+            resolved.path, custom,
+            "an operator-supplied path must be used verbatim"
+        );
+        assert!(
+            !resolved.used_fallback,
+            "a custom path must never resolve to the legacy /etc store"
         );
     }
 }
