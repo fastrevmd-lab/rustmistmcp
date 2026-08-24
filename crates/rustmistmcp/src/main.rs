@@ -268,7 +268,7 @@ fn load_http_token_store(args: &MistCli) -> Result<AuthConfig> {
             );
 
             // Issue #43: warn about stale secrets alongside the live token file
-            warn_about_stale_secrets(&resolved.path)?;
+            warn_about_stale_secrets(&resolved.path);
 
             Ok(AuthConfig::Authenticated(store))
         }
@@ -293,15 +293,28 @@ fn load_http_token_store(args: &MistCli) -> Result<AuthConfig> {
 /// Issue #43: root-owned superseded token files bypass permission checks and
 /// accumulate revoked credentials. Warn only — deletion is a production
 /// change-window task.
-fn warn_about_stale_secrets(live_path: &std::path::Path) -> Result<()> {
-    let parent = live_path
-        .parent()
-        .context("token file must have a parent directory")?;
+/// Infallible by design: this is advisory. Nothing it can discover — or fail to
+/// discover — justifies refusing to start a server whose token store loaded fine.
+fn warn_about_stale_secrets(live_path: &std::path::Path) {
+    let Some(parent) = live_path.parent() else {
+        tracing::debug!(
+            path = %live_path.display(),
+            "skipping stale-secret scan: token path has no parent directory"
+        );
+        return;
+    };
 
-    let live_file_name = live_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .context("token file must have a valid filename")?;
+    // A non-UTF-8 basename is legal on Unix. The token store itself loads fine in
+    // that case, so refusing to start because an advisory scan cannot render the
+    // name would turn a warning-only feature into an availability failure. Skip
+    // the scan and say why.
+    let Some(live_file_name) = live_path.file_name().and_then(|n| n.to_str()) else {
+        tracing::debug!(
+            path = %live_path.display(),
+            "skipping stale-secret scan: token filename is not valid UTF-8"
+        );
+        return;
+    };
 
     let stale = mecmcp_auth::find_stale_secrets(parent, &[live_file_name]);
     if !stale.is_empty() {
@@ -319,7 +332,6 @@ fn warn_about_stale_secrets(live_path: &std::path::Path) -> Result<()> {
             );
         }
     }
-    Ok(())
 }
 
 fn load_listener_tls(args: &MistCli) -> Result<Option<Arc<rustls::ServerConfig>>> {
