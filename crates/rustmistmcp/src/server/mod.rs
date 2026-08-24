@@ -2577,6 +2577,26 @@ impl MistHandler {
         ))
     }
 
+    /// Record that a write which reached Mist did not succeed.
+    ///
+    /// Every terminal path *after* the write has to emit one. Mist may already
+    /// have created or changed the object by the time the response turns out to
+    /// be unusable, so a branch that returns without a receipt leaves the chain
+    /// ending at apply intent -- an attempt with no outcome, which says someone
+    /// must go and look while saying nothing about what to look for.
+    fn failure_receipt(&self, record: &mecmcp_changeset::ChangeSetRecord, reason: &str) {
+        if let Some(recorder) = &self.evidence
+            && let Err(error) =
+                recorder.result_receipt(&record.id, &record.id, &record.device, false, reason)
+        {
+            tracing::error!(
+                %error,
+                change_set_id = %record.id,
+                "the write was answered but its failure receipt could not be persisted"
+            );
+        }
+    }
+
     #[tool(
         name = "approve_mist_change_set",
         description = "Grant second-principal approval to a planned change set. The approver must be distinct from the owner."
@@ -2709,6 +2729,12 @@ impl MistHandler {
         extensions: rmcp::model::Extensions,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let caller = caller_from_extensions::<MistGrant>(&extensions);
+        // Who is applying, which need not be who planned. The apply path does
+        // not require caller == owner, so recording `record.owner` here would
+        // attribute the execution to the planner -- a false statement in a
+        // trail whose whole purpose is saying who did what.
+        let applying_principal =
+            caller.map_or_else(|| "stdio".to_owned(), |ctx| ctx.token_name.clone());
         let mut audit = audit_scope(
             caller,
             "apply_mist_change_set",
@@ -2969,25 +2995,20 @@ impl MistHandler {
             ));
         }
 
-        // Step 5: Mark Applying and persist before issuing the write.
-        record.state = mecmcp_changeset::ChangeSetState::Applying;
-        if let Err(error) = self.coordinator.update_change_set(record.clone()).await {
-            audit.fail(error.to_string());
-            return Ok(tool_result::<serde_json::Value, _>(
-                Err::<serde_json::Value, _>(error.to_string()),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ));
-        }
-
         // The device is about to be written. Persisted *before* that happens, so
         // a crash during the write still leaves evidence the attempt was made --
         // and refused if it cannot be persisted, because a Mist object changed
         // with no record that anyone tried is the one state this chain exists to
         // rule out.
+        //
+        // Emitted **before** the `Applying` transition below, not after. After
+        // it, a refusal would leave the record in `Applying` while telling the
+        // caller it is still approved -- and the retry gate accepts only
+        // `Approved`, so the change set would be stranded with no Mist write and
+        // no way forward. Refusing here leaves it exactly as it was.
         if let Some(recorder) = &self.evidence
             && let Err(error) =
-                recorder.apply_intent(&record.id, &record.id, &record.device, &record.owner)
+                recorder.apply_intent(&record.id, &record.id, &record.device, &applying_principal)
         {
             let message = format!(
                 "apply refused: the apply-intent evidence record could not be persisted \
@@ -2996,6 +3017,17 @@ impl MistHandler {
             audit.fail(message.clone());
             return Ok(tool_result::<serde_json::Value, _>(
                 Err::<serde_json::Value, _>(message),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
+        // Step 5: Mark Applying and persist before issuing the write.
+        record.state = mecmcp_changeset::ChangeSetState::Applying;
+        if let Err(error) = self.coordinator.update_change_set(record.clone()).await {
+            audit.fail(error.to_string());
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(error.to_string()),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
             ));
@@ -3021,6 +3053,7 @@ impl MistHandler {
             Ok(response) => response,
             Err(error) => {
                 audit.fail(format!("write failed: {error}"));
+                self.failure_receipt(&record, "write failed");
                 record.state = mecmcp_changeset::ChangeSetState::Failed;
                 let _ = self.coordinator.update_change_set(record).await;
                 return Ok(tool_result::<serde_json::Value, _>(
@@ -3039,6 +3072,7 @@ impl MistHandler {
                     Some(serde_json::Value::String(id)) => id.clone(),
                     _ => {
                         audit.fail("create response missing id field");
+                        self.failure_receipt(&record, "create response missing id field");
                         record.state = mecmcp_changeset::ChangeSetState::Failed;
                         let _ = self.coordinator.update_change_set(record).await;
                         return Ok(tool_result::<serde_json::Value, _>(
@@ -3050,6 +3084,7 @@ impl MistHandler {
                 },
                 _ => {
                     audit.fail("create response was not JSON");
+                    self.failure_receipt(&record, "create response was not JSON");
                     record.state = mecmcp_changeset::ChangeSetState::Failed;
                     let _ = self.coordinator.update_change_set(record).await;
                     return Ok(tool_result::<serde_json::Value, _>(
