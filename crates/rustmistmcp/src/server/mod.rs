@@ -169,6 +169,15 @@ pub struct MistHandler {
     /// Change-set lifecycle state for gated writes.
     #[allow(dead_code)]
     coordinator: Arc<mecmcp_changeset::ChangesetCoordinator>,
+    /// SSDF evidence recorder, when the pipeline is configured.
+    ///
+    /// Held here rather than reached through the coordinator, because mecmcp
+    /// emits the four records from its *lifecycle* APIs -- `create_change_set`,
+    /// `approve_change_set`, `commit_operation` -- and this server drives the
+    /// coordinator through `insert_change_set` / `update_change_set` instead.
+    /// Attaching a recorder to the coordinator alone produces nothing at all
+    /// here, so the emission points are ours to place.
+    evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
     /// Whether lab mode is enabled (auto-waive on creation).
     lab_mode: bool,
     tool_router: ToolRouter<Self>,
@@ -287,7 +296,7 @@ impl MistHandler {
                 "/var/lib/rustmistmcp/changeset-state.json",
             )),
             lab_mode,
-            evidence,
+            evidence.clone(),
         )?;
 
         let origin = validate_mist_endpoint(&config.endpoint)
@@ -322,6 +331,7 @@ impl MistHandler {
             catalog,
             client: Arc::new(http_client),
             coordinator,
+            evidence,
             lab_mode,
             tool_router: Self::mist_tool_router(),
         })
@@ -382,6 +392,7 @@ impl MistHandler {
             catalog: Arc::new(Catalog::embedded()?),
             client,
             coordinator: load_coordinator(state_path, lab_mode, None)?,
+            evidence: None,
             lab_mode,
             tool_router: Self::mist_tool_router(),
         })
@@ -2417,6 +2428,19 @@ impl MistHandler {
             }
         };
 
+        // The change was proposed. Emitted here rather than inside the
+        // coordinator because this server stages through `insert_change_set`,
+        // which mecmcp does not treat as a lifecycle event.
+        if let Some(recorder) = &self.evidence {
+            recorder.proposal(
+                &staged.change_set_id,
+                &staged.change_set_id,
+                &change_set::object_key(object, args.object_id.as_deref()),
+                &owner,
+                &staged.plan_digest,
+            );
+        }
+
         // Auto-waive if lab mode is enabled
         if self.lab_mode {
             let device = change_set::object_key(object, args.object_id.as_deref());
@@ -2642,8 +2666,10 @@ impl MistHandler {
             digest: approval_digest,
             waived: None,
         });
-        record.approver = Some(approver);
+        record.approver = Some(approver.clone());
         record.state = mecmcp_changeset::ChangeSetState::Approved;
+        let approved_device = record.device.clone();
+        let approved_id = record.id.clone();
 
         if let Err(error) = self.coordinator.update_change_set(record).await {
             audit.fail(error.to_string());
@@ -2652,6 +2678,13 @@ impl MistHandler {
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
             ));
+        }
+
+        // A second person decided. Recorded after the state write, so the trail
+        // cannot claim an approval the coordinator failed to persist.
+        if let Some(recorder) = &self.evidence {
+            let _ = &approved_device;
+            recorder.approval(&approved_id, &approved_id, &approver, "approved");
         }
 
         let response = serde_json::json!({
@@ -2947,6 +2980,27 @@ impl MistHandler {
             ));
         }
 
+        // The device is about to be written. Persisted *before* that happens, so
+        // a crash during the write still leaves evidence the attempt was made --
+        // and refused if it cannot be persisted, because a Mist object changed
+        // with no record that anyone tried is the one state this chain exists to
+        // rule out.
+        if let Some(recorder) = &self.evidence
+            && let Err(error) =
+                recorder.apply_intent(&record.id, &record.id, &record.device, &record.owner)
+        {
+            let message = format!(
+                "apply refused: the apply-intent evidence record could not be persisted \
+                 ({error}); the change set is still approved and can be retried"
+            );
+            audit.fail(message.clone());
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(message),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
         // Step 6: Issue the write with json: Some(after).
         let mut path = PathValues::new();
         path.insert("org_id".to_owned(), org_id.clone());
@@ -3046,6 +3100,27 @@ impl MistHandler {
         } else {
             false
         };
+
+        // Mist answered. Recorded before the local state write, because that
+        // write can fail and the receipt describes what the device did, which
+        // local persistence cannot retract. A failure is recorded as fully as a
+        // success.
+        if let Some(recorder) = &self.evidence
+            && let Err(error) = recorder.result_receipt(
+                &record.id,
+                &record.id,
+                &record.device,
+                verified,
+                if verified { "" } else { "write not verified" },
+            )
+        {
+            tracing::error!(
+                %error,
+                change_set_id = %record.id,
+                "Mist answered but the result receipt could not be persisted; the \
+                 evidence chain ends at apply intent"
+            );
+        }
 
         // Step 8: Mark Applied or Failed and persist.
         record.state = if verified {
