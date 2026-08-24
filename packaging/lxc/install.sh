@@ -78,7 +78,6 @@ expected_directories=(
     "$release_root/docs/"
     "$release_root/packaging/"
     "$release_root/packaging/examples/"
-    "$release_root/packaging/journald/"
     "$release_root/packaging/lxc/"
     "$release_root/packaging/systemd/"
 )
@@ -91,7 +90,6 @@ expected_files=(
     "$release_root/docs/PACKAGING_ACCEPTANCE.md"
     "$release_root/packaging/examples/mist.example.json"
     "$release_root/packaging/examples/tokens.example.json"
-    "$release_root/packaging/journald/mecmcp.conf"
     "$release_root/packaging/lxc/install.sh"
     "$release_root/packaging/systemd/rustmistmcp.service"
     "$release_root/packaging/systemd/rustmistmcp.sysusers"
@@ -164,16 +162,24 @@ require_safe_live_secret /etc/rustmistmcp/tokens.json
 require_safe_live_secret /etc/rustmistmcp/audit-hmac.key
 require_safe_live_secret /etc/rustmistmcp/mist-api-token
 
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl
+apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates
+if [[ ${RUSTMISTMCP_INSTALL_VERIFY_TOOLS:-0} == 1 ]]; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl
+fi
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+
 install -D -m 0644 "$payload/packaging/systemd/rustmistmcp.sysusers" /usr/lib/sysusers.d/rustmistmcp.conf
 install -D -m 0644 "$payload/packaging/systemd/rustmistmcp.tmpfiles" /usr/lib/tmpfiles.d/rustmistmcp.conf
 systemd-sysusers
 systemd-tmpfiles --create /usr/lib/tmpfiles.d/rustmistmcp.conf
 
 install -D -o root -g root -m 0755 "$payload/bin/rustmistmcp" /usr/local/bin/rustmistmcp
-if [[ ! -e /etc/systemd/journald.conf.d/mecmcp.conf || ${RUSTMISTMCP_FORCE_JOURNALD:-0} == 1 ]]; then
-    install -D -m 0644 "$payload/packaging/journald/mecmcp.conf" /etc/systemd/journald.conf.d/mecmcp.conf
+
+# Remove stale mecmcp.conf if present. Stop shipping it per rustmistmcp#44.
+if [[ -e /etc/systemd/journald.conf.d/mecmcp.conf ]]; then
+    rm -f /etc/systemd/journald.conf.d/mecmcp.conf
 fi
 if [[ ! -e /etc/systemd/system/rustmistmcp.service || ${RUSTMISTMCP_FORCE_UNIT:-0} == 1 ]]; then
     install -D -m 0644 "$payload/packaging/systemd/rustmistmcp.service" /etc/systemd/system/rustmistmcp.service

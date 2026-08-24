@@ -81,7 +81,6 @@ required_files=(
     packaging/systemd/rustmistmcp.service
     packaging/systemd/rustmistmcp.sysusers
     packaging/systemd/rustmistmcp.tmpfiles
-    packaging/journald/mecmcp.conf
     scripts/build-release.sh
     scripts/smoke-oci.sh
     scripts/smoke-release-archive.sh
@@ -127,7 +126,6 @@ installer=packaging/lxc/install.sh
 unit=packaging/systemd/rustmistmcp.service
 sysusers=packaging/systemd/rustmistmcp.sysusers
 tmpfiles=packaging/systemd/rustmistmcp.tmpfiles
-journald=packaging/journald/mecmcp.conf
 
 # Digest-pinned, not frozen at one version — see the note on the workflow action
 # pins below. A Rust bump must still move all five references together
@@ -165,9 +163,6 @@ require_absent "$compose" '(ports:|--host 0\.0\.0\.0|--allow-insecure-bind)'
 require_contains "$sysusers" 'u rustmistmcp - "rustmistmcp service user" /var/lib/rustmistmcp'
 require_contains "$tmpfiles" 'd /etc/rustmistmcp 0750 root rustmistmcp -'
 require_contains "$tmpfiles" 'd /var/lib/rustmistmcp 0700 rustmistmcp rustmistmcp -'
-require_contains "$journald" 'Storage=persistent'
-require_contains "$journald" 'SystemMaxUse=512M'
-require_absent "$journald" '^Seal='
 
 require_contains "$unit" 'User=rustmistmcp'
 require_contains "$unit" 'Group=rustmistmcp'
@@ -212,8 +207,10 @@ require_contains "$installer" '[[ ! -e $path || -f $path ]]'
 require_before "$installer" 'require_safe_live_secret /etc/rustmistmcp/tokens.json' 'apt-get update'
 require_before "$installer" 'require_safe_live_secret /etc/rustmistmcp/audit-hmac.key' 'apt-get update'
 require_before "$installer" 'require_safe_live_secret /etc/rustmistmcp/mist-api-token' 'apt-get update'
-require_contains "$installer" 'apt-get update'
-require_contains "$installer" 'DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl'
+require_contains "$installer" 'apt-get update -qq'
+require_contains "$installer" 'DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates'
+require_contains "$installer" 'apt-get clean'
+require_contains "$installer" 'rm -rf /var/lib/apt/lists/*'
 require_contains "$installer" '--validate-only'
 require_contains "$installer" 'systemd-detect-virt'
 require_contains "$installer" 'VERSION_ID'
@@ -319,18 +316,14 @@ require_contains .github/workflows/security.yml 'GITHUB_TOKEN: ${{ secrets.GITHU
 require_contains .github/workflows/security.yml 'GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}'
 require_contains .github/workflows/security.yml 'GITLEAKS_ENABLE_COMMENTS: false'
 gitleaks_ignored_findings=(
-    '058842e607e5dfbbc88c82330cfb72abda4d8aca:docs/mist-api/catalog.json:azure-ad-client-secret:1'
-    '058842e607e5dfbbc88c82330cfb72abda4d8aca:docs/mist-api/catalog.json:generic-api-key:1'
-    '058842e607e5dfbbc88c82330cfb72abda4d8aca:docs/mist-api/catalog.json:jwt:1'
-    '058842e607e5dfbbc88c82330cfb72abda4d8aca:docs/mist-api/catalog.json:private-key:1'
-    'aaf7838b6443e53dc0a3aacb99b160d2f1071dbb:docs/mist-api/catalog.json:azure-ad-client-secret:1'
-    'aaf7838b6443e53dc0a3aacb99b160d2f1071dbb:docs/mist-api/catalog.json:generic-api-key:1'
-    'aaf7838b6443e53dc0a3aacb99b160d2f1071dbb:docs/mist-api/catalog.json:jwt:1'
-    'aaf7838b6443e53dc0a3aacb99b160d2f1071dbb:docs/mist-api/catalog.json:private-key:1'
-    'aaf7838b6443e53dc0a3aacb99b160d2f1071dbb:docs/mist-api/mist-openapi.json:azure-ad-client-secret:1'
-    'aaf7838b6443e53dc0a3aacb99b160d2f1071dbb:docs/mist-api/mist-openapi.json:generic-api-key:1'
-    'aaf7838b6443e53dc0a3aacb99b160d2f1071dbb:docs/mist-api/mist-openapi.json:jwt:1'
-    'aaf7838b6443e53dc0a3aacb99b160d2f1071dbb:docs/mist-api/mist-openapi.json:private-key:1'
+    '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/catalog.json:azure-ad-client-secret:1'
+    '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/catalog.json:generic-api-key:1'
+    '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/catalog.json:jwt:1'
+    '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/catalog.json:private-key:1'
+    '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/mist-openapi.json:azure-ad-client-secret:1'
+    '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/mist-openapi.json:generic-api-key:1'
+    '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/mist-openapi.json:jwt:1'
+    '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/mist-openapi.json:private-key:1'
 )
 if [[ -f .gitleaksignore ]]; then
     for finding in "${gitleaks_ignored_findings[@]}"; do

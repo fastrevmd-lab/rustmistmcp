@@ -58,12 +58,11 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 name="rustmistmcp-v${version}-${target}"
 payload="$stage/$name"
-mkdir -p "$payload/bin" "$payload/docs" "$payload/packaging/systemd" "$payload/packaging/journald" "$payload/packaging/lxc" "$payload/packaging/examples"
+mkdir -p "$payload/bin" "$payload/docs" "$payload/packaging/systemd" "$payload/packaging/lxc" "$payload/packaging/examples"
 install -m 0755 "$cargo_target_dir/$target/release/rustmistmcp" "$payload/bin/rustmistmcp"
 install -m 0644 LICENSE README.md "$payload/"
 install -m 0644 docs/OPERATIONS.md docs/PACKAGING_ACCEPTANCE.md "$payload/docs/"
 install -m 0644 packaging/systemd/rustmistmcp.service packaging/systemd/rustmistmcp.sysusers packaging/systemd/rustmistmcp.tmpfiles "$payload/packaging/systemd/"
-install -m 0644 packaging/journald/mecmcp.conf "$payload/packaging/journald/"
 install -m 0755 packaging/lxc/install.sh "$payload/packaging/lxc/"
 install -m 0644 packaging/examples/mist.example.json packaging/examples/tokens.example.json "$payload/packaging/examples/"
 binary_sha256=$(sha256sum "$payload/bin/rustmistmcp" | awk '{print $1}')
