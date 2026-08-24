@@ -223,11 +223,42 @@ async fn serve_stdio(handler: MistHandler) -> Result<()> {
 fn load_http_token_store(args: &MistCli) -> Result<AuthConfig> {
     match (&args.shared.tokens_file, args.shared.allow_no_auth) {
         (Some(path), _) => {
+            // Issue #42: resolve between primary (/var/lib) and fallback (/etc)
+            // paths to support upgrades without locking out existing clients.
+            // The primary path is always /var/lib/rustmistmcp/tokens.json per
+            // mecmcp/docs/FILESYSTEM-LAYOUT.md; the CLI path acts as fallback.
+            let primary = std::path::PathBuf::from("/var/lib/rustmistmcp/tokens.json");
+            let resolved = mecmcp_auth::resolve_token_path(&primary, path).with_context(|| {
+                format!(
+                    "resolving token path (primary: {}, fallback: {})",
+                    primary.display(),
+                    path.display()
+                )
+            })?;
+
+            if resolved.used_fallback {
+                tracing::warn!(
+                    primary = %primary.display(),
+                    fallback = %path.display(),
+                    "tokens.json: primary path not found, using fallback from --tokens-file. \
+                     Upgraded servers should migrate tokens to /var/lib/rustmistmcp/tokens.json \
+                     and update the systemd override."
+                );
+            }
+
             let store = Arc::new(
-                TokenStoreFile::<MistGrant>::load(path)
-                    .with_context(|| format!("loading {}", path.display()))?,
+                TokenStoreFile::<MistGrant>::load(&resolved.path)
+                    .with_context(|| format!("loading {}", resolved.path.display()))?,
             );
-            tracing::info!(tokens = store.store().len(), "token store loaded");
+            tracing::info!(
+                path = %resolved.path.display(),
+                tokens = store.store().len(),
+                "token store loaded"
+            );
+
+            // Issue #43: warn about stale secrets alongside the live token file
+            warn_about_stale_secrets(&resolved.path)?;
+
             Ok(AuthConfig::Authenticated(store))
         }
         (None, true) => {
@@ -244,6 +275,40 @@ fn load_http_token_store(args: &MistCli) -> Result<AuthConfig> {
             )
         }
     }
+}
+
+/// Detect and warn about superseded token files alongside the live one.
+///
+/// Issue #43: root-owned superseded token files bypass permission checks and
+/// accumulate revoked credentials. Warn only — deletion is a production
+/// change-window task.
+fn warn_about_stale_secrets(live_path: &std::path::Path) -> Result<()> {
+    let parent = live_path
+        .parent()
+        .context("token file must have a parent directory")?;
+
+    let live_file_name = live_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("token file must have a valid filename")?;
+
+    let stale = mecmcp_auth::find_stale_secrets(parent, &[live_file_name]);
+    if !stale.is_empty() {
+        tracing::warn!(
+            count = stale.len(),
+            directory = %parent.display(),
+            "found stale secret files — these may contain revoked credentials and \
+             should be deleted after confirming the live file carries all active tokens"
+        );
+        for item in &stale {
+            tracing::warn!(
+                path = %item.path.display(),
+                reason = ?item.reason,
+                "stale secret detected"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn load_listener_tls(args: &MistCli) -> Result<Option<Arc<rustls::ServerConfig>>> {

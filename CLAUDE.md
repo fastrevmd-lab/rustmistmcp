@@ -34,7 +34,7 @@ complete.
 
 Packaging uses the `rustmistmcp` binary/service identity, Debian 13, and exact
 paths `/usr/local/bin/rustmistmcp`, `/etc/rustmistmcp/mist.json`,
-`/etc/rustmistmcp/tokens.json`, `/etc/rustmistmcp/audit-hmac.key`, and
+`/var/lib/rustmistmcp/tokens.json`, `/etc/rustmistmcp/audit-hmac.key`, and
 `/var/lib/rustmistmcp/changeset-state.json`. The OCI runtime is digest-pinned
 distroless Debian 13, non-root UID/GID 65532, and must contain no shell, package
 manager, runtime fetcher, or extra executables. The LXC target is unprivileged

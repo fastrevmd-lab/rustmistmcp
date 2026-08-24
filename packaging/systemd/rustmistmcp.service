@@ -4,7 +4,6 @@ Documentation=https://github.com/fastrevmd-lab/rustmistmcp
 Wants=network-online.target
 After=network-online.target
 ConditionPathExists=/etc/rustmistmcp/mist.json
-ConditionPathExists=/etc/rustmistmcp/tokens.json
 ConditionPathExists=/etc/rustmistmcp/audit-hmac.key
 
 [Service]
@@ -17,7 +16,7 @@ ExecStart=/usr/local/bin/rustmistmcp \
     --transport streamable-http \
     --host 127.0.0.1 \
     --port 30030 \
-    --tokens-file /etc/rustmistmcp/tokens.json \
+    --tokens-file /var/lib/rustmistmcp/tokens.json \
     --audit-format json \
     --audit-journald \
     --audit-redact devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac \
@@ -32,27 +31,50 @@ StateDirectoryMode=0700
 RuntimeDirectory=rustmistmcp
 RuntimeDirectoryMode=0700
 ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-PrivateDevices=yes
-NoNewPrivileges=yes
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProcSubset=pid
+ProtectProc=invisible
+MemoryDenyWriteExecute=true
+ProtectClock=true
+ProtectHostname=true
 CapabilityBoundingSet=
 AmbientCapabilities=
 ReadOnlyPaths=/etc/rustmistmcp
 ReadWritePaths=/var/lib/rustmistmcp
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-RestrictNamespaces=yes
-LockPersonality=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-RemoveIPC=yes
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @obsolete @mount @swap @reboot @module
 SystemCallErrorNumber=EPERM
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Egress policy -- DEFENCE IN DEPTH ONLY. Read this before relying on it.
+#
+# systemd implements IPAddress* with cgroup eBPF. An unprivileged LXC -- the
+# deployment target recommended in README.md -- usually cannot attach those
+# programs without host delegation, and systemd then FAILS OPEN: it logs a
+# warning and runs the unit with no filter at all. `systemd-analyze security`
+# cannot detect this; it only scores the declaration.
+#
+# Mist reaches the Juniper Mist cloud API (internet HTTPS) and an SSDF evidence
+# endpoint at 192.168.1.151:8443. Denying link-local and cloud metadata services
+# has no legitimate impact on either.
+IPAddressAllow=localhost
+IPAddressDeny=169.254.0.0/16 fe80::/10 fd00:ec2::254/128
+# Makes enforcement observable: the byte counters are populated only when the
+# BPF program actually attached. `[no data]` in systemctl status means the
+# filters are inert.
+IPAccounting=true
 TasksMax=128
 LimitNOFILE=32768
 

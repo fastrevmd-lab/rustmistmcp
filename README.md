@@ -222,7 +222,7 @@ It installs non-live examples as `/etc/rustmistmcp/mist.example.json` and
 | `/usr/local/bin/rustmistmcp` | `root:root`, `0755` | Release binary |
 | `/etc/rustmistmcp/mist.json` | `root:rustmistmcp`, `0640` | Service-readable Mist profile |
 | `/etc/rustmistmcp/mist-api-token` | `rustmistmcp:rustmistmcp`, `0600` | v1 outbound Mist API credential |
-| `/etc/rustmistmcp/tokens.json` | `rustmistmcp:rustmistmcp`, `0600` | Bearer-token store |
+| `/var/lib/rustmistmcp/tokens.json` | `rustmistmcp:rustmistmcp`, `0600` | Bearer-token store |
 | `/etc/rustmistmcp/audit-hmac.key` | `rustmistmcp:rustmistmcp`, `0600` | Audit HMAC key |
 | `/var/lib/rustmistmcp/changeset-state.json` | service-user state, `0700` parent | Durable state path |
 

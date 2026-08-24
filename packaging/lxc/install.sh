@@ -158,7 +158,7 @@ source /etc/os-release
 
 # Refuse an unsafe live-secret target before the first host mutation. Repeat the
 # checks immediately before secret handling to narrow the remaining race window.
-require_safe_live_secret /etc/rustmistmcp/tokens.json
+require_safe_live_secret /var/lib/rustmistmcp/tokens.json
 require_safe_live_secret /etc/rustmistmcp/audit-hmac.key
 require_safe_live_secret /etc/rustmistmcp/mist-api-token
 
@@ -188,15 +188,15 @@ fi
 # Examples are non-live. Live config, credentials, state, and customized units are preserved.
 install -D -m 0644 "$payload/packaging/examples/mist.example.json" /etc/rustmistmcp/mist.example.json
 install -D -m 0644 "$payload/packaging/examples/tokens.example.json" /etc/rustmistmcp/tokens.example.json
-require_safe_live_secret /etc/rustmistmcp/tokens.json
+require_safe_live_secret /var/lib/rustmistmcp/tokens.json
 require_safe_live_secret /etc/rustmistmcp/audit-hmac.key
 require_safe_live_secret /etc/rustmistmcp/mist-api-token
-if [[ ! -e /etc/rustmistmcp/tokens.json ]]; then
-    install -m 0600 -o rustmistmcp -g rustmistmcp /dev/null /etc/rustmistmcp/tokens.json
-    printf '%s\n' '{"version":1,"tokens":[]}' > /etc/rustmistmcp/tokens.json
+if [[ ! -e /var/lib/rustmistmcp/tokens.json ]]; then
+    install -m 0600 -o rustmistmcp -g rustmistmcp /dev/null /var/lib/rustmistmcp/tokens.json
+    printf '%s\n' '{"version":1,"tokens":[]}' > /var/lib/rustmistmcp/tokens.json
 fi
-chown rustmistmcp:rustmistmcp -- /etc/rustmistmcp/tokens.json
-chmod 0600 -- /etc/rustmistmcp/tokens.json
+chown rustmistmcp:rustmistmcp -- /var/lib/rustmistmcp/tokens.json
+chmod 0600 -- /var/lib/rustmistmcp/tokens.json
 if [[ -e /etc/rustmistmcp/audit-hmac.key ]]; then
     chown rustmistmcp:rustmistmcp -- /etc/rustmistmcp/audit-hmac.key
     chmod 0600 -- /etc/rustmistmcp/audit-hmac.key

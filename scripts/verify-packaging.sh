@@ -138,7 +138,7 @@ require_contains "$dockerfile" 'USER 65532:65532'
 require_contains "$dockerfile" 'ENTRYPOINT ["/usr/local/bin/rustmistmcp"]'
 require_contains "$dockerfile" 'EXPOSE 30030'
 require_contains "$dockerfile" 'COPY docs/mist-api/catalog.json ./docs/mist-api/catalog.json'
-require_contains "$dockerfile" 'CMD ["--device-mapping", "/etc/rustmistmcp/mist.json", "--transport", "streamable-http", "--host", "127.0.0.1", "--port", "30030", "--tokens-file", "/etc/rustmistmcp/tokens.json", "--audit-format", "json", "--audit-redact", "devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac", "--audit-hmac-key-file", "/etc/rustmistmcp/audit-hmac.key"]'
+require_contains "$dockerfile" 'CMD ["--device-mapping", "/etc/rustmistmcp/mist.json", "--transport", "streamable-http", "--host", "127.0.0.1", "--port", "30030", "--tokens-file", "/var/lib/rustmistmcp/tokens.json", "--audit-format", "json", "--audit-redact", "devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac", "--audit-hmac-key-file", "/etc/rustmistmcp/audit-hmac.key"]'
 require_absent "$dockerfile" --audit-journald
 require_contains "$dockerfile" 'STOPSIGNAL SIGTERM'
 require_absent "$dockerfile" '(apt-get|apk add|dnf install|yum install|curl |wget |/bin/sh)'
@@ -169,7 +169,7 @@ require_contains "$unit" 'Group=rustmistmcp'
 require_contains "$unit" 'UMask=0077'
 require_contains "$unit" 'ReadOnlyPaths=/etc/rustmistmcp'
 require_contains "$unit" 'ReadWritePaths=/var/lib/rustmistmcp'
-require_contains "$unit" 'NoNewPrivileges=yes'
+require_contains "$unit" 'NoNewPrivileges=true'
 require_contains "$unit" 'CapabilityBoundingSet='
 require_contains "$unit" 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6'
 require_contains "$unit" 'TasksMax='
@@ -180,7 +180,7 @@ for runtime_arg in \
     '--transport streamable-http' \
     '--host 127.0.0.1' \
     '--port 30030' \
-    '--tokens-file /etc/rustmistmcp/tokens.json' \
+    '--tokens-file /var/lib/rustmistmcp/tokens.json' \
     '--audit-format json' \
     '--audit-journald' \
     '--audit-redact devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac' \
@@ -199,12 +199,12 @@ require_contains "$installer" '[[ -f $checksum && ! -L $checksum && -r $checksum
 require_contains "$installer" 'tar --absolute-names -tzf "$archive"'
 require_contains "$installer" 'tar --absolute-names -tvzf "$archive"'
 require_absent "$installer" 'tar[[:space:]]+--absolute-names[[:space:]]+-x'
-require_contains "$installer" 'require_safe_live_secret /etc/rustmistmcp/tokens.json'
+require_contains "$installer" 'require_safe_live_secret /var/lib/rustmistmcp/tokens.json'
 require_contains "$installer" 'require_safe_live_secret /etc/rustmistmcp/audit-hmac.key'
 require_contains "$installer" 'require_safe_live_secret /etc/rustmistmcp/mist-api-token'
 require_contains "$installer" '[[ ! -L $path ]]'
 require_contains "$installer" '[[ ! -e $path || -f $path ]]'
-require_before "$installer" 'require_safe_live_secret /etc/rustmistmcp/tokens.json' 'apt-get update'
+require_before "$installer" 'require_safe_live_secret /var/lib/rustmistmcp/tokens.json' 'apt-get update'
 require_before "$installer" 'require_safe_live_secret /etc/rustmistmcp/audit-hmac.key' 'apt-get update'
 require_before "$installer" 'require_safe_live_secret /etc/rustmistmcp/mist-api-token' 'apt-get update'
 require_contains "$installer" 'apt-get update -qq'
@@ -217,7 +217,7 @@ require_contains "$installer" 'VERSION_ID'
 require_contains "$installer" 'RUSTMISTMCP_LXC_HOST_PROOF'
 require_contains "$installer" 'find -P'
 require_contains "$installer" 'realpath'
-require_contains "$installer" '/etc/rustmistmcp/tokens.json'
+require_contains "$installer" '/var/lib/rustmistmcp/tokens.json'
 require_contains "$installer" '/etc/rustmistmcp/audit-hmac.key'
 require_contains "$installer" 'install -m 0600'
 require_contains "$installer" 'systemctl daemon-reload'
@@ -372,12 +372,12 @@ require_absent CLAUDE.md 'bearer-token lifecycle is blocked by'
 require_contains docs/OPERATIONS.md 'sudo install -D -o root -g rustmistmcp -m 0640'
 require_contains docs/OPERATIONS.md 'sudo install -o rustmistmcp -g rustmistmcp -m 0600 /dev/null'
 require_contains docs/OPERATIONS.md '/etc/rustmistmcp/mist-api-token'
-require_contains docs/OPERATIONS.md '/etc/rustmistmcp/tokens.json'
+require_contains docs/OPERATIONS.md '/var/lib/rustmistmcp/tokens.json'
 require_contains docs/OPERATIONS.md '/etc/rustmistmcp/audit-hmac.key'
 require_contains docs/OPERATIONS.md 'organization-owned repository requires an encrypted `GITLEAKS_LICENSE`'
 require_contains README.md '`/etc/rustmistmcp/mist.json` | `root:rustmistmcp`, `0640`'
 require_contains README.md '`/etc/rustmistmcp/mist-api-token` | `rustmistmcp:rustmistmcp`, `0600`'
-require_contains README.md '`/etc/rustmistmcp/tokens.json` | `rustmistmcp:rustmistmcp`, `0600`'
+require_contains README.md '`/var/lib/rustmistmcp/tokens.json` | `rustmistmcp:rustmistmcp`, `0600`'
 require_contains README.md '`/etc/rustmistmcp/audit-hmac.key` | `rustmistmcp:rustmistmcp`, `0600`'
 
 if ! cmp -s examples/mist.example.json packaging/examples/mist.example.json; then
@@ -399,7 +399,7 @@ elif ! "$runtime_binary" \
     --transport streamable-http \
     --host 127.0.0.1 \
     --port 30030 \
-    --tokens-file /etc/rustmistmcp/tokens.json \
+    --tokens-file /var/lib/rustmistmcp/tokens.json \
     --audit-format json \
     --audit-journald \
     --audit-redact devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac \

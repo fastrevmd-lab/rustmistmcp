@@ -41,7 +41,7 @@ sudo install -D -o root -g rustmistmcp -m 0640 \
 sudo install -o rustmistmcp -g rustmistmcp -m 0600 /dev/null \
   /etc/rustmistmcp/mist-api-token
 sudo install -o rustmistmcp -g rustmistmcp -m 0600 \
-  packaging/examples/tokens.example.json /etc/rustmistmcp/tokens.json
+  packaging/examples/tokens.example.json /var/lib/rustmistmcp/tokens.json
 sudo install -o rustmistmcp -g rustmistmcp -m 0600 /dev/null \
   /etc/rustmistmcp/audit-hmac.key
 ```
@@ -138,7 +138,7 @@ the token is gone, and an org-scoped API token nobody holds is still an
 org-scoped API token that exists.
 
 The same applies to the `acceptance` MCP bearer token in
-`/etc/rustmistmcp/tokens.json`, though that one is only reachable through this
+`/var/lib/rustmistmcp/tokens.json`, though that one is only reachable through this
 server's loopback listener, so destroying the guest genuinely does end it.
 
 ## Repository security workflow prerequisite
