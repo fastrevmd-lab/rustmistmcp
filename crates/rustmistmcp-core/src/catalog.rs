@@ -235,12 +235,49 @@ pub struct Catalog {
     operation_index: BTreeMap<String, usize>,
 }
 
+/// The catalog compiled into this binary.
+///
+/// Deliberately a function rather than a `const`: naming 4.6 MB of JSON as a
+/// `const` makes rustc serialise the whole value into this crate's metadata,
+/// which grew `librustmistmcp_core.rmeta` from 519 KB to 10.3 MB and put that
+/// cost on every downstream build and cache read. Behind a function the bytes
+/// stay in the object file where they belong.
+#[must_use]
+pub fn embedded_catalog_json() -> &'static str {
+    include_str!("../../../docs/mist-api/catalog.json")
+}
+
+/// Whether a parse recomputes every operation's `source_fingerprint`.
+///
+/// Verifying costs a second full parse of the document into
+/// [`serde_json::Value`], which for the pinned catalog is roughly ten times
+/// the 4.6 MB of JSON it comes from. That is worth paying for bytes whose
+/// provenance is unknown, and not worth paying at every process start for
+/// bytes that `include_str!` froze into the binary at compile time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fingerprints {
+    /// Recompute and compare every fingerprint.
+    Verify,
+    /// Trust the fingerprints already in the document.
+    Trust,
+}
+
 impl Catalog {
     /// Parse and validate generated catalog JSON.
+    ///
+    /// Every operation's `source_fingerprint` is recomputed and compared. Use
+    /// this for any catalog whose bytes did not come from this binary.
     pub fn from_json(json: &str) -> Result<Self, CatalogError> {
-        let raw: serde_json::Value = serde_json::from_str(json)?;
+        Self::parse(json, Fingerprints::Verify)
+    }
+
+    fn parse(json: &str, fingerprints: Fingerprints) -> Result<Self, CatalogError> {
         let document: CatalogDocument = serde_json::from_str(json)?;
         validate_document(&document)?;
+        let raw = match fingerprints {
+            Fingerprints::Verify => Some(serde_json::from_str::<serde_json::Value>(json)?),
+            Fingerprints::Trust => None,
+        };
         let mut ids = BTreeSet::new();
         let mut keys = BTreeSet::new();
         let mut tools = BTreeSet::new();
@@ -256,17 +293,21 @@ impl Catalog {
                 ));
             }
             validate_operation(operation, previous_key)?;
-            let raw_operation = raw
-                .get("operations")
-                .and_then(serde_json::Value::as_array)
-                .and_then(|operations| operations.get(index))
-                .ok_or_else(|| CatalogError::Invalid("raw operation record is absent".into()))?;
-            let fingerprint = raw_operation_fingerprint(raw_operation)?;
-            if fingerprint != operation.source_fingerprint {
-                return Err(CatalogError::Invalid(format!(
-                    "invalid source fingerprint: {} expected {} got {}",
-                    operation.operation_id, operation.source_fingerprint, fingerprint
-                )));
+            if let Some(raw) = raw.as_ref() {
+                let raw_operation = raw
+                    .get("operations")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|operations| operations.get(index))
+                    .ok_or_else(|| {
+                        CatalogError::Invalid("raw operation record is absent".into())
+                    })?;
+                let fingerprint = raw_operation_fingerprint(raw_operation)?;
+                if fingerprint != operation.source_fingerprint {
+                    return Err(CatalogError::Invalid(format!(
+                        "invalid source fingerprint: {} expected {} got {}",
+                        operation.operation_id, operation.source_fingerprint, fingerprint
+                    )));
+                }
             }
             previous_key = Some(&operation.operation_key);
             operation_index.insert(operation.operation_id.clone(), index);
@@ -296,8 +337,14 @@ impl Catalog {
     }
 
     /// Load the catalog checked into this crate's repository.
+    ///
+    /// These bytes are a compile-time constant, so their fingerprints cannot
+    /// drift between builds and are trusted here rather than recomputed at
+    /// every start. `catalog_fingerprints_are_verified_for_the_embedded_bytes`
+    /// re-verifies the same bytes through [`Catalog::from_json`], so a catalog
+    /// regenerated with a stale fingerprint still fails the build.
     pub fn embedded() -> Result<Self, CatalogError> {
-        Self::from_json(include_str!("../../../docs/mist-api/catalog.json"))
+        Self::parse(embedded_catalog_json(), Fingerprints::Trust)
     }
 
     /// Look up an operation by its OpenAPI operation ID.

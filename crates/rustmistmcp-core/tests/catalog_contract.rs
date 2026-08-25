@@ -337,3 +337,21 @@ fn tool_name_rejects_non_ascii_or_non_identifier_operation_ids() {
         assert!(Catalog::tool_name(operation_id).is_err(), "{operation_id}");
     }
 }
+
+/// `Catalog::embedded` trusts the fingerprints in the document rather than
+/// recomputing them, because `include_str!` freezes those bytes at compile
+/// time and recomputing costs a second full parse into `serde_json::Value`.
+///
+/// This test is what makes that safe: it drives the very same bytes through
+/// the verifying path, so a catalog regenerated with a stale or wrong
+/// `source_fingerprint` fails the build rather than being trusted at runtime.
+#[test]
+fn catalog_fingerprints_are_verified_for_the_embedded_bytes() {
+    assert_eq!(
+        rustmistmcp_core::catalog::embedded_catalog_json(),
+        CATALOG_JSON,
+        "the verified bytes must be the bytes Catalog::embedded trusts"
+    );
+    Catalog::from_json(rustmistmcp_core::catalog::embedded_catalog_json())
+        .expect("every embedded operation fingerprint must verify");
+}
