@@ -6,12 +6,18 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-"$root/scripts/verify-rc-tag.sh" v0.1.1-rc1
+# Derived, not hardcoded: this file previously pinned v0.1.1 and every version
+# bump silently turned both CI workflows red with "RC tag version X does not
+# match Cargo version Y".
+version=$(grep -m1 -E '^version[[:space:]]*=' "$root/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')
+[ -n "$version" ] || { printf '%s\n' 'could not read workspace version' >&2; exit 1; }
+
+"$root/scripts/verify-rc-tag.sh" "v${version}-rc1"
 if "$root/scripts/verify-rc-tag.sh" v9.0.0-rc1 >/dev/null 2>&1; then
     printf '%s\n' 'mismatched RC tag was accepted' >&2
     exit 1
 fi
-if "$root/scripts/verify-rc-tag.sh" v0.1.1 >/dev/null 2>&1; then
+if "$root/scripts/verify-rc-tag.sh" "v${version}" >/dev/null 2>&1; then
     printf '%s\n' 'production tag was accepted by pre-release workflow' >&2
     exit 1
 fi
