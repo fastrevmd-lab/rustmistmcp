@@ -20,7 +20,7 @@ fn workspace_metadata_lints_and_shared_revision_are_locked() {
         "members = [\"crates/rustmistmcp-core\", \"crates/rustmistmcp\"]",
         "default-members = [\"crates/rustmistmcp-core\", \"crates/rustmistmcp\"]",
         "resolver = \"2\"",
-        "version = \"0.1.1\"",
+        "version = \"0.2.0\"",
         "edition = \"2024\"",
         "rust-version = \"1.88\"",
         "license = \"MIT\"",
