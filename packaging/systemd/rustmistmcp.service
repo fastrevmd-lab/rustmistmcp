@@ -60,15 +60,17 @@ SystemCallErrorNumber=EPERM
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # Egress policy -- DEFENCE IN DEPTH ONLY. Read this before relying on it.
 #
-# systemd implements IPAddress* with cgroup eBPF. An unprivileged LXC -- the
-# deployment target recommended in README.md -- usually cannot attach those
-# programs without host delegation, and systemd then FAILS OPEN: it logs a
-# warning and runs the unit with no filter at all. `systemd-analyze security`
-# cannot detect this; it only scores the declaration.
-#
 # Mist reaches the Juniper Mist cloud API (internet HTTPS) and an SSDF evidence
 # endpoint at 192.168.1.151:8443. Denying link-local and cloud metadata services
 # has no legitimate impact on either.
+#
+# NOTE: IPAddressAllow/IPAddressDeny are accepted by systemd and reported by
+# `systemctl show`, but are NOT enforced in an unprivileged LXC — systemd cannot
+# attach the cgroup BPF program there. Every guest in this fleet is one. The
+# directives stay because they do enforce on a normal host or privileged
+# container, but do not read them as active protection here. The installer
+# probes real enforcement and prints ENFORCED / NOT ENFORCED / NO POLICY /
+# UNKNOWN. See the operations doc, "Enforcing it where systemd cannot" (mecmcp#322).
 IPAddressAllow=localhost
 IPAddressDeny=169.254.0.0/16 fe80::/10 fd00:ec2::254/128
 # Makes enforcement observable: the byte counters are populated only when the
