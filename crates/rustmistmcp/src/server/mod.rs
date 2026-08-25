@@ -4019,6 +4019,103 @@ mod tests {
             .is_ok()
         );
     }
+
+    /// Regression test for audit capture race: a noisy thread emitting audit
+    /// events without a capture subscriber must not poison the callsite interest
+    /// cache and break the main thread's capture.
+    ///
+    /// This test exercises the real `install_audit_capture` helper to verify
+    /// the global subscriber + thread-local writer design survives concurrent
+    /// emissions from uncaptured threads. A reversion to the naive
+    /// `tracing::subscriber::set_default(fmt().with_writer(cap))` pattern would
+    /// fail this test with an empty capture.
+    ///
+    /// # Placement rationale
+    ///
+    /// This test shares the process with other audit tests. That's intentional:
+    /// the correct design (global subscriber via `set_global_default`, thread-
+    /// local writer via `ThreadLocalAuditMakeWriter`) is safe in multi-test
+    /// processes. The first test to call `install_audit_capture` installs the
+    /// global subscriber; subsequent tests reuse it and only set their thread-
+    /// local capture.
+    ///
+    /// A reversion to thread-local subscribers would make this test fail even in
+    /// isolation, but the shared-process placement also catches a subtler bug:
+    /// if a noisy thread in one test poisons the callsite cache before another
+    /// test's capture is installed, the naive pattern would silently skip events
+    /// in the second test. The global-subscriber design immunises against that.
+    ///
+    /// Note that placing this test in its own integration test binary would NOT
+    /// improve coverage—it would just burn CI time running the same assertions
+    /// in a fresh process. The race this test guards against is callsite-level,
+    /// not process-level.
+    #[test]
+    fn audit_capture_survives_noisy_uncaptured_thread() {
+        use mecmcp_audit::AuditScope;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        // Helper to emit audit events - uses a distinct tool name to avoid
+        // callsite conflicts with other tests
+        fn emit_audit_event(tool: &'static str) {
+            let mut scope = AuditScope::stdio(tool, "read", Vec::new());
+            scope.succeed();
+        }
+
+        // Start a noisy thread that emits audit events WITHOUT setting up
+        // a capture. This thread's emissions must not poison the callsite
+        // interest cache.
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let noisy_thread = std::thread::spawn(move || {
+            while !stop_clone.load(Ordering::Relaxed) {
+                emit_audit_event("audit_race_noise");
+                std::thread::yield_now();
+            }
+        });
+
+        // Give the noisy thread a chance to hit the callsite first
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Now install the capture on THIS thread and emit events
+        let capture = CapturingWriter::default();
+        let _guard = install_audit_capture(capture.clone());
+
+        // Emit multiple events, yielding to give the noisy thread more chances
+        // to interfere
+        for _ in 0..50 {
+            emit_audit_event("audit_race_captured");
+            std::thread::yield_now();
+        }
+
+        // Stop the noisy thread
+        stop.store(true, Ordering::Relaxed);
+        noisy_thread.join().expect("noisy thread panicked");
+
+        // Verify the capture worked - if the naive pattern were used, this
+        // would be empty
+        let output = String::from_utf8(capture.0.lock().expect("capture").clone())
+            .expect("audit output is UTF-8");
+
+        assert!(
+            output.contains("tool=audit_race_captured"),
+            "audit capture must survive concurrent uncaptured thread emissions; \
+             an empty capture indicates the callsite interest cache was poisoned; \
+             output: {output}"
+        );
+        assert!(
+            output.contains("result=ok"),
+            "captured events must show success; output: {output}"
+        );
+        // The noisy thread's events should NOT appear in this thread's capture
+        assert!(
+            !output.contains("tool=audit_race_noise"),
+            "noisy thread emissions must not leak into this thread's capture; \
+             output: {output}"
+        );
+    }
 }
 
 #[cfg(test)]
