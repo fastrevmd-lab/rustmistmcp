@@ -172,6 +172,13 @@ pub(crate) async fn stage_plan(
             digest: preview_artifact_digest,
             job_id: None,
         }),
+        // mecmcp 0.20.0 records a vendor task handle so an apply that dies
+        // mid-flight leaves something to re-probe. Nothing is stored here: this
+        // server's change sets do not start a long-running Mist operation, so
+        // there is no handle to keep. The field is
+        // `skip_serializing_if = "Option::is_none"`, so `None` never reaches the
+        // state file and a previous binary can still read it.
+        task_id: None,
     };
 
     coordinator.insert_change_set(record).await?;
