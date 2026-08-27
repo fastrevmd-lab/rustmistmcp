@@ -76,9 +76,13 @@ fn workspace_metadata_lints_and_shared_revision_are_locked() {
 }
 
 fn assert_workspace_mecmcp_dependencies_are_pinned(manifest: &str) {
-    let manifest: toml::Value = manifest
-        .parse()
-        .expect("workspace manifest must be valid TOML");
+    // `toml::from_str`, not `str::parse`. toml 1.x changed what `FromStr` on
+    // `Value` does: it now stops after the first table header and reports
+    // "unexpected content, expected nothing" at the byte just past
+    // `[workspace]`. The manifest is unchanged and still valid TOML; only the
+    // entry point moved.
+    let manifest: toml::Value =
+        toml::from_str(manifest).expect("workspace manifest must be valid TOML");
     let dependencies = manifest["workspace"]["dependencies"]
         .as_table()
         .expect("workspace manifest must contain [workspace.dependencies]");

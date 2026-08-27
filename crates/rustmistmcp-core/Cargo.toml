@@ -34,7 +34,7 @@ mecmcp-server.workspace = true
 axum.workspace = true
 rustls.workspace = true
 tempfile = "3"
-toml = "0.8"
+toml = "1.1"
 tower.workspace = true
 
 [lints]
