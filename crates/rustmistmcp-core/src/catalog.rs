@@ -215,6 +215,90 @@ pub struct MediaAccounting {
     pub multipart_media_entries: u8,
 }
 
+/// Compiled JSON Schema validators, memoised per direction and schema.
+///
+/// Compiling one is not cheap and the inputs never change after load: the
+/// validation root embeds the whole components registry, so building it clones
+/// ~2.2 MB and then compiles a validator over it — 37 ms, on the hot path, for
+/// every request and every response (#59). The catalog is immutable once
+/// parsed, so the result is a pure function of the key and is kept.
+///
+/// Not part of a catalog's identity: a clone starts empty and refills on
+/// demand, and two catalogs never share entries.
+///
+/// Correct only while the catalog is immutable, which it is in every path
+/// here — `from_json` builds one and nothing writes to it afterwards. The key
+/// names a schema's *position* in the catalog, not its content, so mutating a
+/// schema in place through the `pub` fields without changing the operation it
+/// belongs to would leave the old validator cached. Do not do that; build a
+/// new catalog instead.
+#[derive(Default)]
+struct ValidatorCache(
+    std::sync::RwLock<
+        std::collections::HashMap<ValidatorKey, std::sync::Arc<jsonschema::Validator>>,
+    >,
+);
+
+/// Which declared schema a validator was compiled for.
+///
+/// An operation declares several, and they must not share a cache entry: a
+/// request body, one schema per parameter, and one per response media type.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum SchemaSlot {
+    /// The `application/json` request body.
+    RequestBody,
+    /// One parameter's schema.
+    ///
+    /// Location as well as name: OpenAPI allows a path parameter and a query
+    /// parameter to share a name and declare different schemas, and keying on
+    /// the name alone would hand the second the first one's validator.
+    RequestParameter {
+        /// `path`, `query`, and so on.
+        location: String,
+        /// Parameter name.
+        name: String,
+    },
+    /// One declared JSON response schema.
+    ///
+    /// Status *and* media type. Response schemas are looked up per status, so
+    /// the position within one status's media map restarts at zero for the
+    /// next: keying on position alone made status 200's schema and status
+    /// 400's share an entry, and whichever was validated first answered for
+    /// both. That is a wrong verdict, not a slow one.
+    ResponseBody {
+        /// HTTP status the schema is declared under.
+        status: String,
+        /// Media type within that status.
+        media: String,
+    },
+}
+
+/// Operation identity plus the slot within it.
+///
+/// Keyed by the operation's name rather than by the schema's address:
+/// `Catalog`'s fields are `pub`, so a pointer key would silently outlive the
+/// value it named if a caller ever replaced `operations`.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ValidatorKey {
+    operation: String,
+    slot: SchemaSlot,
+}
+
+impl Clone for ValidatorCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for ValidatorCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let len = self.0.read().map(|c| c.len()).unwrap_or(0);
+        f.debug_struct("ValidatorCache")
+            .field("entries", &len)
+            .finish()
+    }
+}
+
 /// Loaded catalog ready for catalog-backed dispatch.
 #[derive(Clone, Debug)]
 pub struct Catalog {
@@ -228,6 +312,8 @@ pub struct Catalog {
     /// schema, and doing that per response would double the cost of an already
     /// expensive validation.
     relaxed_components: std::sync::OnceLock<serde_json::Value>,
+    /// Memoised compiled validators. See [`ValidatorCache`].
+    validators: ValidatorCache,
     /// All current source operations, sorted by `operation_key`.
     pub operations: Vec<MistOperation>,
     /// Frozen reference discrepancy and media facts.
@@ -320,7 +406,46 @@ impl Catalog {
             audit: document.audit,
             operation_index,
             relaxed_components: std::sync::OnceLock::new(),
+            validators: ValidatorCache::default(),
         })
+    }
+
+    /// A compiled validator for one declared schema, built at most once.
+    ///
+    /// `build_root` is only called on a miss. It returns the full validation
+    /// root — components registry plus the schema — which is what makes a miss
+    /// expensive and a hit worth having.
+    ///
+    /// Returns `Err(())` when the schema does not compile, matching the
+    /// caller's existing failure mode. A failure is not cached: it is a defect
+    /// in the catalog rather than a per-call outcome, and re-attempting it
+    /// keeps the error reachable instead of freezing a poisoned entry.
+    pub(crate) fn cached_validator(
+        &self,
+        operation: &str,
+        slot: SchemaSlot,
+        build_root: impl FnOnce() -> serde_json::Value,
+    ) -> Result<std::sync::Arc<jsonschema::Validator>, ()> {
+        let key = ValidatorKey {
+            operation: operation.to_owned(),
+            slot,
+        };
+        if let Ok(cache) = self.validators.0.read()
+            && let Some(hit) = cache.get(&key)
+        {
+            return Ok(std::sync::Arc::clone(hit));
+        }
+        let validator =
+            std::sync::Arc::new(jsonschema::validator_for(&build_root()).map_err(|_| ())?);
+        if let Ok(mut cache) = self.validators.0.write() {
+            // Another thread may have inserted the same key meanwhile; either
+            // validator is correct, so the first one in wins and this one is
+            // dropped.
+            cache
+                .entry(key)
+                .or_insert_with(|| std::sync::Arc::clone(&validator));
+        }
+        Ok(validator)
     }
 
     /// `components`, with the constraints that describe Juniper's *vocabulary*

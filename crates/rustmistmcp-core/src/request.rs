@@ -235,7 +235,17 @@ fn validate_parameter_set(
             _ => None,
         };
         match value {
-            Some(value) => validate_schema(request, catalog, &parameter.schema, &value)?,
+            Some(value) => validate_schema(
+                request,
+                catalog,
+                &operation.operation_key,
+                crate::catalog::SchemaSlot::RequestParameter {
+                    location: location.to_owned(),
+                    name: parameter.name.clone(),
+                },
+                &parameter.schema,
+                &value,
+            )?,
             None if parameter.required => {
                 return invalid(
                     request,
@@ -268,16 +278,25 @@ fn validate_json_body(
             "operation does not declare an application/json request body",
         );
     };
-    validate_schema(request, catalog, schema, json)
+    validate_schema(
+        request,
+        catalog,
+        &operation.operation_key,
+        crate::catalog::SchemaSlot::RequestBody,
+        schema,
+        json,
+    )
 }
 
 fn validate_schema(
     request: &MistRequest,
     catalog: &Catalog,
+    operation: &str,
+    slot: crate::catalog::SchemaSlot,
     schema: &serde_json::Value,
     value: &serde_json::Value,
 ) -> Result<(), MistError> {
-    match schema_matches(catalog, schema, value, Direction::Request) {
+    match schema_matches(catalog, operation, slot, schema, value, Direction::Request) {
         Ok(true) => Ok(()),
         Ok(false) => invalid(request, "value violates catalog schema"),
         Err(()) => invalid(request, "catalog schema compilation failed"),
@@ -297,13 +316,23 @@ enum Direction {
     Response,
 }
 
+/// Validate one body against one declared schema.
+///
+/// The validation root embeds the components registry, so building it clones
+/// ~2.2 MB and compiling a validator over it costs ~37 ms. Both were happening
+/// per call, on the hot path, and being dropped at the end of it (#59). The
+/// catalog is immutable after load, so the compiled validator is memoised
+/// against `(direction, operation, schema index)` and the root is built only on
+/// a miss — the closure below does not run on a hit.
 fn schema_matches(
     catalog: &Catalog,
+    operation: &str,
+    slot: crate::catalog::SchemaSlot,
     schema: &serde_json::Value,
     value: &serde_json::Value,
     direction: Direction,
 ) -> Result<bool, ()> {
-    let root = match direction {
+    let validator = catalog.cached_validator(operation, slot, || match direction {
         Direction::Request => serde_json::json!({
             "components": catalog.components,
             "allOf": [schema],
@@ -316,8 +345,7 @@ fn schema_matches(
                 "allOf": [schema],
             })
         }
-    };
-    let validator = jsonschema::validator_for(&root).map_err(|_| ())?;
+    })?;
     Ok(validator.is_valid(value))
 }
 
@@ -371,16 +399,26 @@ fn validate_response_body(
     let result = match &response.body {
         MistResponseBody::Empty => Err("declared response media requires a body"),
         MistResponseBody::Json(value) => {
+            // The media type is kept, not dropped: it is half the cache key.
             let schemas: Vec<_> = responses
                 .iter()
                 .filter(|(media, _)| is_json_media(media))
-                .map(|(_, schema)| schema)
                 .collect();
             if schemas.is_empty() {
                 Err("JSON body does not match declared response media")
-            } else if schemas.iter().any(|schema| {
+            } else if schemas.iter().any(|(media, schema)| {
                 matches!(
-                    schema_matches(catalog, schema, value, Direction::Response),
+                    schema_matches(
+                        catalog,
+                        &response.operation_id,
+                        crate::catalog::SchemaSlot::ResponseBody {
+                            status: response.status.to_string(),
+                            media: (*media).clone(),
+                        },
+                        schema,
+                        value,
+                        Direction::Response,
+                    ),
                     Ok(true)
                 )
             }) {
