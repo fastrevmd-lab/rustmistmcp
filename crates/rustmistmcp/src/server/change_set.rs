@@ -172,6 +172,9 @@ pub(crate) async fn stage_plan(
             digest: preview_artifact_digest,
             job_id: None,
         }),
+        // Never an apply that lost its handle: this record is being created,
+        // and a Mist write is synchronous with no handle to lose.
+        apply_without_handle: false,
         // mecmcp 0.20.0 records a vendor task handle so an apply that dies
         // mid-flight leaves something to re-probe. Nothing is stored here: this
         // server's change sets do not start a long-running Mist operation, so

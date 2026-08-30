@@ -2688,9 +2688,18 @@ impl MistHandler {
             })?
             .as_secs();
 
-        let approval_digest = mecmcp_changeset::digest::compute_approval_digest(
+        // v5 binds the stored preview digest into the approval, so the
+        // approval vouches for the exact preview the approver was shown rather
+        // than only for the plan. This server does store a preview -- see
+        // `change_set::stage` -- so v4, which has no preview field at all,
+        // would sign away that guarantee.
+        let approval_digest = mecmcp_changeset::digest::compute_approval_digest_v5(
             &record.id,
             &record.digest,
+            record
+                .preview
+                .as_ref()
+                .map(|preview| preview.digest.as_str()),
             &record.owner,
             &approver,
             now,
@@ -2700,6 +2709,7 @@ impl MistHandler {
             approver: Some(approver.clone()),
             approved_at_unix: now,
             digest: approval_digest,
+            digest_version: 5,
             waived: None,
         });
         record.approver = Some(approver.clone());
@@ -2985,11 +2995,47 @@ impl MistHandler {
 
             // Compare with expected fingerprint.
             if current_fingerprint != record.expected_candidate_fingerprint {
-                record.state = mecmcp_changeset::ChangeSetState::Failed;
-                if let Err(error) = self.coordinator.update_change_set(record).await {
-                    audit.fail(format!("failed to mark drift failure: {error}"));
-                } else {
-                    audit.fail("object moved since planning (drift detected)");
+                // `Approved -> Failed` is not a legal edge under mecmcp 0.22.0's
+                // transition policy, so this cannot settle directly any more:
+                // the write would be refused and swallowed into the audit line
+                // below, leaving the record `Approved` and the drifted approval
+                // still spendable. Claim it first -- nothing has been sent to
+                // Mist, and the claim gives the settle a legal
+                // `Applying -> Failed` while spending the approval, which is
+                // the point: a drifted plan must not be retried.
+                //
+                // `Expected` here, not `None`, and for the opposite reason to
+                // the apply below. The marker decides how a crash is read back:
+                // handleless means "the outcome is unknown, leave it `Applying`
+                // and have a human look", its absence means "nothing is in
+                // flight, settle it `Failed`". On this branch nothing was sent,
+                // so `Failed` is the true outcome and the recovery that
+                // produces it is the correct one. Handleless would strand a
+                // record known not to have run, blocking further plans for the
+                // object.
+                match self
+                    .coordinator
+                    .claim_change_set_for_apply(
+                        &record.id,
+                        &record.device,
+                        mecmcp_changeset::ApplyHandle::Expected,
+                    )
+                    .await
+                {
+                    Ok(mut claimed) => {
+                        claimed.state = mecmcp_changeset::ChangeSetState::Failed;
+                        if let Err(error) = self.coordinator.update_change_set(claimed).await {
+                            audit.fail(format!("failed to mark drift failure: {error}"));
+                        } else {
+                            audit.fail("object moved since planning (drift detected)");
+                        }
+                    }
+                    Err(error) => {
+                        audit.fail(format!(
+                            "object moved since planning (drift detected), and the change set \
+                             could not be claimed to record that: {error}"
+                        ));
+                    }
                 }
                 return Ok(tool_result::<serde_json::Value, _>(
                     Err::<serde_json::Value, _>(
@@ -3048,16 +3094,37 @@ impl MistHandler {
             ));
         }
 
-        // Step 5: Mark Applying and persist before issuing the write.
-        record.state = mecmcp_changeset::ChangeSetState::Applying;
-        if let Err(error) = self.coordinator.update_change_set(record.clone()).await {
-            audit.fail(error.to_string());
-            return Ok(tool_result::<serde_json::Value, _>(
-                Err::<serde_json::Value, _>(error.to_string()),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ));
-        }
+        // Step 5: claim the change set before issuing the write.
+        //
+        // mecmcp 0.22.0 makes `claim_change_set_for_apply` the only legal
+        // `Approved -> Applying` transition, and it does the read and the write
+        // under one lock, so two applies cannot both read `Approved` and both
+        // issue the write. The plain `update_change_set` this used to do is now
+        // refused outright.
+        //
+        // `None`: a Mist write is synchronous and returns no pollable handle,
+        // so a crash mid-apply leaves an outcome only the service knows. That
+        // is what `apply_without_handle` records, and it keeps the record
+        // honestly unresolved rather than asserting an outcome nobody saw.
+        record = match self
+            .coordinator
+            .claim_change_set_for_apply(
+                &record.id,
+                &record.device,
+                mecmcp_changeset::ApplyHandle::None,
+            )
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                audit.fail(error.to_string());
+                return Ok(tool_result::<serde_json::Value, _>(
+                    Err::<serde_json::Value, _>(error.to_string()),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        };
 
         // Step 6: Issue the write with json: Some(after).
         let mut path = PathValues::new();
