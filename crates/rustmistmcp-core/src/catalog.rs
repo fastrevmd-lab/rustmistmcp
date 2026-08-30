@@ -451,7 +451,17 @@ impl Catalog {
     /// `components`, with the constraints that describe Juniper's *vocabulary*
     /// rather than the shape of a response removed.
     ///
-    /// See [`relax_for_responses`] for what is dropped and why.
+    /// Three relaxations, each covering an additive vendor change: `enum` is
+    /// dropped, since a new member is data rather than a violation;
+    /// `additionalProperties: false` is dropped, since a new field is data too;
+    /// and any declared `type` is widened to admit `null`, since an absent
+    /// optional field is routinely returned as one. Containers and the declared
+    /// types of present, non-null fields survive, so a structurally wrong
+    /// response is still refused. Requests are not relaxed.
+    ///
+    /// (Stated here rather than linked: the function that does it is
+    /// crate-private, and `cargo doc -D warnings` refuses a public doc link to
+    /// a private item.)
     #[must_use]
     pub fn relaxed_components(&self) -> &serde_json::Value {
         self.relaxed_components.get_or_init(|| {

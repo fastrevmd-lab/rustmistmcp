@@ -8,6 +8,49 @@ This file starts at 0.2.0. Earlier tags (0.1.0, 0.1.1) predate it and are
 recoverable from `git log` and the release tags — noted so the omission is
 visible rather than looking like those versions never existed.
 
+## [Unreleased]
+
+### Added
+
+- **An approval now binds the preview it was shown.** mecmcp 0.23.0 adds a v5
+  approval digest that carries the stored preview's digest, and this server does
+  store a preview, so approvals are signed with v5 rather than v4. An approver
+  now vouches for the exact preview they saw, not merely for the plan, and the
+  coordinator refuses any later write that swaps or drops that preview.
+
+### Changed
+
+- Re-pinned the `mecmcp-*` crates from `v0.21.0` to `v0.23.0`, spanning two
+  minors, and updated the pinned upstream revision in the workspace contract
+  test from `dbae2e38` to `d61867d7`.
+- The apply takes `claim_change_set_for_apply` instead of writing
+  `Approved -> Applying` itself. 0.22.0 made the claim the only legal route onto
+  that edge -- it does the read and the write under one lock, so two applies
+  cannot both read `Approved` and both issue the write -- and the plain
+  `update_change_set` this used is now refused outright. `ApplyHandle::None`,
+  because a Mist write is synchronous and returns no pollable handle: a crash
+  mid-apply leaves an outcome only the service knows, which is what
+  `apply_without_handle` records honestly.
+- The drift-detection path claims before settling. It wrote `Approved -> Failed`
+  directly, which 0.22.0's transition policy refuses; the refusal was swallowed
+  into an audit line, so a drifted change set stayed `Approved` and its stale
+  approval remained spendable. It now claims first -- nothing has been sent to
+  Mist at that point -- which gives the settle a legal `Applying -> Failed` and
+  spends the approval, so a drifted plan cannot be retried. That claim uses
+  `ApplyHandle::Expected`, the opposite of the apply path, and for the opposite
+  reason: the marker decides how a crash is read back, and on this branch
+  nothing was sent, so recovering to `Failed` states the truth. Handleless would
+  strand a record known not to have run.
+- `ChangeSetRecord` literals carry the new `apply_without_handle` field.
+
+### Upgrading
+
+- **A binary-only rollback to a build pinned at mecmcp v0.21.0 will refuse to
+  start once any change set has been approved under this one.** A v5 approval
+  forces the change-set state file to schema 6, which the v0.21.0 reader does
+  not accept -- correctly, since it cannot verify what it cannot parse. Roll the
+  state file back with the binary, or restore a pre-upgrade snapshot.
+
 ## [0.2.0] - 2026-08-25
 
 ### Added
