@@ -28,7 +28,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
-rustmistmcp-core = { version = "0.2.0", path = "../rustmistmcp-core" }
+rustmistmcp-core = { version = "0.3.0", path = "../rustmistmcp-core" }
 mecmcp-audit.workspace = true
 mecmcp-auth.workspace = true
 mecmcp-changeset.workspace = true
