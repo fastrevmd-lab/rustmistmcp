@@ -10,6 +10,8 @@ visible rather than looking like those versions never existed.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-01
+
 ### Added
 
 - **An approval now binds the preview it was shown.** mecmcp 0.23.0 adds a v5
@@ -42,6 +44,39 @@ visible rather than looking like those versions never existed.
   nothing was sent, so recovering to `Failed` states the truth. Handleless would
   strand a record known not to have run.
 - `ChangeSetRecord` literals carry the new `apply_without_handle` field.
+- `jsonschema` bumped from 0.50.1 to 0.51.0.
+- `toml` bumped from 0.8.23 to 1.1.4+spec-1.1.0, and the workspace-contract
+  test now uses `toml::from_str` instead of `str::parse`, as toml 1.x changed
+  the `FromStr` implementation on `Value` to stop after the first table header.
+
+### Performance
+
+- **Compiled JSON Schema validators are now cached** (#59). Request and response
+  validation previously compiled the schema on every call — roughly 2.2 MB cloned
+  from the components registry, then compiled, then dropped. Measured against the
+  pinned catalog (1059 operations, 4.6 MB source):
+
+  | stage | before | after |
+  |---|---|---|
+  | per call, uncached | 63.25 ms | 1.14 us |
+  | first call | ~100 ms | ~100 ms |
+
+  **Per-call validation drops from 63 ms to 1 us**, a ~55,000x speedup for cached
+  validators. The catalog is immutable once parsed, so compiled validators are
+  memoised. Cache misses race harmlessly: concurrent compilations of the same
+  schema may occur, with the first insert winning. Compile failures are not cached,
+  keeping catalog defects visible rather than frozen.
+
+  The cache key includes operation name, parameter location and name, and for
+  responses both status code and media type, ensuring distinct schemas never
+  share a cache entry. This addresses the known issue (#59) noted in v0.2.0.
+
+### Security
+
+- **Moved off the yanked chacha20 0.10.1.** The supply-chain gate went red when
+  chacha20 0.10.1 was yanked upstream. This is a transitive dependency through
+  `rand -> rmcp -> mecmcp-server`, so nothing here selects it directly. The
+  lockfile now pins the compatible 0.10.2 release.
 
 ### Upgrading
 
