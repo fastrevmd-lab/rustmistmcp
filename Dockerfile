@@ -7,7 +7,7 @@ COPY docs/mist-api/catalog.json ./docs/mist-api/catalog.json
 RUN cargo build --release --locked --bin rustmistmcp
 
 # This distroless Debian 13 image supplies the required CA trust store.
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:a77defd6fedbb3392b175ba8ea3d1c22be963c1597c248c3ba987ddd80bfb512
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:c31ff9abcb1910f3ab25c7957bdaf0bfe12a01eb546e8df2282f1c8f682b606c
 ARG VERSION=0.0.0-pre-release
 ARG REVISION=unknown
 ARG CREATED=unknown
