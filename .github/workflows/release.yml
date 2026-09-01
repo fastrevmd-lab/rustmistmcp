@@ -145,7 +145,7 @@ jobs:
           archive=$(find dist -name '*.tar.gz' -print -quit)
           scripts/smoke-release-archive.sh "$archive" "$archive.sha256"
       - name: Generate archive SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26
         with:
           path: dist
           format: spdx-json
