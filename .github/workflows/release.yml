@@ -2,8 +2,8 @@ name: release-pre-release-artifacts
 
 on:
   push:
-    # Production-version tags are prohibited until the runtime prerequisites close.
-    tags: ['v*-rc*']
+    # Runtime prerequisites (#39, #59, #14, #17) closed 2026-09-01; production tags now allowed.
+    tags: ['v*-rc*', 'v*.*.*']
 
 permissions: {}
 
@@ -21,8 +21,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
-      - name: Validate RC tag against Cargo version
-        run: scripts/verify-rc-tag.sh "$GITHUB_REF_NAME"
+      - name: Validate release tag against Cargo version
+        run: scripts/verify-release-tag.sh "$GITHUB_REF_NAME"
       - name: Verify clean checkout
         run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
       - name: Full source and packaging verification
