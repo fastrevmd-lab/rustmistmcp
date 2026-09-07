@@ -198,6 +198,8 @@ is separate from the Mist API token used by the outbound client.
 
 ### LXC operator prerequisites
 
+See [`docs/HOW-TO-SETUP-LXC.md`](docs/HOW-TO-SETUP-LXC.md) for a step-by-step build guide.
+
 Deploy only in a dedicated **Debian 13 unprivileged LXC with `nesting=1`**.
 `nesting=1` is required for the target systemd version to report healthy mounts.
 The guest cannot prove the host-side unprivileged and nesting settings. Verify

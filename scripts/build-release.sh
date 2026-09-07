@@ -47,13 +47,40 @@ export SOURCE_DATE_EPOCH
 export CARGO_INCREMENTAL=0
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$root=/usr/src/rustmistmcp"
 
-cargo build --release --locked --bin rustmistmcp --target "$target"
-
-out=${RUSTMISTMCP_DIST_DIR:-$root/dist}
+# Build unless the caller supplied a binary.
+#
+# Repackaging a released version on a workstation is usually wrong: glibc is
+# forward-incompatible, so a binary linked against a newer glibc than the target
+# container will not start there, and it fails at service start after the old
+# binary has been replaced. Packaging a release therefore means packaging the
+# binary CI built, taken from the release image.
+#
+# Without this flag the only way to do that was to hand-write BUILD-INFO, which
+# invites inventing a `rustc` and a `commit` that never built anything. BUILD-INFO
+# is provenance; a fabricated one is worse than none. So when the build is
+# skipped, every field that cannot be known honestly says so.
 cargo_target_dir=${CARGO_TARGET_DIR:-$root/target}
 if [[ $cargo_target_dir != /* ]]; then
     cargo_target_dir="$root/$cargo_target_dir"
 fi
+
+if [[ ${RUSTMISTMCP_SKIP_BUILD:-0} == 1 ]]; then
+    prebuilt="$cargo_target_dir/$target/release/rustmistmcp"
+    [[ -x $prebuilt ]] || {
+        printf '%s\n' \
+            "RUSTMISTMCP_SKIP_BUILD=1 but $prebuilt is missing or not executable." \
+            'Place the CI-built binary there first, e.g. from the release image:' \
+            '  docker create --name mx ghcr.io/fastrevmd-lab/rustmistmcp:<version>' \
+            "  docker cp mx:/usr/local/bin/rustmistmcp $prebuilt" \
+            '  docker rm mx' >&2
+        exit 1
+    }
+    printf '%s\n' "skipping cargo build: packaging the existing $prebuilt"
+else
+    cargo build --release --locked --bin rustmistmcp --target "$target"
+fi
+
+out=${RUSTMISTMCP_DIST_DIR:-$root/dist}
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 name="rustmistmcp-v${version}-${target}"
@@ -66,8 +93,20 @@ install -m 0644 packaging/systemd/rustmistmcp.service packaging/systemd/rustmist
 install -m 0755 packaging/lxc/install.sh "$payload/packaging/lxc/"
 install -m 0644 packaging/examples/mist.example.json packaging/examples/tokens.example.json "$payload/packaging/examples/"
 binary_sha256=$(sha256sum "$payload/bin/rustmistmcp" | awk '{print $1}')
+
+# `rustc` records which compiler produced this binary. When the build was
+# skipped, the local toolchain did not produce it, and naming it here would be a
+# false provenance claim - so say what is actually known instead. The sha256 is
+# computed from the real bytes either way, which is the field that lets someone
+# check what they are holding.
+if [[ ${RUSTMISTMCP_SKIP_BUILD:-0} == 1 ]]; then
+    rustc_field="unknown (binary supplied prebuilt; not compiled by this script)"
+else
+    rustc_field="$(rustc -V)"
+fi
+
 printf 'version=%s\ncargo_version=%s\ntarget=%s\ncommit=%s\nrustc=%s\nsource_date_epoch=%s\nbinary_sha256=%s\n' \
-    "$version" "$cargo_version" "$target" "$source_commit" "$(rustc -V)" "$SOURCE_DATE_EPOCH" "$binary_sha256" > "$payload/BUILD-INFO"
+    "$version" "$cargo_version" "$target" "$source_commit" "$rustc_field" "$SOURCE_DATE_EPOCH" "$binary_sha256" > "$payload/BUILD-INFO"
 
 mkdir -p "$out"
 archive="$out/$name.tar.gz"
