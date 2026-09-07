@@ -87,7 +87,7 @@ pct create 618 local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst \
     --cores 1 --memory 512 --swap 512 \
     --rootfs local-lvm:4 \
     --unprivileged 1 --features nesting=1 \
-    --net0 name=eth0,bridge=vmbr0,firewall=1,gw=192.168.1.1,ip=192.168.1.238/24,type=veth \
+    --net0 name=eth0,bridge=vmbr0,firewall=1,gw=192.0.2.1,ip=192.0.2.10/24,type=veth \
     --onboot 0 --ostype debian \
     --tags "disposable;test;twoperson"
 
@@ -107,7 +107,7 @@ pct create 619 local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst \
     --cores 1 --memory 512 --swap 512 \
     --rootfs local-lvm:4 \
     --unprivileged 1 --features nesting=1 \
-    --net0 name=eth0,bridge=vmbr0,firewall=1,gw=192.168.1.1,ip=192.168.1.239/24,type=veth \
+    --net0 name=eth0,bridge=vmbr0,firewall=1,gw=192.0.2.1,ip=192.0.2.11/24,type=veth \
     --onboot 0 --ostype debian \
     --tags "disposable;test;labmode"
 
@@ -203,7 +203,7 @@ ExecStart=/usr/local/bin/rustmistmcp \
     --port 30030 \
     --tokens-file /var/lib/rustmistmcp/tokens.json \
     --allow-insecure-bind \
-    --allowed-host 192.168.1.238 \
+    --allowed-host 192.0.2.10 \
     --allowed-host test-twoperson-mist:30030 \
     --audit-format json \
     --audit-log-file /var/lib/rustmistmcp/audit.jsonl
@@ -221,7 +221,7 @@ ExecStart=/usr/local/bin/rustmistmcp \
     --port 30030 \
     --tokens-file /var/lib/rustmistmcp/tokens.json \
     --allow-insecure-bind \
-    --allowed-host 192.168.1.239 \
+    --allowed-host 192.0.2.11 \
     --allowed-host test-labmode-mist:30030 \
     --lab-mode \
     --audit-format json \
@@ -262,7 +262,7 @@ pid=$(pct exec 618 -- systemctl show -p MainPID --value rustmistmcp.service)
 pct exec 618 -- grep -E '^Seccomp' /proc/$pid/status                                    # Seccomp: 2
 
 # 4. it is serving, and refusing unauthenticated callers
-curl -s -o /dev/null -w '%{http_code}\n' -X POST http://192.168.1.238:30030/mcp \
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://192.0.2.10:30030/mcp \
      -H 'content-type: application/json' -d '{}'                                        # 401
 ```
 
