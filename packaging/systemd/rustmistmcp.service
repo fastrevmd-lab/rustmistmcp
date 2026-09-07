@@ -54,6 +54,10 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 RemoveIPC=true
 SystemCallArchitectures=native
+# Without SystemCallErrorNumber=EPERM systemd's default raises SIGSYS and kills
+# the process mid-request, which is what happened to rustunifimcp during a
+# change-set state write (mecmcp#351). An EPERM denial is silent at the systemd
+# layer; it can become visible only if the application stops discarding the errno.
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @obsolete @mount @swap @reboot @module
 SystemCallErrorNumber=EPERM

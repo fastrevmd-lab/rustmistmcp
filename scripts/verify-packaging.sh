@@ -296,9 +296,9 @@ done
 require_contains .github/workflows/release.yml 'linux/amd64,linux/arm64'
 require_contains .github/workflows/release.yml 'provenance: mode=max'
 require_contains .github/workflows/release.yml 'sbom: true'
-require_contains .github/workflows/release.yml "tags: ['v*-rc*']"
+require_contains .github/workflows/release.yml "tags: ['v*-rc*', 'v*.*.*']"
 require_contains .github/workflows/release.yml 'needs: verify'
-require_contains .github/workflows/release.yml 'Validate RC tag against Cargo version'
+require_contains .github/workflows/release.yml 'Validate release tag against Cargo version'
 require_regex .github/workflows/release.yml 'rust:[0-9]+\.[0-9]+\.[0-9]+-slim-bookworm@sha256:[0-9a-f]{64}'
 # These were `require_absent` while the shared CLI had no `--version`
 # (mecmcp#159) and a workflow mentioning it would have been claiming an

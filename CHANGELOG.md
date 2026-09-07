@@ -12,7 +12,16 @@ visible rather than looking like those versions never existed.
 
 ## [0.3.0] - 2026-09-01
 
-### Added
+### Changed
+
+- **Systemd unit documentation** (mecmcp#354). Added a comment explaining the
+  fleet seccomp posture: `SystemCallErrorNumber=EPERM` returns EPERM rather than
+  raising SIGSYS and killing the process mid-request, which is what happened to
+  rustunifimcp during a change-set state write (mecmcp#351). An EPERM denial is
+  silent at the systemd layer and can become visible only if the application
+  stops discarding the errno.
+
+### Added (from RC)
 
 - **An approval now binds the preview it was shown.** mecmcp 0.23.0 adds a v5
   approval digest that carries the stored preview's digest, and this server does
@@ -70,6 +79,15 @@ visible rather than looking like those versions never existed.
   The cache key includes operation name, parameter location and name, and for
   responses both status code and media type, ensuring distinct schemas never
   share a cache entry. This addresses the known issue (#59) noted in v0.2.0.
+
+### Fixed
+
+- **Dependabot no longer attempts to bump the git-pinned mecmcp crates** (#69).
+  Weekly cargo runs were failing because dependabot advanced the mecmcp-* refs
+  from pinned tags to mecmcp main, but the exact version requirements then
+  refused the untagged commits. The mecmcp version is deliberately moved by hand
+  in a single chore/mecmcp-<version> PR that re-pins every file at once, so
+  dependabot is now configured to ignore those crates.
 
 ### Security
 

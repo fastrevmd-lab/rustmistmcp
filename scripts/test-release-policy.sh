@@ -12,13 +12,18 @@ trap 'rm -rf "$work"' EXIT
 version=$(grep -m1 -E '^version[[:space:]]*=' "$root/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')
 [ -n "$version" ] || { printf '%s\n' 'could not read workspace version' >&2; exit 1; }
 
-"$root/scripts/verify-rc-tag.sh" "v${version}-rc1"
-if "$root/scripts/verify-rc-tag.sh" v9.0.0-rc1 >/dev/null 2>&1; then
+"$root/scripts/verify-release-tag.sh" "v${version}-rc1"
+"$root/scripts/verify-release-tag.sh" "v${version}"
+if "$root/scripts/verify-release-tag.sh" v9.0.0-rc1 >/dev/null 2>&1; then
     printf '%s\n' 'mismatched RC tag was accepted' >&2
     exit 1
 fi
-if "$root/scripts/verify-rc-tag.sh" "v${version}" >/dev/null 2>&1; then
-    printf '%s\n' 'production tag was accepted by pre-release workflow' >&2
+if "$root/scripts/verify-release-tag.sh" v9.0.0 >/dev/null 2>&1; then
+    printf '%s\n' 'mismatched production tag was accepted' >&2
+    exit 1
+fi
+if "$root/scripts/verify-release-tag.sh" invalid-tag >/dev/null 2>&1; then
+    printf '%s\n' 'invalid tag format was accepted' >&2
     exit 1
 fi
 
