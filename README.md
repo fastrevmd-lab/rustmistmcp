@@ -196,6 +196,10 @@ is deleted. New tokens created by `token add` remain grantless; the shared
 command preserves existing validated `MistGrant` values. This bearer-token store
 is separate from the Mist API token used by the outbound client.
 
+### Docker container guide
+
+See [`docs/HOW-TO-SETUP-DOCKER.md`](docs/HOW-TO-SETUP-DOCKER.md) for step-by-step instructions on running rustmistmcp in Docker, including the audit configuration requirement and two-person vs lab mode setup.
+
 ### LXC operator prerequisites
 
 See [`docs/HOW-TO-SETUP-LXC.md`](docs/HOW-TO-SETUP-LXC.md) for a step-by-step build guide.
