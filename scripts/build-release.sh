@@ -94,19 +94,30 @@ install -m 0755 packaging/lxc/install.sh "$payload/packaging/lxc/"
 install -m 0644 packaging/examples/mist.example.json packaging/examples/tokens.example.json "$payload/packaging/examples/"
 binary_sha256=$(sha256sum "$payload/bin/rustmistmcp" | awk '{print $1}')
 
-# `rustc` records which compiler produced this binary. When the build was
-# skipped, the local toolchain did not produce it, and naming it here would be a
-# false provenance claim - so say what is actually known instead. The sha256 is
-# computed from the real bytes either way, which is the field that lets someone
-# check what they are holding.
+# `rustc` and `commit` record which compiler and source revision produced this
+# binary. When the build was skipped, the local toolchain and checkout did not
+# produce it, and naming them here would be a false provenance claim - so say
+# what is actually known instead. The sha256 is computed from the real bytes
+# either way, which is the field that lets someone check what they are holding.
 if [[ ${RUSTMISTMCP_SKIP_BUILD:-0} == 1 ]]; then
     rustc_field="unknown (binary supplied prebuilt; not compiled by this script)"
+    commit_field="unknown (binary supplied prebuilt; source revision not verified)"
+    # source_date_epoch is also derived from the local HEAD's commit time, so it
+    # would be equally unknowable, but the caller may have set it explicitly via
+    # RUSTMISTMCP_CI_SOURCE_VERIFIED mode. Preserve it if set; mark unknown if not.
+    if [[ ${RUSTMISTMCP_CI_SOURCE_VERIFIED:-0} != 1 ]]; then
+        source_date_field="unknown (binary supplied prebuilt)"
+    else
+        source_date_field="$SOURCE_DATE_EPOCH"
+    fi
 else
     rustc_field="$(rustc -V)"
+    commit_field="$source_commit"
+    source_date_field="$SOURCE_DATE_EPOCH"
 fi
 
 printf 'version=%s\ncargo_version=%s\ntarget=%s\ncommit=%s\nrustc=%s\nsource_date_epoch=%s\nbinary_sha256=%s\n' \
-    "$version" "$cargo_version" "$target" "$source_commit" "$rustc_field" "$SOURCE_DATE_EPOCH" "$binary_sha256" > "$payload/BUILD-INFO"
+    "$version" "$cargo_version" "$target" "$commit_field" "$rustc_field" "$source_date_field" "$binary_sha256" > "$payload/BUILD-INFO"
 
 mkdir -p "$out"
 archive="$out/$name.tar.gz"

@@ -40,10 +40,16 @@ glibc is forward-incompatible: a binary linked against a newer glibc will not
 start on an older one, and it fails at service start with a loader error *after*
 the old binary has been replaced — an outage, not a build failure.
 
-Take the binary from the release image, which CI builds against the right glibc:
+Take the binary from the release image, which CI builds against the right glibc.
+Pin by **immutable digest** rather than a mutable tag, so republishing the tag
+does not silently change what you package:
 
 ```bash
-docker create --name mx ghcr.io/fastrevmd-lab/rustmistmcp:0.3.0
+# Obtain the digest for the version you want:
+#   docker pull ghcr.io/fastrevmd-lab/rustmistmcp:0.3.0
+#   docker inspect ghcr.io/fastrevmd-lab/rustmistmcp:0.3.0 --format='{{index .RepoDigests 0}}'
+# Then pin by that digest:
+docker create --name mx ghcr.io/fastrevmd-lab/rustmistmcp@sha256:<verified-64-hex-digest>
 docker cp mx:/usr/local/bin/rustmistmcp ./rustmistmcp
 docker rm mx
 ```
@@ -54,12 +60,18 @@ Forward-incompatible means the 2.44-linked binary will not load against 2.41.
 ## 2. Package the release
 
 `scripts/build-release.sh` builds the tarball. Point it at the binary you just
-extracted rather than letting it compile one:
+extracted rather than letting it compile one.
+
+**Important:** extract to the **gitignored target path** the skip-build branch
+actually reads, not to the repo root — an untracked file at the root dirties
+the tree, and the packager refuses a dirty tree before `RUSTMISTMCP_SKIP_BUILD`
+is honored:
 
 ```bash
 cd /path/to/rustmistmcp
-mkdir -p target/x86_64-unknown-linux-gnu/release
-install -m 0755 ./rustmistmcp target/x86_64-unknown-linux-gnu/release/rustmistmcp
+target_path=${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-gnu/release
+mkdir -p "$target_path"
+install -m 0755 ./rustmistmcp "$target_path/rustmistmcp"
 RUSTMISTMCP_SKIP_BUILD=1 scripts/build-release.sh
 # >> Wrote dist/rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
 ```
@@ -205,8 +217,12 @@ ExecStart=/usr/local/bin/rustmistmcp \
     --allow-insecure-bind \
     --allowed-host 192.0.2.10 \
     --allowed-host test-twoperson-mist:30030 \
+    --allowed-origin http://192.0.2.10:30030 \
+    --allowed-origin http://test-twoperson-mist:30030 \
     --audit-format json \
-    --audit-log-file /var/lib/rustmistmcp/audit.jsonl
+    --audit-log-file /var/lib/rustmistmcp/audit.jsonl \
+    --audit-redact devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac \
+    --audit-hmac-key-file /etc/rustmistmcp/audit-hmac.key
 ```
 
 For the **lab-mode** rig, add `--lab-mode`:
@@ -223,17 +239,34 @@ ExecStart=/usr/local/bin/rustmistmcp \
     --allow-insecure-bind \
     --allowed-host 192.0.2.11 \
     --allowed-host test-labmode-mist:30030 \
+    --allowed-origin http://192.0.2.11:30030 \
+    --allowed-origin http://test-labmode-mist:30030 \
     --lab-mode \
     --audit-format json \
-    --audit-log-file /var/lib/rustmistmcp/audit.jsonl
+    --audit-log-file /var/lib/rustmistmcp/audit.jsonl \
+    --audit-redact devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac \
+    --audit-hmac-key-file /etc/rustmistmcp/audit-hmac.key
 ```
 
 The empty `ExecStart=` is required: it clears the shipped one before setting a
 new one. **That single `--lab-mode` flag is the whole difference** between the
 two rigs.
 
-Point `--allowed-host` at that rig's own address — it must track whatever
-clients actually dial, or requests are refused with 421.
+**CRITICAL:** The empty `ExecStart=` clears the shipped command **in its
+entirety**, including every flag in it. Any flag you do not repeat in the
+replacement is silently gone. Both drop-ins above restore the full audit
+configuration — `--audit-redact` and `--audit-hmac-key-file` — that the
+shipped unit carries. Losing those flags leaves audit redaction disabled and
+the HMAC key unused, so `host`, `name`, and `device` fields are written
+unhashed. See issue #78.
+
+Point both `--allowed-host` and `--allowed-origin` at that rig's own address
+(IP and DNS name). A non-loopback `--host` requires **both**: omitting
+`--allowed-origin` fails at startup with `non-loopback bind '0.0.0.0' requires
+at least one --allowed-origin`. Origins include the scheme and port:
+`http://192.0.2.10:30030`, not just the host. The two flags must move in
+lockstep: whatever address clients dial must appear in both lists, or requests
+are refused with 421.
 
 Why site config belongs in a drop-in: the shipped unit carries the seccomp
 posture. Replacing it wholesale silently loses that on upgrade.
@@ -274,6 +307,23 @@ SIGSYS and kills the process mid-request instead of returning `EPERM`.
 
 **Note on the curl check:** `curl` is not installed in the base Debian 13
 template. Run this check from the Proxmox host, not from inside the container.
+
+## Troubleshooting
+
+**Service fails to start with `non-loopback bind '0.0.0.0' requires at least one --allowed-origin`**
+
+The drop-in binds `--host 0.0.0.0` but is missing `--allowed-origin` flags.
+A non-loopback listener requires **both** `--allowed-host` and
+`--allowed-origin`. Add one `--allowed-origin` line for each `--allowed-host`,
+with the scheme and port: `http://192.0.2.10:30030` for IP,
+`http://test-twoperson-mist:30030` for DNS name.
+
+**Audit log contains unhashed device/host/name fields**
+
+The drop-in is missing `--audit-redact` and `--audit-hmac-key-file`. When you
+clear `ExecStart=` to replace it, you discard the **entire** shipped command,
+including all audit flags. Both must be restored in the replacement — see the
+drop-in examples above and issue #78.
 
 ## 8. Stop the rig
 
