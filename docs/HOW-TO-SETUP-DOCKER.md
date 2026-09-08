@@ -148,11 +148,13 @@ Both work. The examples below use the second, which is what was verified.
 
 ## 3. Run it — lab mode
 
-Pin the image by immutable digest rather than a mutable tag. Obtain the digest:
+Pin the image by immutable digest rather than a mutable tag. Pull the image
+and capture its digest (RepoDigests is empty until the image is pulled):
 
 ```bash
 docker pull ghcr.io/fastrevmd-lab/rustmistmcp:0.3.0
-docker inspect ghcr.io/fastrevmd-lab/rustmistmcp:0.3.0 --format='{{index .RepoDigests 0}}'
+image=$(docker inspect ghcr.io/fastrevmd-lab/rustmistmcp:0.3.0 \
+    --format='{{index .RepoDigests 0}}')
 ```
 
 Then run with the digest:
@@ -167,10 +169,11 @@ docker run -d --name mist-labmode \
   -v "$PWD/audit-hmac.key:/etc/rustmistmcp/audit-hmac.key:ro" \
   -v "$PWD/tokens.json:/var/lib/rustmistmcp/tokens.json:ro" \
   -v "$PWD/mist-labmode-state:/var/lib/rustmistmcp/state:rw" \
-  ghcr.io/fastrevmd-lab/rustmistmcp@sha256:<verified-64-hex-digest> \
+  "$image" \
   --device-mapping /etc/rustmistmcp/mist.json \
   --transport streamable-http --host 0.0.0.0 --port 30030 \
   --tokens-file /var/lib/rustmistmcp/tokens.json \
+  --state-file /var/lib/rustmistmcp/state/changeset-state.json \
   --audit-format json \
   --audit-redact devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac \
   --audit-hmac-key-file /etc/rustmistmcp/audit-hmac.key \
@@ -192,7 +195,8 @@ at a production org.**
 ## 4. Run it — two-person mode
 
 Identical but for `--lab-mode`, a different published port, and a separate
-state directory so both can run side by side:
+state directory so both can run side by side (reuse the `$image` variable from
+the previous block):
 
 ```bash
 mkdir -p mist-twoperson-state
@@ -204,10 +208,11 @@ docker run -d --name mist-twoperson \
   -v "$PWD/audit-hmac.key:/etc/rustmistmcp/audit-hmac.key:ro" \
   -v "$PWD/tokens.json:/var/lib/rustmistmcp/tokens.json:ro" \
   -v "$PWD/mist-twoperson-state:/var/lib/rustmistmcp/state:rw" \
-  ghcr.io/fastrevmd-lab/rustmistmcp@sha256:<verified-64-hex-digest> \
+  "$image" \
   --device-mapping /etc/rustmistmcp/mist.json \
   --transport streamable-http --host 0.0.0.0 --port 30030 \
   --tokens-file /var/lib/rustmistmcp/tokens.json \
+  --state-file /var/lib/rustmistmcp/state/changeset-state.json \
   --audit-format json \
   --audit-redact devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac \
   --audit-hmac-key-file /etc/rustmistmcp/audit-hmac.key \
