@@ -75,6 +75,28 @@ if [[ ${RUSTMISTMCP_SKIP_BUILD:-0} == 1 ]]; then
             '  docker rm mx' >&2
         exit 1
     }
+    # Validate that the supplied binary matches the release being packaged.
+    # A stale or wrong binary produces a confidently mislabeled archive.
+    binary_version=$("$prebuilt" --version 2>/dev/null | awk '{print $2}') || {
+        printf '%s\n' "RUSTMISTMCP_SKIP_BUILD=1 but $prebuilt --version failed" >&2
+        exit 1
+    }
+    [[ $binary_version == "$cargo_version" ]] || {
+        printf 'binary version mismatch: binary reports %s, packaging %s (Cargo.toml)\n' \
+            "$binary_version" "$cargo_version" >&2
+        exit 1
+    }
+    binary_arch=$(file "$prebuilt" | grep -oE 'x86-64|aarch64|ARM aarch64' || printf 'unknown')
+    case $target in
+        x86_64-*) expected_arch='x86-64' ;;
+        aarch64-*) expected_arch='aarch64|ARM aarch64' ;;
+        *) expected_arch='.*' ;;
+    esac
+    if ! printf '%s\n' "$binary_arch" | grep -qE "^($expected_arch)$"; then
+        printf 'binary architecture mismatch: binary is %s, target is %s\n' \
+            "$binary_arch" "$target" >&2
+        exit 1
+    fi
     printf '%s\n' "skipping cargo build: packaging the existing $prebuilt"
 else
     cargo build --release --locked --bin rustmistmcp --target "$target"

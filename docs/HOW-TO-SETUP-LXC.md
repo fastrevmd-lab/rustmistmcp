@@ -132,17 +132,19 @@ Both bind port 30030.
 `install.sh` requires two arguments: the tarball and its `.sha256` sidecar. It
 also requires an environment variable attesting that the host is unprivileged
 with nesting enabled, which the installer cannot verify from inside the
-container.
+container. Push both files under their original basenames (the installer
+validates against the release naming contract) and run the installer from the
+checkout to verify the archive before extracting it:
 
 ```bash
-pct push 618 dist/rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz /tmp/pkg.tar.gz
-pct push 618 dist/rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256 /tmp/pkg.tar.gz.sha256
+pct push 618 dist/rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz /tmp/rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
+pct push 618 dist/rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256 /tmp/rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 
 pct exec 618 -- bash -lc '
   cd /tmp
-  tar xzf pkg.tar.gz
+  tar xzf rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
   cd rustmistmcp-*/
-  RUSTMISTMCP_LXC_HOST_PROOF=unprivileged=1,nesting=1 bash ./packaging/lxc/install.sh /tmp/pkg.tar.gz /tmp/pkg.tar.gz.sha256
+  RUSTMISTMCP_LXC_HOST_PROOF=unprivileged=1,nesting=1 bash ./packaging/lxc/install.sh /tmp/rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz /tmp/rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 '
 ```
 

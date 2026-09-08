@@ -45,13 +45,17 @@ container started with any own args  -> 0 audit-related arguments
 ```
 
 The server starts and serves normally; the audit log is simply **unkeyed and
-unredacted** from then on, with no warning. You lose tamper-evident audit
-silently.
+unredacted** from then on, with no warning. You lose **pseudonymous redaction**
+of identifying fields silently — device names, hosts, and commands are written
+in plaintext. The HMAC flags provide pseudonymity (making fields unlinkable to
+their source without the key), not tamper-evidence: records can still be
+deleted, reordered, or replaced undetected because nothing signs or hash-chains
+whole records.
 
 This is tracked in [issue #78](https://github.com/fastrevmd-lab/rustmistmcp/issues/78).
 Until it is fixed, **every example in this document passes the audit flags
-explicitly**. Copy them. A reader who omits them loses the audit guarantee this
-server is built to provide.
+explicitly**. Copy them. A reader who omits them loses the audit pseudonymity
+this server is built to provide.
 
 Verify your running container has the audit arguments:
 
@@ -89,10 +93,11 @@ the org UUIDs this server may reach.
 
 **`mist-api-token`** — the outbound Mist API token. Create one from the Mist
 web UI (*Organization > Settings > API Tokens*) with appropriate privileges.
-This file contains the token in plain text:
+This file contains the token in plain text. Read it without echo to keep it
+out of shell history:
 
 ```bash
-printf '%s' 'your-mist-api-token-here' > mist-api-token
+read -sp 'Mist API token: ' token && printf '%s' "$token" > mist-api-token && unset token
 ```
 
 **`audit-hmac.key`** — the HMAC key for tamper-evident audit. Generate a random
@@ -143,15 +148,26 @@ Both work. The examples below use the second, which is what was verified.
 
 ## 3. Run it — lab mode
 
+Pin the image by immutable digest rather than a mutable tag. Obtain the digest:
+
 ```bash
+docker pull ghcr.io/fastrevmd-lab/rustmistmcp:0.3.0
+docker inspect ghcr.io/fastrevmd-lab/rustmistmcp:0.3.0 --format='{{index .RepoDigests 0}}'
+```
+
+Then run with the digest:
+
+```bash
+mkdir -p mist-labmode-state
 docker run -d --name mist-labmode \
   --user "$(id -u):$(id -g)" \
-  -p 30044:30030 \
+  -p 127.0.0.1:30044:30030 \
   -v "$PWD/mist.json:/etc/rustmistmcp/mist.json:ro" \
   -v "$PWD/mist-api-token:/etc/rustmistmcp/mist-api-token:ro" \
   -v "$PWD/audit-hmac.key:/etc/rustmistmcp/audit-hmac.key:ro" \
   -v "$PWD/tokens.json:/var/lib/rustmistmcp/tokens.json:ro" \
-  ghcr.io/fastrevmd-lab/rustmistmcp:0.3.0 \
+  -v "$PWD/mist-labmode-state:/var/lib/rustmistmcp/state:rw" \
+  ghcr.io/fastrevmd-lab/rustmistmcp@sha256:<verified-64-hex-digest> \
   --device-mapping /etc/rustmistmcp/mist.json \
   --transport streamable-http --host 0.0.0.0 --port 30030 \
   --tokens-file /var/lib/rustmistmcp/tokens.json \
@@ -160,28 +176,35 @@ docker run -d --name mist-labmode \
   --audit-hmac-key-file /etc/rustmistmcp/audit-hmac.key \
   --allow-insecure-bind \
   --allowed-host 127.0.0.1:30044 --allowed-host localhost:30044 \
-  --allowed-origin http://127.0.0.1:30044 --allowed-origin http://localhost:30044 \
+  --allowed-origin https://console.example.org \
   --lab-mode
 ```
 
-Configuration and credentials are mounted read-only. Lab mode waives the
-approval gate and records `approval_waiver=lab-mode` in the audit trail.
-**Do not point it at a production org.**
+Configuration and credentials are mounted read-only. A **separate read-write
+state directory** is mounted because change-set state must outlive the
+container — removing the container without it discards any non-terminal
+operations. The published port is bound to **loopback only** (`-p 127.0.0.1:...`)
+because `--allowed-host` and `--allowed-origin` are header checks, not a
+network boundary; external access needs TLS. Lab mode waives the approval gate
+and records `approval_waiver=lab-mode` in the audit trail. **Do not point it
+at a production org.**
 
 ## 4. Run it — two-person mode
 
-Identical but for `--lab-mode`, and a different published port so both can run
-side by side:
+Identical but for `--lab-mode`, a different published port, and a separate
+state directory so both can run side by side:
 
 ```bash
+mkdir -p mist-twoperson-state
 docker run -d --name mist-twoperson \
   --user "$(id -u):$(id -g)" \
-  -p 30034:30030 \
+  -p 127.0.0.1:30034:30030 \
   -v "$PWD/mist.json:/etc/rustmistmcp/mist.json:ro" \
   -v "$PWD/mist-api-token:/etc/rustmistmcp/mist-api-token:ro" \
   -v "$PWD/audit-hmac.key:/etc/rustmistmcp/audit-hmac.key:ro" \
   -v "$PWD/tokens.json:/var/lib/rustmistmcp/tokens.json:ro" \
-  ghcr.io/fastrevmd-lab/rustmistmcp:0.3.0 \
+  -v "$PWD/mist-twoperson-state:/var/lib/rustmistmcp/state:rw" \
+  ghcr.io/fastrevmd-lab/rustmistmcp@sha256:<verified-64-hex-digest> \
   --device-mapping /etc/rustmistmcp/mist.json \
   --transport streamable-http --host 0.0.0.0 --port 30030 \
   --tokens-file /var/lib/rustmistmcp/tokens.json \
@@ -190,7 +213,7 @@ docker run -d --name mist-twoperson \
   --audit-hmac-key-file /etc/rustmistmcp/audit-hmac.key \
   --allow-insecure-bind \
   --allowed-host 127.0.0.1:30034 --allowed-host localhost:30034 \
-  --allowed-origin http://127.0.0.1:30034 --allowed-origin http://localhost:30034
+  --allowed-origin https://console.example.org
 ```
 
 **Note the port asymmetry, because it catches people.** The server always
