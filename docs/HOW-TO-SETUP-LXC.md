@@ -299,7 +299,31 @@ pct exec 618 -- systemctl daemon-reload
 pct exec 618 -- systemctl enable --now rustmistmcp.service
 ```
 
-## 7. Verify
+## 7. Reaching the rig
+
+The server binds loopback only per the repository's security policy (CLAUDE.md:
+"External HTTP requires TLS"). For a disposable test rig, **use an SSH tunnel**
+to reach it from your workstation — the tunnel keeps the traffic encrypted,
+which satisfies the TLS requirement without adding certificates to a throwaway
+rig.
+
+Forward a local port to the container's loopback listener:
+
+```bash
+# From your workstation:
+ssh -L 30030:127.0.0.1:30030 root@pve3.mechub.org
+# In another terminal, point your MCP client at 127.0.0.1:30030
+```
+
+This forwards your local `127.0.0.1:30030` to the container's `127.0.0.1:30030`
+through the Proxmox host. The client dials `127.0.0.1:30030` on your
+workstation, which matches the `--allowed-host` / `--allowed-origin` values in
+the drop-ins.
+
+For a real deployment, use a TLS-terminating proxy (e.g., nginx with
+`--tls-cert`/`--tls-key`) instead.
+
+## 8. Verify
 
 Check the four things that actually matter:
 
@@ -316,12 +340,12 @@ pid=$(pct exec 618 -- systemctl show -p MainPID --value rustmistmcp.service)
 pct exec 618 -- grep -E '^Seccomp' /proc/$pid/status                                    # Seccomp: 2
 
 # 4. it is serving, and refusing unauthenticated callers
-curl -s -o /dev/null -w '%{http_code}\n' -X POST http://192.0.2.10:30030/mcp \
+pct exec 618 -- curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:30030/mcp \
      -H 'content-type: application/json' -d '{}'                                        # 401
 ```
 
 `401` is the success case here: the transport is up and authentication is being
-enforced. A `000` means nothing is listening on that address or port.
+enforced. Run the check from inside the container because the server binds loopback.
 
 Checking `SystemCallErrorNumber` matters. Without it a denied syscall raises
 SIGSYS and kills the process mid-request instead of returning `EPERM`.
@@ -333,11 +357,13 @@ template. Run this check from the Proxmox host, not from inside the container.
 
 **Service fails to start with `non-loopback bind '0.0.0.0' requires at least one --allowed-origin`**
 
-The drop-in binds `--host 0.0.0.0` but is missing `--allowed-origin` flags.
-A non-loopback listener requires at least one `--allowed-origin` to start,
-even if no browser clients exist yet. Add one or more browser application
-origins (e.g., `http://console.example.org` for plaintext, `https://...` with
-TLS configured), not the server's own address.
+You configured an off-loopback bind (`--host 0.0.0.0` or a specific external
+address) but are missing `--allowed-origin` flags. A non-loopback listener
+requires at least one `--allowed-origin` to start, even if no browser clients
+exist yet. Add one or more browser application origins (e.g.,
+`http://console.example.org` for plaintext, `https://...` with TLS configured),
+not the server's own address. The loopback drop-ins above do not trigger this
+error — this applies only when you bind off-loopback.
 
 **Requests fail with `421 MISDIRECTED_REQUEST` and `Host '<host>' is not allowed`**
 
@@ -361,7 +387,7 @@ clear `ExecStart=` to replace it, you discard the **entire** shipped command,
 including all audit flags. Both must be restored in the replacement — see the
 drop-in examples above and issue #78.
 
-## 8. Stop the rig
+## 9. Stop the rig
 
 Test rigs here are stopped by default; started only when needed, stopped again
 at completion.
