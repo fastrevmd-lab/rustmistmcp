@@ -216,8 +216,8 @@ ExecStart=/usr/local/bin/rustmistmcp \
     --allow-insecure-bind \
     --allowed-host 192.0.2.10 \
     --allowed-host test-twoperson-mist:30030 \
-    --allowed-origin http://192.0.2.10:30030 \
-    --allowed-origin http://test-twoperson-mist:30030 \
+    --allowed-origin https://console.example.org \
+    --allowed-origin https://app.example.com \
     --audit-format json \
     --audit-log-file /var/lib/rustmistmcp/audit.jsonl \
     --audit-redact devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac \
@@ -238,8 +238,8 @@ ExecStart=/usr/local/bin/rustmistmcp \
     --allow-insecure-bind \
     --allowed-host 192.0.2.11 \
     --allowed-host test-labmode-mist:30030 \
-    --allowed-origin http://192.0.2.11:30030 \
-    --allowed-origin http://test-labmode-mist:30030 \
+    --allowed-origin https://console.example.org \
+    --allowed-origin https://app.example.com \
     --lab-mode \
     --audit-format json \
     --audit-log-file /var/lib/rustmistmcp/audit.jsonl \
@@ -259,13 +259,23 @@ shipped unit carries. Losing those flags leaves audit redaction disabled and
 the HMAC key unused, so `host`, `name`, and `device` fields are written
 unhashed. See issue #78.
 
-Point both `--allowed-host` and `--allowed-origin` at that rig's own address
-(IP and DNS name). A non-loopback `--host` requires **both**: omitting
-`--allowed-origin` fails at startup with `non-loopback bind '0.0.0.0' requires
-at least one --allowed-origin`. Origins include the scheme and port:
-`http://192.0.2.10:30030`, not just the host. The two flags must move in
-lockstep: whatever address clients dial must appear in both lists, or requests
-are refused with 421.
+`--allowed-host` and `--allowed-origin` serve **different purposes** and are
+configured independently:
+
+- **`--allowed-host`** lists the server authorities clients dial (IP addresses
+  and DNS names). This validates the HTTP `Host` header. A mismatch returns
+  **421 MISDIRECTED_REQUEST** with `Host '<host>' is not allowed`.
+
+- **`--allowed-origin`** lists the trusted browser application origins that
+  call this server (e.g., `https://console.example.org`). This validates the
+  `Origin` header sent by browsers. A mismatch returns **403 FORBIDDEN** with
+  `Origin '<origin>' is not allowed`. Clients that send no `Origin` header
+  (curl, non-browser MCP clients) are unaffected by this check.
+
+A non-loopback `--host` requires at least one `--allowed-origin` to start,
+even if no browser clients exist yet. The drop-ins above use documentation
+origins as examples — replace them with the actual browser application origins
+that will call this server.
 
 Why site config belongs in a drop-in: the shipped unit carries the seccomp
 posture. Replacing it wholesale silently loses that on upgrade.
@@ -312,10 +322,22 @@ template. Run this check from the Proxmox host, not from inside the container.
 **Service fails to start with `non-loopback bind '0.0.0.0' requires at least one --allowed-origin`**
 
 The drop-in binds `--host 0.0.0.0` but is missing `--allowed-origin` flags.
-A non-loopback listener requires **both** `--allowed-host` and
-`--allowed-origin`. Add one `--allowed-origin` line for each `--allowed-host`,
-with the scheme and port: `http://192.0.2.10:30030` for IP,
-`http://test-twoperson-mist:30030` for DNS name.
+A non-loopback listener requires at least one `--allowed-origin` to start,
+even if no browser clients exist yet. Add one or more browser application
+origins (e.g., `https://console.example.org`), not the server's own address.
+
+**Requests fail with `421 MISDIRECTED_REQUEST` and `Host '<host>' is not allowed`**
+
+The client is dialing an address that is not in the `--allowed-host` list.
+Add the server authority the client actually dials — IP address or DNS name,
+with port if non-standard (e.g., `192.0.2.10`, `test-twoperson-mist:30030`).
+
+**Browser requests fail with `403 FORBIDDEN` and `Origin '<origin>' is not allowed`**
+
+The browser is running an application whose origin is not in the
+`--allowed-origin` list. Add the browser application's origin with scheme and
+port (e.g., `https://console.example.org`). Non-browser clients (curl, MCP CLI)
+are unaffected — this check applies only when an `Origin` header is present.
 
 **Audit log contains unhashed device/host/name fields**
 
