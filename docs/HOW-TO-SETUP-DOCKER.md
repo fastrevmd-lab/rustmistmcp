@@ -179,7 +179,7 @@ docker run -d --name mist-labmode \
   --audit-hmac-key-file /etc/rustmistmcp/audit-hmac.key \
   --allow-insecure-bind \
   --allowed-host 127.0.0.1:30044 --allowed-host localhost:30044 \
-  --allowed-origin https://console.example.org \
+  --allowed-origin http://console.example.org \
   --lab-mode
 ```
 
@@ -188,9 +188,16 @@ state directory** is mounted because change-set state must outlive the
 container — removing the container without it discards any non-terminal
 operations. The published port is bound to **loopback only** (`-p 127.0.0.1:...`)
 because `--allowed-host` and `--allowed-origin` are header checks, not a
-network boundary; external access needs TLS. Lab mode waives the approval gate
-and records `approval_waiver=lab-mode` in the audit trail. **Do not point it
-at a production org.**
+network boundary; external access needs TLS.
+
+**The origin scheme must match the server's TLS configuration.** These plaintext
+examples use `http://` origins because the server runs `--allow-insecure-bind`
+with no TLS configured. An HTTPS console origin (`https://...`) requires
+`--tls-cert` and `--tls-key` on the listener — browsers block HTTPS→HTTP calls
+as active mixed content before Origin validation runs.
+
+Lab mode waives the approval gate and records `approval_waiver=lab-mode` in
+the audit trail. **Do not point it at a production org.**
 
 ## 4. Run it — two-person mode
 
@@ -218,7 +225,7 @@ docker run -d --name mist-twoperson \
   --audit-hmac-key-file /etc/rustmistmcp/audit-hmac.key \
   --allow-insecure-bind \
   --allowed-host 127.0.0.1:30034 --allowed-host localhost:30034 \
-  --allowed-origin https://console.example.org
+  --allowed-origin http://console.example.org
 ```
 
 **Note the port asymmetry, because it catches people.** The server always

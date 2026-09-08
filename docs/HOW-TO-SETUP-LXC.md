@@ -218,8 +218,8 @@ ExecStart=/usr/local/bin/rustmistmcp \
     --allow-insecure-bind \
     --allowed-host 192.0.2.10 \
     --allowed-host test-twoperson-mist:30030 \
-    --allowed-origin https://console.example.org \
-    --allowed-origin https://app.example.com \
+    --allowed-origin http://console.example.org \
+    --allowed-origin http://app.example.com \
     --audit-format json \
     --audit-log-file /var/lib/rustmistmcp/audit.jsonl \
     --audit-redact devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac \
@@ -240,8 +240,8 @@ ExecStart=/usr/local/bin/rustmistmcp \
     --allow-insecure-bind \
     --allowed-host 192.0.2.11 \
     --allowed-host test-labmode-mist:30030 \
-    --allowed-origin https://console.example.org \
-    --allowed-origin https://app.example.com \
+    --allowed-origin http://console.example.org \
+    --allowed-origin http://app.example.com \
     --lab-mode \
     --audit-format json \
     --audit-log-file /var/lib/rustmistmcp/audit.jsonl \
@@ -269,10 +269,17 @@ configured independently:
   **421 MISDIRECTED_REQUEST** with `Host '<host>' is not allowed`.
 
 - **`--allowed-origin`** lists the trusted browser application origins that
-  call this server (e.g., `https://console.example.org`). This validates the
-  `Origin` header sent by browsers. A mismatch returns **403 FORBIDDEN** with
-  `Origin '<origin>' is not allowed`. Clients that send no `Origin` header
-  (curl, non-browser MCP clients) are unaffected by this check.
+  call this server. This validates the `Origin` header sent by browsers. A
+  mismatch returns **403 FORBIDDEN** with `Origin '<origin>' is not allowed`.
+  Clients that send no `Origin` header (curl, non-browser MCP clients) are
+  unaffected by this check.
+
+**The origin scheme must match the server's TLS configuration.** These plaintext
+drop-ins use `http://` origins (e.g., `http://console.example.org`) because the
+server runs `--allow-insecure-bind` with no TLS configured. An HTTPS console
+origin (`https://...`) requires `--tls-cert` and `--tls-key` on the listener —
+browsers block HTTPS→HTTP calls as active mixed content before Origin validation
+runs.
 
 A non-loopback `--host` requires at least one `--allowed-origin` to start,
 even if no browser clients exist yet. The drop-ins above use documentation
@@ -326,7 +333,8 @@ template. Run this check from the Proxmox host, not from inside the container.
 The drop-in binds `--host 0.0.0.0` but is missing `--allowed-origin` flags.
 A non-loopback listener requires at least one `--allowed-origin` to start,
 even if no browser clients exist yet. Add one or more browser application
-origins (e.g., `https://console.example.org`), not the server's own address.
+origins (e.g., `http://console.example.org` for plaintext, `https://...` with
+TLS configured), not the server's own address.
 
 **Requests fail with `421 MISDIRECTED_REQUEST` and `Host '<host>' is not allowed`**
 
@@ -338,8 +346,10 @@ with port if non-standard (e.g., `192.0.2.10`, `test-twoperson-mist:30030`).
 
 The browser is running an application whose origin is not in the
 `--allowed-origin` list. Add the browser application's origin with scheme and
-port (e.g., `https://console.example.org`). Non-browser clients (curl, MCP CLI)
-are unaffected — this check applies only when an `Origin` header is present.
+port matching the server's TLS configuration (e.g., `http://console.example.org`
+for plaintext, `https://...` with `--tls-cert`/`--tls-key`). Non-browser clients
+(curl, MCP CLI) are unaffected — this check applies only when an `Origin` header
+is present.
 
 **Audit log contains unhashed device/host/name fields**
 
