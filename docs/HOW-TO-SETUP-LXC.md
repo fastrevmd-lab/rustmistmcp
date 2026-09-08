@@ -42,16 +42,25 @@ the old binary has been replaced — an outage, not a build failure.
 
 Take the binary from the release image, which CI builds against the right glibc.
 Pin by **immutable digest** rather than a mutable tag, so republishing the tag
-does not silently change what you package:
+does not silently change what you package.
+
+**Important:** extract directly to the **gitignored target path** the skip-build
+branch reads, never to the repo root — an untracked file at the root dirties
+the tree, and the packager refuses a dirty tree before `RUSTMISTMCP_SKIP_BUILD`
+is honored:
 
 ```bash
 # Obtain the digest for the version you want:
 #   docker pull ghcr.io/fastrevmd-lab/rustmistmcp:0.3.0
 #   docker inspect ghcr.io/fastrevmd-lab/rustmistmcp:0.3.0 --format='{{index .RepoDigests 0}}'
-# Then pin by that digest:
+# Then extract the binary directly to the target path:
+cd /path/to/rustmistmcp
+target_path=${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-gnu/release
+mkdir -p "$target_path"
 docker create --name mx ghcr.io/fastrevmd-lab/rustmistmcp@sha256:<verified-64-hex-digest>
-docker cp mx:/usr/local/bin/rustmistmcp ./rustmistmcp
+docker cp mx:/usr/local/bin/rustmistmcp "$target_path/rustmistmcp"
 docker rm mx
+chmod 0755 "$target_path/rustmistmcp"
 ```
 
 On the workstation, glibc is 2.44; in the Debian 13 container, it is 2.41.
@@ -59,19 +68,9 @@ Forward-incompatible means the 2.44-linked binary will not load against 2.41.
 
 ## 2. Package the release
 
-`scripts/build-release.sh` builds the tarball. Point it at the binary you just
-extracted rather than letting it compile one.
-
-**Important:** extract to the **gitignored target path** the skip-build branch
-actually reads, not to the repo root — an untracked file at the root dirties
-the tree, and the packager refuses a dirty tree before `RUSTMISTMCP_SKIP_BUILD`
-is honored:
+`scripts/build-release.sh` builds the tarball from the binary you just extracted:
 
 ```bash
-cd /path/to/rustmistmcp
-target_path=${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-gnu/release
-mkdir -p "$target_path"
-install -m 0755 ./rustmistmcp "$target_path/rustmistmcp"
 RUSTMISTMCP_SKIP_BUILD=1 scripts/build-release.sh
 # >> Wrote dist/rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
 ```
