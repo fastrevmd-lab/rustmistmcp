@@ -133,8 +133,8 @@ Both bind port 30030.
 also requires an environment variable attesting that the host is unprivileged
 with nesting enabled, which the installer cannot verify from inside the
 container. Push both files under their original basenames (the installer
-validates against the release naming contract) and run the installer from the
-checkout to verify the archive before extracting it:
+validates against the release naming contract). **Verify the archive checksum
+BEFORE extracting** to ensure arbitrary archive code never executes:
 
 ```bash
 pct push 618 dist/rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz /tmp/rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
@@ -142,6 +142,8 @@ pct push 618 dist/rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256 /tmp
 
 pct exec 618 -- bash -lc '
   cd /tmp
+  # Verify checksum BEFORE extracting anything
+  sha256sum -c rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256 || exit 1
   tar xzf rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
   cd rustmistmcp-*/
   RUSTMISTMCP_LXC_HOST_PROOF=unprivileged=1,nesting=1 bash ./packaging/lxc/install.sh /tmp/rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz /tmp/rustmistmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
@@ -212,16 +214,15 @@ ExecStart=
 ExecStart=/usr/local/bin/rustmistmcp \
     --device-mapping /etc/rustmistmcp/mist.json \
     --transport streamable-http \
-    --host 0.0.0.0 \
+    --host 127.0.0.1 \
     --port 30030 \
     --tokens-file /var/lib/rustmistmcp/tokens.json \
-    --allow-insecure-bind \
-    --allowed-host 192.0.2.10 \
-    --allowed-host test-twoperson-mist:30030 \
-    --allowed-origin http://console.example.org \
-    --allowed-origin http://app.example.com \
+    --allowed-host 127.0.0.1:30030 \
+    --allowed-host localhost:30030 \
+    --allowed-origin http://127.0.0.1:30030 \
+    --allowed-origin http://localhost:30030 \
     --audit-format json \
-    --audit-log-file /var/lib/rustmistmcp/audit.jsonl \
+    --audit-journald \
     --audit-redact devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac \
     --audit-hmac-key-file /etc/rustmistmcp/audit-hmac.key
 ```
@@ -234,17 +235,16 @@ ExecStart=
 ExecStart=/usr/local/bin/rustmistmcp \
     --device-mapping /etc/rustmistmcp/mist.json \
     --transport streamable-http \
-    --host 0.0.0.0 \
+    --host 127.0.0.1 \
     --port 30030 \
     --tokens-file /var/lib/rustmistmcp/tokens.json \
-    --allow-insecure-bind \
-    --allowed-host 192.0.2.11 \
-    --allowed-host test-labmode-mist:30030 \
-    --allowed-origin http://console.example.org \
-    --allowed-origin http://app.example.com \
+    --allowed-host 127.0.0.1:30030 \
+    --allowed-host localhost:30030 \
+    --allowed-origin http://127.0.0.1:30030 \
+    --allowed-origin http://localhost:30030 \
     --lab-mode \
     --audit-format json \
-    --audit-log-file /var/lib/rustmistmcp/audit.jsonl \
+    --audit-journald \
     --audit-redact devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac \
     --audit-hmac-key-file /etc/rustmistmcp/audit-hmac.key
 ```
@@ -274,17 +274,20 @@ configured independently:
   Clients that send no `Origin` header (curl, non-browser MCP clients) are
   unaffected by this check.
 
-**The origin scheme must match the server's TLS configuration.** These plaintext
-drop-ins use `http://` origins (e.g., `http://console.example.org`) because the
-server runs `--allow-insecure-bind` with no TLS configured. An HTTPS console
-origin (`https://...`) requires `--tls-cert` and `--tls-key` on the listener —
-browsers block HTTPS→HTTP calls as active mixed content before Origin validation
-runs.
+**These drop-ins bind loopback only** (`--host 127.0.0.1`). The repository's
+security policy requires TLS for external HTTP (CLAUDE.md: "External HTTP
+requires TLS plus exact Host/Origin policy"), so test rigs bind loopback to
+keep MCP bearer tokens and Mist responses off the network. External access
+requires a TLS-terminating proxy in front (e.g., nginx with `--tls-cert` and
+`--tls-key` forwarding to the loopback listener). The origin scheme must match
+the server's TLS configuration: loopback plaintext takes `http://` origins;
+HTTPS requires `--tls-cert`/`--tls-key` and `https://` origins — browsers block
+HTTPS→HTTP calls as active mixed content.
 
 A non-loopback `--host` requires at least one `--allowed-origin` to start,
-even if no browser clients exist yet. The drop-ins above use documentation
-origins as examples — replace them with the actual browser application origins
-that will call this server.
+even if no browser clients exist yet. The drop-ins above use loopback addresses
+as examples — for external access, configure TLS and update the origins to
+match.
 
 Why site config belongs in a drop-in: the shipped unit carries the seccomp
 posture. Replacing it wholesale silently loses that on upgrade.

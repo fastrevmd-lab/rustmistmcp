@@ -100,8 +100,8 @@ out of shell history:
 read -sp 'Mist API token: ' token && printf '%s' "$token" > mist-api-token && unset token
 ```
 
-**`audit-hmac.key`** — the HMAC key for tamper-evident audit. Generate a random
-key:
+**`audit-hmac.key`** — the HMAC key for pseudonymous audit redaction. Generate a
+random key:
 
 ```bash
 openssl rand -hex 32 > audit-hmac.key

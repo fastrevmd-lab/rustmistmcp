@@ -98,7 +98,7 @@ if [[ ${RUSTMISTMCP_SKIP_BUILD:-0} == 1 ]]; then
         printf 'binary version mismatch: binary reports %s, packaging %s (Cargo.toml)\n' \
             "$binary_version" "$cargo_version" >&2
         exit 1
-    fi
+    }
     printf '%s\n' "skipping cargo build: packaging the existing $prebuilt"
 else
     cargo build --release --locked --bin rustmistmcp --target "$target"
