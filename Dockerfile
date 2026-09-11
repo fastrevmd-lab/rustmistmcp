@@ -22,5 +22,12 @@ COPY --from=builder /workspace/target/release/rustmistmcp /usr/local/bin/rustmis
 USER 65532:65532
 EXPOSE 30030
 STOPSIGNAL SIGTERM
-ENTRYPOINT ["/usr/local/bin/rustmistmcp"]
-CMD ["--device-mapping", "/etc/rustmistmcp/mist.json", "--transport", "streamable-http", "--host", "127.0.0.1", "--port", "30030", "--tokens-file", "/var/lib/rustmistmcp/tokens.json", "--audit-format", "json", "--audit-redact", "devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac", "--audit-hmac-key-file", "/etc/rustmistmcp/audit-hmac.key"]
+ENTRYPOINT [ \
+    "/usr/local/bin/rustmistmcp", \
+    "--device-mapping", "/etc/rustmistmcp/mist.json", \
+    "--tokens-file", "/var/lib/rustmistmcp/tokens.json", \
+    "--audit-format", "json", \
+    "--audit-redact", "devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac", \
+    "--audit-hmac-key-file", "/etc/rustmistmcp/audit-hmac.key" \
+]
+CMD ["--transport", "streamable-http", "--host", "127.0.0.1", "--port", "30030"]

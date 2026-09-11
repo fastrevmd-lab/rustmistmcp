@@ -135,10 +135,28 @@ require_regex "$dockerfile" '^FROM rust:[0-9]+\.[0-9]+\.[0-9]+-slim-bookworm@sha
 require_regex "$dockerfile" '^FROM gcr\.io/distroless/cc-debian13:nonroot@sha256:[0-9a-f]{64}$'
 require_absent "$dockerfile" '^# syntax='
 require_contains "$dockerfile" 'USER 65532:65532'
-require_contains "$dockerfile" 'ENTRYPOINT ["/usr/local/bin/rustmistmcp"]'
 require_contains "$dockerfile" 'EXPOSE 30030'
 require_contains "$dockerfile" 'COPY docs/mist-api/catalog.json ./docs/mist-api/catalog.json'
-require_contains "$dockerfile" 'CMD ["--device-mapping", "/etc/rustmistmcp/mist.json", "--transport", "streamable-http", "--host", "127.0.0.1", "--port", "30030", "--tokens-file", "/var/lib/rustmistmcp/tokens.json", "--audit-format", "json", "--audit-redact", "devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac", "--audit-hmac-key-file", "/etc/rustmistmcp/audit-hmac.key"]'
+
+# ENTRYPOINT must contain security-relevant flags and config paths (#78).
+# The ENTRYPOINT is multi-line so check each flag appears in the file (they are
+# all within the ENTRYPOINT block per the visual inspection above).
+require_contains "$dockerfile" '"--audit-format", "json",'
+require_contains "$dockerfile" '"--audit-redact", "devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac",'
+require_contains "$dockerfile" '"--audit-hmac-key-file", "/etc/rustmistmcp/audit-hmac.key"'
+require_contains "$dockerfile" '"--tokens-file", "/var/lib/rustmistmcp/tokens.json",'
+require_contains "$dockerfile" '"--device-mapping", "/etc/rustmistmcp/mist.json",'
+
+# CMD must be single-line and contain transport, host, port.
+require_contains "$dockerfile" 'CMD ["--transport", "streamable-http", "--host", "127.0.0.1", "--port", "30030"]'
+
+# Regression guard for #78: CMD must NOT contain audit flags or config paths.
+require_absent "$dockerfile" 'CMD.*--audit-format'
+require_absent "$dockerfile" 'CMD.*--audit-redact'
+require_absent "$dockerfile" 'CMD.*--audit-hmac-key-file'
+require_absent "$dockerfile" 'CMD.*--tokens-file'
+require_absent "$dockerfile" 'CMD.*--device-mapping'
+
 require_absent "$dockerfile" --audit-journald
 require_contains "$dockerfile" 'STOPSIGNAL SIGTERM'
 require_absent "$dockerfile" '(apt-get|apk add|dnf install|yum install|curl |wget |/bin/sh)'

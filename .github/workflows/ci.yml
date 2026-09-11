@@ -107,4 +107,18 @@ jobs:
           docker build --build-arg VERSION=ci --build-arg REVISION="$GITHUB_SHA" -t rustmistmcp:ci .
           docker run --rm --read-only --network none --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m rustmistmcp:ci --help
           docker run --rm --read-only --network none --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m rustmistmcp:ci --version
+
+          # Regression test for #78: audit flags must survive operator overrides.
+          # Docker replaces CMD entirely when the caller supplies args, but ENTRYPOINT
+          # is appended to. Security-relevant flags (audit-format, audit-redact,
+          # audit-hmac-key-file) must live in ENTRYPOINT so they cannot be lost.
+          container_id=$(docker create rustmistmcp:ci --host 0.0.0.0)
+          argv=$(docker inspect "$container_id" --format '{{join .Args "\n"}}')
+          docker rm "$container_id" > /dev/null
+
+          echo "$argv" | grep -q -- '--audit-hmac-key-file' || { echo "FAIL: --audit-hmac-key-file missing from argv with --host override"; exit 1; }
+          echo "$argv" | grep -q -- '--audit-redact' || { echo "FAIL: --audit-redact missing from argv with --host override"; exit 1; }
+          echo "$argv" | grep -q -- '--audit-format' || { echo "FAIL: --audit-format missing from argv with --host override"; exit 1; }
+          echo "PASS: audit flags survive --host override"
+
           scripts/smoke-oci.sh rustmistmcp:ci
