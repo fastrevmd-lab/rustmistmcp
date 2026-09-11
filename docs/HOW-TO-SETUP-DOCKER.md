@@ -19,34 +19,45 @@ Records carry approval_waiver=lab-mode. Do not run this against production devic
 
 If you see that line and did not intend it, stop and fix the flag.
 
-## The audit configuration problem
+## ENTRYPOINT and CMD split
 
-**This is the first thing that will bite you.** The published image sets an
-`ENTRYPOINT` with the binary path and places everything else — including the
-audit configuration — in `CMD`:
+The published image splits arguments between `ENTRYPOINT` and `CMD` so that
+security-relevant configuration survives operator overrides.
+
+**ENTRYPOINT** carries what must always hold — config paths, credentials, and
+security-relevant flags:
 
 ```
 --device-mapping /etc/rustmistmcp/mist.json
---transport streamable-http --host 127.0.0.1 --port 30030
 --tokens-file /var/lib/rustmistmcp/tokens.json
 --audit-format json
 --audit-redact devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac
 --audit-hmac-key-file /etc/rustmistmcp/audit-hmac.key
 ```
 
-Docker **replaces CMD entirely** when you pass your own arguments. The image
-binds `127.0.0.1`, so every real deployment passes at least `--host` — and
-that silently takes the audit configuration with it. Measured on the published
-0.3.0 image:
+**CMD** carries only operator-tunable flags — bind address, port, transport:
+
+```
+--transport streamable-http --host 127.0.0.1 --port 30030
+```
+
+Docker **replaces CMD entirely** when you pass arguments, but **appends to
+ENTRYPOINT**. The image binds `127.0.0.1` by default, so real deployments pass
+at least `--host` — that replaces the CMD flags (`--transport`, `--host`,
+`--port`) but the audit configuration in ENTRYPOINT survives.
+
+**Before v0.3.1** (fixed in #78), all flags lived in `CMD`, so any `--host`
+override silently lost the audit configuration. Measured on the published 0.3.0
+image:
 
 ```
 image default CMD                    -> 4 audit-related arguments
 container started with any own args  -> 0 audit-related arguments
 ```
 
-The server starts and serves normally; the audit log is simply **unkeyed and
-unredacted** from then on, with no warning. You lose **pseudonymous redaction**
-of identifying fields silently — device names, hosts, and commands are written
+The server started and served normally; the audit log was simply **unkeyed and
+unredacted** from then on, with no warning. **Pseudonymous redaction**
+of identifying fields — device names, hosts, and commands — was written
 in plaintext. The HMAC flags provide pseudonymity (making fields unlinkable to
 their source without the key), not tamper-evidence: records can still be
 deleted, reordered, or replaced undetected because nothing signs or hash-chains
@@ -170,13 +181,8 @@ docker run -d --name mist-labmode \
   -v "$PWD/tokens.json:/var/lib/rustmistmcp/tokens.json:ro" \
   -v "$PWD/mist-labmode-state:/var/lib/rustmistmcp/state:rw" \
   "$image" \
-  --device-mapping /etc/rustmistmcp/mist.json \
   --transport streamable-http --host 0.0.0.0 --port 30030 \
-  --tokens-file /var/lib/rustmistmcp/tokens.json \
   --state-file /var/lib/rustmistmcp/state/changeset-state.json \
-  --audit-format json \
-  --audit-redact devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac \
-  --audit-hmac-key-file /etc/rustmistmcp/audit-hmac.key \
   --allow-insecure-bind \
   --allowed-host 127.0.0.1:30044 --allowed-host localhost:30044 \
   --allowed-origin http://console.example.org \
@@ -216,13 +222,8 @@ docker run -d --name mist-twoperson \
   -v "$PWD/tokens.json:/var/lib/rustmistmcp/tokens.json:ro" \
   -v "$PWD/mist-twoperson-state:/var/lib/rustmistmcp/state:rw" \
   "$image" \
-  --device-mapping /etc/rustmistmcp/mist.json \
   --transport streamable-http --host 0.0.0.0 --port 30030 \
-  --tokens-file /var/lib/rustmistmcp/tokens.json \
   --state-file /var/lib/rustmistmcp/state/changeset-state.json \
-  --audit-format json \
-  --audit-redact devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac \
-  --audit-hmac-key-file /etc/rustmistmcp/audit-hmac.key \
   --allow-insecure-bind \
   --allowed-host 127.0.0.1:30034 --allowed-host localhost:30034 \
   --allowed-origin http://console.example.org
@@ -299,15 +300,17 @@ If you published `-p 30034:30030`, use `--allowed-host 127.0.0.1:30034`, not
 
 **Audit log is missing HMAC keys or redaction**
 
-You dropped the audit flags when passing your own arguments. Docker replaces
-`CMD` entirely when you supply arguments, so the image's default audit
-configuration is gone. Pass all four audit flags explicitly:
-`--audit-format json`, `--audit-redact ...`, `--audit-hmac-key-file ...`. See
-the warning at the top of this document and verify with:
+Since v0.3.1, audit flags live in `ENTRYPOINT` and survive any override — this
+should not happen. If you see unhashed `device`, `host`, or `name` fields,
+verify the image version and inspect the effective command:
 
 ```bash
 docker inspect <container> --format '{{join .Args " "}}' | grep audit
 ```
+
+You should see `--audit-format`, `--audit-redact`, and `--audit-hmac-key-file`
+regardless of what flags you passed at `docker run`. If they are missing, you
+are running a pre-v0.3.1 image affected by #78 — upgrade to v0.3.1 or later.
 
 **Container exits immediately with no log output**
 
