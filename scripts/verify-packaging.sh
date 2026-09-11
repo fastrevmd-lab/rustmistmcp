@@ -139,19 +139,18 @@ require_contains "$dockerfile" 'EXPOSE 30030'
 require_contains "$dockerfile" 'COPY docs/mist-api/catalog.json ./docs/mist-api/catalog.json'
 
 # ENTRYPOINT must contain security-relevant flags and config paths (#78).
-# Verify the split: audit flags, tokens-file, device-mapping live in ENTRYPOINT;
-# transport, host, port live in CMD; no overlap.
-require_contains "$dockerfile" 'ENTRYPOINT.*--audit-format'
-require_contains "$dockerfile" 'ENTRYPOINT.*--audit-redact'
-require_contains "$dockerfile" 'ENTRYPOINT.*--audit-hmac-key-file'
-require_contains "$dockerfile" 'ENTRYPOINT.*--tokens-file'
-require_contains "$dockerfile" 'ENTRYPOINT.*--device-mapping'
+# The ENTRYPOINT is multi-line so check each flag appears in the file (they are
+# all within the ENTRYPOINT block per the visual inspection above).
+require_contains "$dockerfile" '"--audit-format", "json",'
+require_contains "$dockerfile" '"--audit-redact", "devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac",'
+require_contains "$dockerfile" '"--audit-hmac-key-file", "/etc/rustmistmcp/audit-hmac.key"'
+require_contains "$dockerfile" '"--tokens-file", "/var/lib/rustmistmcp/tokens.json",'
+require_contains "$dockerfile" '"--device-mapping", "/etc/rustmistmcp/mist.json",'
 
-require_contains "$dockerfile" 'CMD.*--transport'
-require_contains "$dockerfile" 'CMD.*--host'
-require_contains "$dockerfile" 'CMD.*--port'
+# CMD must be single-line and contain transport, host, port.
+require_contains "$dockerfile" 'CMD ["--transport", "streamable-http", "--host", "127.0.0.1", "--port", "30030"]'
 
-# CMD must NOT contain any ENTRYPOINT flags (regression guard for #78).
+# Regression guard for #78: CMD must NOT contain audit flags or config paths.
 require_absent "$dockerfile" 'CMD.*--audit-format'
 require_absent "$dockerfile" 'CMD.*--audit-redact'
 require_absent "$dockerfile" 'CMD.*--audit-hmac-key-file'
