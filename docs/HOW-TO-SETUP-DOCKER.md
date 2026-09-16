@@ -47,7 +47,7 @@ at least `--host` — that replaces the CMD flags (`--transport`, `--host`,
 `--port`) but the audit configuration in ENTRYPOINT survives.
 
 **Before v0.3.1** (fixed in #78), all flags lived in `CMD`, so any `--host`
-override silently lost the audit configuration. Measured on the published 0.3.0
+override silently lost the audit configuration. Measured on the published 0.3.1
 image:
 
 ```
@@ -163,8 +163,8 @@ Pin the image by immutable digest rather than a mutable tag. Pull the image
 and capture its digest (RepoDigests is empty until the image is pulled):
 
 ```bash
-docker pull ghcr.io/fastrevmd-lab/rustmistmcp:0.3.0
-image=$(docker inspect ghcr.io/fastrevmd-lab/rustmistmcp:0.3.0 \
+docker pull ghcr.io/fastrevmd-lab/rustmistmcp:0.3.1
+image=$(docker inspect ghcr.io/fastrevmd-lab/rustmistmcp:0.3.1 \
     --format='{{index .RepoDigests 0}}')
 ```
 

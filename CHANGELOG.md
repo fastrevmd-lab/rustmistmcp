@@ -10,6 +10,52 @@ visible rather than looking like those versions never existed.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-16
+
+### Security
+
+- **rustls 0.23.45, closing RUSTSEC-2026-0285** (#85). TLS 1.3 handshake
+  messages accepted across encryption-level boundaries, medium severity, CVSS
+  5.3. This server was on 0.23.44, which was still vulnerable. Lockfile-only
+  change to 0.23.45, which contains the fix.
+
+### Fixed
+
+- **Audit flags moved to ENTRYPOINT so they cannot be silently lost** (#84).
+  Docker replaces CMD entirely when arguments are supplied, but appends to
+  ENTRYPOINT. The image carried audit configuration in CMD, so any real
+  deployment — which must override `--host` to expose the port — silently lost
+  the audit format, redaction rules, and HMAC key. The container started and
+  served normally with no indication that the audit log was unkeyed and
+  unredacted.
+  
+  The image now splits CMD and ENTRYPOINT: ENTRYPOINT holds config paths,
+  credentials, and security-relevant flags (device-mapping, tokens-file,
+  audit-format, audit-redact, audit-hmac-key-file); CMD holds only
+  operator-tunable flags (transport, host, port). Operators passing `--host`
+  overrides now retain audit configuration. A CI regression test asserts the
+  resulting argv contains all three audit flags after a typical override.
+
+- **Dockerfile trailing newline restored** (#88). The file lost its final
+  newline in an earlier edit.
+
+### Changed
+
+- Re-pinned the `mecmcp-*` crates from `v0.21.0` to `v0.23.0` via rmcp
+  3.4.0 (#87), which renamed `ServerInfo` to `ServerConfig`. Call sites and
+  literals updated accordingly.
+- `jsonschema` bumped from 0.52.1 to 0.55.0 (#83).
+- `toml` bumped from 1.1.4+spec-1.1.0 to 1.1.5+spec-1.1.0 (#79).
+- `docker/setup-qemu-action` bumped from 4.2.0 to 4.3.0 in the release workflow (#80).
+- `distroless/cc-debian13:nonroot` base image updated to a newer digest (#86).
+
+### Added
+
+- **Packaging documentation** (#77). Added `docs/HOW-TO-SETUP-LXC.md`, which
+  documents how to build a rustmistmcp LXC and how to package a CI binary
+  without forging BUILD-INFO, completing the setup guides for both Docker and
+  LXC deployment methods.
+
 ## [0.3.0] - 2026-09-01
 
 ### Changed
