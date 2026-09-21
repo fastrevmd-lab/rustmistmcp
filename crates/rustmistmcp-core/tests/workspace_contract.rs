@@ -22,7 +22,7 @@ fn workspace_metadata_lints_and_shared_revision_are_locked() {
         "resolver = \"2\"",
         "version = \"0.3.1\"",
         "edition = \"2024\"",
-        "rust-version = \"1.88\"",
+        "rust-version = \"1.89\"",
         "license = \"MIT\"",
         "repository = \"https://github.com/fastrevmd-lab/rustmistmcp\"",
         "authors = [\"fastrevmd-lab\"]",

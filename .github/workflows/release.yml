@@ -38,8 +38,8 @@ jobs:
           shellcheck scripts/*.sh packaging/lxc/install.sh
       - name: Verify MSRV
         run: |
-          rustup toolchain install 1.88.0 --profile minimal
-          cargo +1.88.0 check --workspace --locked
+          rustup toolchain install 1.89.0 --profile minimal
+          cargo +1.89.0 check --workspace --locked
       - name: Supply-chain checks
         run: |
           cargo install --locked cargo-audit cargo-deny
