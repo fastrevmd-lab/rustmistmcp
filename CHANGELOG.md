@@ -10,6 +10,11 @@ visible rather than looking like those versions never existed.
 
 ## [Unreleased]
 
+### Changed
+
+- **MSRV raised to 1.89** — family-wide decision.
+
+
 ## [0.3.1] - 2026-09-16
 
 ### Security

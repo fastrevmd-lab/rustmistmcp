@@ -324,7 +324,7 @@ require_regex .github/workflows/release.yml 'rust:[0-9]+\.[0-9]+\.[0-9]+-slim-bo
 # must actually exercise it.
 require_contains .github/workflows/ci.yml '--version'
 require_contains .github/workflows/ci.yml '--help'
-require_contains .github/workflows/ci.yml 'rustup toolchain install 1.88.0 --profile minimal'
+require_contains .github/workflows/ci.yml 'rustup toolchain install 1.89.0 --profile minimal'
 require_contains .github/workflows/ci.yml 'scripts/smoke-oci.sh'
 require_contains .github/workflows/ci.yml 'RUSTMISTMCP_BINARY=target/release/rustmistmcp scripts/verify-packaging.sh'
 require_contains .github/workflows/release.yml 'RUSTMISTMCP_BINARY=target/release/rustmistmcp scripts/verify-packaging.sh'
@@ -361,7 +361,7 @@ require_count .github/workflows/release.yml 'contents: read' 3
 require_count .github/workflows/release.yml 'packages: write' 1
 require_count .github/workflows/release.yml 'id-token: write' 1
 require_count .github/workflows/release.yml 'attestations: write' 1
-require_contains .github/workflows/release.yml 'cargo +1.88.0 check --workspace --locked'
+require_contains .github/workflows/release.yml 'cargo +1.89.0 check --workspace --locked'
 require_contains .github/workflows/release.yml 'cargo doc --workspace --no-deps --locked'
 require_contains .github/workflows/release.yml 'cargo audit'
 require_contains .github/workflows/release.yml 'cargo deny check'
