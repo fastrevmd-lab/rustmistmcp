@@ -319,6 +319,106 @@ enum Direction {
     Response,
 }
 
+/// Return the JSON type name of a value without exposing its content.
+///
+/// Used for validation errors to avoid leaking sensitive instance values into
+/// audit logs while still providing diagnosable type information.
+fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+/// Format a validation error kind without embedding the instance value.
+///
+/// Critical for audit redaction: this must never interpolate the actual value,
+/// only its type. Device names, hostnames, and serials are redacted in audit
+/// logs; a schema violation should not bypass that by writing the raw value.
+fn format_validation_error_kind(
+    kind: &jsonschema::error::ValidationErrorKind,
+    actual_type: &str,
+) -> String {
+    use jsonschema::error::{TypeKind, ValidationErrorKind};
+    match kind {
+        ValidationErrorKind::Type { kind: type_kind } => {
+            let expected = match type_kind {
+                TypeKind::Single(t) => format!("[\"{}\"]", t),
+                TypeKind::Multiple(types) => {
+                    let type_list: Vec<String> =
+                        types.iter().map(|t| format!("\"{}\"", t)).collect();
+                    format!("[{}]", type_list.join(", "))
+                }
+            };
+            format!("expected one of {}, got {}", expected, actual_type)
+        }
+        ValidationErrorKind::Enum { options } => {
+            let count = options.as_array().map(|a| a.len()).unwrap_or(0);
+            format!(
+                "value ({}) not in enum (expected one of {} options)",
+                actual_type, count
+            )
+        }
+        ValidationErrorKind::AdditionalProperties { unexpected } => {
+            format!(
+                "unexpected properties: {}",
+                unexpected
+                    .iter()
+                    .map(|s| format!("\"{}\"", s))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+        ValidationErrorKind::Required { property } => {
+            format!("missing required property \"{}\"", property)
+        }
+        ValidationErrorKind::Format { format } => {
+            format!(
+                "value ({}) does not match format \"{}\"",
+                actual_type, format
+            )
+        }
+        ValidationErrorKind::Pattern { pattern } => {
+            format!("value (string) does not match pattern \"{}\"", pattern)
+        }
+        ValidationErrorKind::MinLength { limit } => {
+            format!("string length below minimum {}", limit)
+        }
+        ValidationErrorKind::MaxLength { limit } => {
+            format!("string length exceeds maximum {}", limit)
+        }
+        ValidationErrorKind::Minimum { limit } => {
+            format!("number below minimum {}", limit)
+        }
+        ValidationErrorKind::Maximum { limit } => {
+            format!("number exceeds maximum {}", limit)
+        }
+        ValidationErrorKind::MinItems { limit } => {
+            format!("array has fewer than {} items", limit)
+        }
+        ValidationErrorKind::MaxItems { limit } => {
+            format!("array has more than {} items", limit)
+        }
+        ValidationErrorKind::UniqueItems => "array contains duplicate items".to_owned(),
+        ValidationErrorKind::MinProperties { limit } => {
+            format!("object has fewer than {} properties", limit)
+        }
+        ValidationErrorKind::MaxProperties { limit } => {
+            format!("object has more than {} properties", limit)
+        }
+        // For other kinds, provide a generic message with the keyword
+        _ => format!(
+            "validation failed: {} (type: {})",
+            kind.keyword(),
+            actual_type
+        ),
+    }
+}
+
 /// Validate one body against one declared schema.
 ///
 /// The validation root embeds the components registry, so building it clones
@@ -367,7 +467,11 @@ fn schema_matches(
                 } else {
                     error.instance_path().to_string()
                 };
-                format!("  - field {}: {}", path, error)
+                // Get the JSON type of the actual value (not the value itself)
+                let actual_type = json_type_name(error.instance());
+                // Format error based on kind without embedding instance value
+                let description = format_validation_error_kind(error.kind(), actual_type);
+                format!("  - field {}: {}", path, description)
             })
             .collect();
 
