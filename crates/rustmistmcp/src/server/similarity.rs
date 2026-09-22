@@ -89,9 +89,12 @@ fn token_similarity_boost(unknown_id: &str, candidate_id: &str) -> f64 {
         boost += 0.1;
     }
 
-    // Extra boost for operations that share BOTH device and command semantics
-    // This captures the pattern where getOrgOutboundSshCmd (ssh access + cmd)
-    // is related to getOrgJuniperDevicesCommand (devices + command)
+    // Extra boost for operations that share BOTH device and command semantics.
+    // When the unknown ID is semantically related (names a concept, not misspelled),
+    // token-level affinity matters more than edit distance alone. For example,
+    // getOrgOutboundSshCmd (ssh access + cmd) is related to getOrgJuniperDevicesCommand
+    // (devices + command) despite high edit distance, because both involve device access
+    // and command execution.
     if has_cmd_unknown && has_cmd_candidate && unknown_has_device && candidate_has_device {
         boost += 0.15;
     }
@@ -290,6 +293,111 @@ mod tests {
             "Expected at most {} suggestions, got {}",
             MAX_SUGGESTIONS,
             suggestions.len()
+        );
+    }
+
+    /// Characterization test pinning current ranking behavior.
+    ///
+    /// This test documents the current heuristic's output for a spread of inputs.
+    /// A future tweak to the scoring algorithm will show up as a diff here rather
+    /// than silently degrading quality.
+    #[test]
+    fn test_ranking_behavior_characterization() {
+        let catalog = Catalog::embedded().expect("embedded catalog must load");
+
+        // Typo: getOrgInventry -> should suggest getOrgInventory first
+        let suggestions = find_similar_operations(&catalog, "getOrgInventry");
+        assert!(
+            !suggestions.is_empty() && suggestions[0].0 == "getOrgInventory",
+            "Expected getOrgInventory as top suggestion for typo, got: {:?}",
+            suggestions.first().map(|(id, _, _)| id)
+        );
+
+        // Partial match: getSiteDevices -> should include getSiteDevice or listSiteDevices
+        let suggestions = find_similar_operations(&catalog, "getSiteDevices");
+        let ids: Vec<&str> = suggestions.iter().map(|(id, _, _)| *id).collect();
+        assert!(
+            ids.contains(&"getSiteDevice") || ids.contains(&"listSiteDevices"),
+            "Expected getSiteDevice or listSiteDevices in suggestions, got: {:?}",
+            ids
+        );
+
+        // Partial match: deleteOrgNetwork -> should include operations with Org + Network
+        let suggestions = find_similar_operations(&catalog, "deleteOrgNetwork");
+        let ids: Vec<&str> = suggestions.iter().map(|(id, _, _)| *id).collect();
+        // Just verify we get sensible suggestions, not empty
+        assert!(
+            !suggestions.is_empty(),
+            "Expected suggestions for deleteOrgNetwork, got none"
+        );
+        // Verify at least one contains "Network"
+        assert!(
+            ids.iter().any(|id| id.to_lowercase().contains("network")),
+            "Expected at least one suggestion with 'network', got: {:?}",
+            ids
+        );
+
+        // Generic term: rebootDevice -> verify we get device-related suggestions
+        let suggestions = find_similar_operations(&catalog, "rebootDevice");
+        let ids: Vec<&str> = suggestions.iter().map(|(id, _, _)| *id).collect();
+        assert!(
+            !suggestions.is_empty(),
+            "Expected device-related suggestions for rebootDevice, got none"
+        );
+        // At least one should contain "device" or "restart"
+        assert!(
+            ids.iter().any(|id| {
+                let lower = id.to_lowercase();
+                lower.contains("device") || lower.contains("restart")
+            }),
+            "Expected device or restart related suggestions, got: {:?}",
+            ids
+        );
+
+        // Real case with known wart: getOrgWlans
+        // Known behavior: short candidates like getOrgStats may rank first due to
+        // normalized distance favoring shorter strings, with sensible answers appearing
+        // in the set. This is harmless when showing 3 suggestions. Here, getOrgWLAN
+        // (singular, uppercase) appears due to minimal edit distance.
+        let suggestions = find_similar_operations(&catalog, "getOrgWlans");
+        let ids: Vec<&str> = suggestions.iter().map(|(id, _, _)| *id).collect();
+        assert!(
+            ids.contains(&"getOrgWLAN") || ids.contains(&"listOrgWlans"),
+            "Expected getOrgWLAN or listOrgWlans in suggestions for getOrgWlans, got: {:?}",
+            ids
+        );
+
+        // Nonsense: zzzzzzzzzz -> must return empty
+        let suggestions = find_similar_operations(&catalog, "zzzzzzzzzz");
+        assert!(
+            suggestions.is_empty(),
+            "Expected no suggestions for nonsense input, got: {:?}",
+            suggestions
+        );
+
+        // Real-world case 1: wrong prefix (list vs get)
+        let suggestions = find_similar_operations(&catalog, "listOrgInventory");
+        assert!(
+            !suggestions.is_empty() && suggestions[0].0 == "getOrgInventory",
+            "Expected getOrgInventory as top suggestion for listOrgInventory, got: {:?}",
+            suggestions.first().map(|(id, _, _)| id)
+        );
+
+        // Real-world case 2: missing suffix
+        let suggestions = find_similar_operations(&catalog, "getOrgLicenses");
+        let ids: Vec<&str> = suggestions.iter().map(|(id, _, _)| *id).collect();
+        assert!(
+            ids.contains(&"getOrgLicensesSummary"),
+            "Expected getOrgLicensesSummary in suggestions, got: {:?}",
+            ids
+        );
+
+        // Real-world case 3: semantic similarity (device + command)
+        let suggestions = find_similar_operations(&catalog, "getOrgOutboundSshCmd");
+        assert!(
+            !suggestions.is_empty() && suggestions[0].0 == "getOrgJuniperDevicesCommand",
+            "Expected getOrgJuniperDevicesCommand as top suggestion, got: {:?}",
+            suggestions.first().map(|(id, _, _)| id)
         );
     }
 }
