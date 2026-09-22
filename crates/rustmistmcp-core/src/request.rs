@@ -297,8 +297,11 @@ fn validate_schema(
     value: &serde_json::Value,
 ) -> Result<(), MistError> {
     match schema_matches(catalog, operation, slot, schema, value, Direction::Request) {
-        Ok(true) => Ok(()),
-        Ok(false) => invalid(request, "value violates catalog schema"),
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(details)) => invalid(
+            request,
+            &format!("value violates catalog schema:\n{}", details),
+        ),
         Err(()) => invalid(request, "catalog schema compilation failed"),
     }
 }
@@ -324,6 +327,10 @@ enum Direction {
 /// catalog is immutable after load, so the compiled validator is memoised
 /// against `(direction, operation, schema index)` and the root is built only on
 /// a miss — the closure below does not run on a hit.
+///
+/// Returns `Ok(Ok(()))` on successful validation, `Ok(Err(details))` when
+/// validation fails with field-level error details, or `Err(())` when the
+/// schema itself does not compile.
 fn schema_matches(
     catalog: &Catalog,
     operation: &str,
@@ -331,7 +338,7 @@ fn schema_matches(
     schema: &serde_json::Value,
     value: &serde_json::Value,
     direction: Direction,
-) -> Result<bool, ()> {
+) -> Result<Result<(), String>, ()> {
     let validator = catalog.cached_validator(operation, slot, || match direction {
         Direction::Request => serde_json::json!({
             "components": catalog.components,
@@ -346,7 +353,40 @@ fn schema_matches(
             })
         }
     })?;
-    Ok(validator.is_valid(value))
+
+    let mut errors_iter = validator.iter_errors(value);
+    if let Some(_first_error) = errors_iter.next() {
+        const MAX_ERRORS_SHOWN: usize = 5;
+        // Collect up to MAX_ERRORS_SHOWN errors (we already have the first one)
+        let error_list: Vec<String> = std::iter::once(_first_error)
+            .chain(errors_iter)
+            .take(MAX_ERRORS_SHOWN)
+            .map(|error| {
+                let path = if error.instance_path().is_empty() {
+                    "(root)".to_owned()
+                } else {
+                    error.instance_path().to_string()
+                };
+                format!("  - field {}: {}", path, error)
+            })
+            .collect();
+
+        let total_errors = error_list.len();
+        let mut message = error_list.join("\n");
+
+        // The iterator was capped at MAX_ERRORS_SHOWN, but we don't know if
+        // there were more. The best we can do is note when we hit the cap.
+        if total_errors == MAX_ERRORS_SHOWN {
+            message.push_str(&format!(
+                "\n  ... (showing first {} of potentially more errors)",
+                MAX_ERRORS_SHOWN
+            ));
+        }
+
+        Ok(Err(message))
+    } else {
+        Ok(Ok(()))
+    }
 }
 
 fn validate_response_bounds(response: &MistResponse) -> Result<(), MistError> {
@@ -397,7 +437,7 @@ fn validate_response_body(
         };
     }
     let result = match &response.body {
-        MistResponseBody::Empty => Err("declared response media requires a body"),
+        MistResponseBody::Empty => Err("declared response media requires a body".to_owned()),
         MistResponseBody::Json(value) => {
             // The media type is kept, not dropped: it is half the cache key.
             let schemas: Vec<_> = responses
@@ -405,10 +445,13 @@ fn validate_response_body(
                 .filter(|(media, _)| is_json_media(media))
                 .collect();
             if schemas.is_empty() {
-                Err("JSON body does not match declared response media")
-            } else if schemas.iter().any(|(media, schema)| {
-                matches!(
-                    schema_matches(
+                Err("JSON body does not match declared response media".to_owned())
+            } else {
+                let mut all_errors = Vec::new();
+                let mut any_passed = false;
+
+                for (media, schema) in &schemas {
+                    match schema_matches(
                         catalog,
                         &response.operation_id,
                         crate::catalog::SchemaSlot::ResponseBody {
@@ -418,25 +461,49 @@ fn validate_response_body(
                         schema,
                         value,
                         Direction::Response,
-                    ),
-                    Ok(true)
-                )
-            }) {
-                Ok(())
-            } else {
-                Err("JSON body violates declared response schema")
+                    ) {
+                        Ok(Ok(())) => {
+                            any_passed = true;
+                            break;
+                        }
+                        Ok(Err(details)) => {
+                            all_errors.push(format!("Schema for {}:\n{}", media, details));
+                        }
+                        Err(()) => {
+                            all_errors.push(format!("Schema for {}: compilation failed", media));
+                        }
+                    }
+                }
+
+                if any_passed {
+                    Ok(())
+                } else if all_errors.is_empty() {
+                    Err(
+                        "JSON body violates declared response schema (no details available)"
+                            .to_owned(),
+                    )
+                } else {
+                    Err(format!(
+                        "JSON body violates declared response schema:\n{}",
+                        all_errors.join("\n\n")
+                    ))
+                }
             }
         }
         MistResponseBody::Text(_) if responses.keys().any(|media| media.starts_with("text/")) => {
             Ok(())
         }
-        MistResponseBody::Text(_) => Err("text body does not match declared response media"),
+        MistResponseBody::Text(_) => {
+            Err("text body does not match declared response media".to_owned())
+        }
         MistResponseBody::Binary(_) if responses.contains_key("application/octet-stream") => Ok(()),
-        MistResponseBody::Binary(_) => Err("binary body does not match declared response media"),
+        MistResponseBody::Binary(_) => {
+            Err("binary body does not match declared response media".to_owned())
+        }
     };
     result.map_err(|reason| MistError::InvalidResponse {
         operation_id: response.operation_id.clone(),
-        reason: reason.to_owned(),
+        reason,
     })
 }
 
