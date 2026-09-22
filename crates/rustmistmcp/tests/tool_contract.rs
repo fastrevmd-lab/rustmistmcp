@@ -736,6 +736,7 @@ async fn catalog_metadata_is_local_bounded_and_returns_exact_schema_records() {
     assert!(operation.get("responses").is_some());
     assert!(recorder.requests.lock().expect("recorder").is_empty());
 
+    // Schema introspection no longer requires execution rights (issue #97.2)
     let privileged_schema = client
         .call_tool(
             CallToolRequestParams::new("get_mist_operation_schema").with_arguments(
@@ -745,7 +746,13 @@ async fn catalog_metadata_is_local_bounded_and_returns_exact_schema_records() {
         )
         .await
         .expect("privileged schema");
-    assert_eq!(privileged_schema.is_error, Some(true));
+    // Introspection now succeeds even for privileged operations
+    assert_ne!(privileged_schema.is_error, Some(true));
+    let privileged_op: serde_json::Value =
+        serde_json::from_str(&privileged_schema.content[0].as_text().expect("text").text)
+            .expect("JSON");
+    assert_eq!(privileged_op["operation_id"], "getSelf");
+    assert_eq!(privileged_op["capability"], "privileged_read");
 
     let oversized = client
         .call_tool(

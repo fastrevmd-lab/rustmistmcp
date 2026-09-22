@@ -416,7 +416,11 @@ impl MistHandler {
             Some(operation) => operation,
             None => {
                 let mut audit = audit_scope(caller, tool, "read", Vec::new());
-                let error = MistCallError::UnknownOperation;
+                let error = MistCallError::UnknownOperation(format!(
+                    "operation {} is not in the catalog (pinned Mist OpenAPI snapshot: revision {})",
+                    operation_id,
+                    &self.catalog.source.revision[..8.min(self.catalog.source.revision.len())]
+                ));
                 audit.fail(&error);
                 return tool_result::<ReadEnvelope, _>(
                     Err(error),
@@ -445,7 +449,15 @@ impl MistHandler {
         audit.meta("operation_id", operation_id.clone());
 
         if operation.method != "GET" || operation.capability != required_capability {
-            let error = MistCallError::WrongCapability;
+            let dispatcher_name = match operation.capability {
+                MistCapability::OrdinaryRead => "invoke_mist_read",
+                MistCapability::PrivilegedRead => "invoke_mist_privileged_read",
+                _ => "(no read dispatcher available for this operation)",
+            };
+            let error = MistCallError::WrongCapability(format!(
+                "operation {} exists but is classified as {:?} (method {}); use {} to invoke it",
+                operation_id, operation.capability, operation.method, dispatcher_name
+            ));
             audit.deny("capability");
             return tool_result::<ReadEnvelope, _>(
                 Err(error),
@@ -488,17 +500,36 @@ impl MistHandler {
             );
         }
         if let Some(target) = &target {
-            let configured = if target.to_string().starts_with("org/") {
-                self.allowed_orgs.iter().any(|org| org == target.id())
+            let error_opt = if target.to_string().starts_with("org/") {
+                if !self.allowed_orgs.iter().any(|org| org == target.id()) {
+                    Some(format!(
+                        "organization {} is not in the configured allowlist",
+                        target.id()
+                    ))
+                } else {
+                    None
+                }
             } else if target.to_string().starts_with("site/") {
-                self.sites
-                    .get(target.id())
-                    .is_some_and(|org_id| self.allowed_orgs.iter().any(|org| org == org_id))
+                match self.sites.get(target.id()) {
+                    None => Some(format!(
+                        "site {} is not known (requires org_id for site queries, or the site's parent org in the allowlist)",
+                        target.id()
+                    )),
+                    Some(org_id) if !self.allowed_orgs.iter().any(|org| org == org_id) => {
+                        Some(format!(
+                            "site {}'s parent organization {} is not in the configured allowlist",
+                            target.id(),
+                            org_id
+                        ))
+                    }
+                    Some(_) => None,
+                }
             } else {
-                false
+                Some("the target is neither an organization nor a site".to_owned())
             };
-            if !configured {
-                let error = MistCallError::OrganizationNotConfigured;
+
+            if let Some(reason) = error_opt {
+                let error = MistCallError::OrganizationNotConfigured(reason);
                 audit.deny("profile");
                 return tool_result::<ReadEnvelope, _>(
                     Err(error),
@@ -808,10 +839,10 @@ impl MistHandler {
 
 #[derive(Debug, thiserror::Error)]
 enum MistCallError {
-    #[error("unknown or unauthorized Mist operation")]
-    UnknownOperation,
-    #[error("operation is not permitted by this read dispatcher")]
-    WrongCapability,
+    #[error("{0}")]
+    UnknownOperation(String),
+    #[error("{0}")]
+    WrongCapability(String),
     #[error("{0}")]
     Authorization(String),
     #[error("the authenticated caller lacks the exact Mist operation/action/target grant")]
@@ -820,8 +851,8 @@ enum MistCallError {
     MspTarget,
     #[error("the catalogued target is missing or malformed")]
     InvalidTarget,
-    #[error("the organization is not configured or authorized")]
-    OrganizationNotConfigured,
+    #[error("{0}")]
+    OrganizationNotConfigured(String),
     #[error("query limit must be an integer from 1 through 100")]
     InvalidLimit,
     #[error("catalog search requires a 1-128 byte query and a result limit from 1 through 50")]
@@ -1549,19 +1580,20 @@ impl MistHandler {
                 RESULT_LIMITS,
             ));
         }
-        let operation = self
-            .catalog
-            .operation(&args.operation_id)
-            .filter(|operation| self.operation_visible(caller, operation));
+        let operation = self.catalog.operation(&args.operation_id);
         match operation {
             Some(operation) => Ok(audited_tool_result(
                 &mut audit,
                 Ok::<_, MistCallError>(operation),
             )),
             None => {
-                audit.deny("visibility");
+                audit.deny("catalog");
                 Ok(tool_result::<&MistOperation, _>(
-                    Err(MistCallError::UnknownOperation),
+                    Err(MistCallError::UnknownOperation(format!(
+                        "operation {} is not in the catalog (pinned Mist OpenAPI snapshot: revision {})",
+                        args.operation_id,
+                        &self.catalog.source.revision[..8.min(self.catalog.source.revision.len())]
+                    ))),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
                 ))
@@ -1760,7 +1792,7 @@ impl MistHandler {
     }
     #[tool(
         name = "invoke_mist_read",
-        description = "Invoke one ordinary read selected only by catalog operation ID."
+        description = "Invoke one ordinary read selected by catalog operation ID. The `path` and `query` parameters are maps (e.g., path={\"org_id\": \"...\"}, query={\"limit\": 10}), not top-level parameters like the named workflow tools."
     )]
     async fn invoke_mist_read(
         &self,

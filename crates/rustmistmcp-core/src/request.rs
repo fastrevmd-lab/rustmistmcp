@@ -297,8 +297,11 @@ fn validate_schema(
     value: &serde_json::Value,
 ) -> Result<(), MistError> {
     match schema_matches(catalog, operation, slot, schema, value, Direction::Request) {
-        Ok(true) => Ok(()),
-        Ok(false) => invalid(request, "value violates catalog schema"),
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(details)) => invalid(
+            request,
+            &format!("value violates catalog schema:\n{}", details),
+        ),
         Err(()) => invalid(request, "catalog schema compilation failed"),
     }
 }
@@ -316,6 +319,106 @@ enum Direction {
     Response,
 }
 
+/// Return the JSON type name of a value without exposing its content.
+///
+/// Used for validation errors to avoid leaking sensitive instance values into
+/// audit logs while still providing diagnosable type information.
+fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+/// Format a validation error kind without embedding the instance value.
+///
+/// Critical for audit redaction: this must never interpolate the actual value,
+/// only its type. Device names, hostnames, and serials are redacted in audit
+/// logs; a schema violation should not bypass that by writing the raw value.
+fn format_validation_error_kind(
+    kind: &jsonschema::error::ValidationErrorKind,
+    actual_type: &str,
+) -> String {
+    use jsonschema::error::{TypeKind, ValidationErrorKind};
+    match kind {
+        ValidationErrorKind::Type { kind: type_kind } => {
+            let expected = match type_kind {
+                TypeKind::Single(t) => format!("[\"{}\"]", t),
+                TypeKind::Multiple(types) => {
+                    let type_list: Vec<String> =
+                        types.iter().map(|t| format!("\"{}\"", t)).collect();
+                    format!("[{}]", type_list.join(", "))
+                }
+            };
+            format!("expected one of {}, got {}", expected, actual_type)
+        }
+        ValidationErrorKind::Enum { options } => {
+            let count = options.as_array().map(|a| a.len()).unwrap_or(0);
+            format!(
+                "value ({}) not in enum (expected one of {} options)",
+                actual_type, count
+            )
+        }
+        ValidationErrorKind::AdditionalProperties { unexpected } => {
+            format!(
+                "unexpected properties: {}",
+                unexpected
+                    .iter()
+                    .map(|s| format!("\"{}\"", s))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+        ValidationErrorKind::Required { property } => {
+            format!("missing required property \"{}\"", property)
+        }
+        ValidationErrorKind::Format { format } => {
+            format!(
+                "value ({}) does not match format \"{}\"",
+                actual_type, format
+            )
+        }
+        ValidationErrorKind::Pattern { pattern } => {
+            format!("value (string) does not match pattern \"{}\"", pattern)
+        }
+        ValidationErrorKind::MinLength { limit } => {
+            format!("string length below minimum {}", limit)
+        }
+        ValidationErrorKind::MaxLength { limit } => {
+            format!("string length exceeds maximum {}", limit)
+        }
+        ValidationErrorKind::Minimum { limit } => {
+            format!("number below minimum {}", limit)
+        }
+        ValidationErrorKind::Maximum { limit } => {
+            format!("number exceeds maximum {}", limit)
+        }
+        ValidationErrorKind::MinItems { limit } => {
+            format!("array has fewer than {} items", limit)
+        }
+        ValidationErrorKind::MaxItems { limit } => {
+            format!("array has more than {} items", limit)
+        }
+        ValidationErrorKind::UniqueItems => "array contains duplicate items".to_owned(),
+        ValidationErrorKind::MinProperties { limit } => {
+            format!("object has fewer than {} properties", limit)
+        }
+        ValidationErrorKind::MaxProperties { limit } => {
+            format!("object has more than {} properties", limit)
+        }
+        // For other kinds, provide a generic message with the keyword
+        _ => format!(
+            "validation failed: {} (type: {})",
+            kind.keyword(),
+            actual_type
+        ),
+    }
+}
+
 /// Validate one body against one declared schema.
 ///
 /// The validation root embeds the components registry, so building it clones
@@ -324,6 +427,10 @@ enum Direction {
 /// catalog is immutable after load, so the compiled validator is memoised
 /// against `(direction, operation, schema index)` and the root is built only on
 /// a miss — the closure below does not run on a hit.
+///
+/// Returns `Ok(Ok(()))` on successful validation, `Ok(Err(details))` when
+/// validation fails with field-level error details, or `Err(())` when the
+/// schema itself does not compile.
 fn schema_matches(
     catalog: &Catalog,
     operation: &str,
@@ -331,7 +438,7 @@ fn schema_matches(
     schema: &serde_json::Value,
     value: &serde_json::Value,
     direction: Direction,
-) -> Result<bool, ()> {
+) -> Result<Result<(), String>, ()> {
     let validator = catalog.cached_validator(operation, slot, || match direction {
         Direction::Request => serde_json::json!({
             "components": catalog.components,
@@ -346,7 +453,44 @@ fn schema_matches(
             })
         }
     })?;
-    Ok(validator.is_valid(value))
+
+    let mut errors_iter = validator.iter_errors(value);
+    if let Some(_first_error) = errors_iter.next() {
+        const MAX_ERRORS_SHOWN: usize = 5;
+        // Collect up to MAX_ERRORS_SHOWN errors (we already have the first one)
+        let error_list: Vec<String> = std::iter::once(_first_error)
+            .chain(errors_iter)
+            .take(MAX_ERRORS_SHOWN)
+            .map(|error| {
+                let path = if error.instance_path().is_empty() {
+                    "(root)".to_owned()
+                } else {
+                    error.instance_path().to_string()
+                };
+                // Get the JSON type of the actual value (not the value itself)
+                let actual_type = json_type_name(error.instance());
+                // Format error based on kind without embedding instance value
+                let description = format_validation_error_kind(error.kind(), actual_type);
+                format!("  - field {}: {}", path, description)
+            })
+            .collect();
+
+        let total_errors = error_list.len();
+        let mut message = error_list.join("\n");
+
+        // The iterator was capped at MAX_ERRORS_SHOWN, but we don't know if
+        // there were more. The best we can do is note when we hit the cap.
+        if total_errors == MAX_ERRORS_SHOWN {
+            message.push_str(&format!(
+                "\n  ... (showing first {} of potentially more errors)",
+                MAX_ERRORS_SHOWN
+            ));
+        }
+
+        Ok(Err(message))
+    } else {
+        Ok(Ok(()))
+    }
 }
 
 fn validate_response_bounds(response: &MistResponse) -> Result<(), MistError> {
@@ -397,7 +541,7 @@ fn validate_response_body(
         };
     }
     let result = match &response.body {
-        MistResponseBody::Empty => Err("declared response media requires a body"),
+        MistResponseBody::Empty => Err("declared response media requires a body".to_owned()),
         MistResponseBody::Json(value) => {
             // The media type is kept, not dropped: it is half the cache key.
             let schemas: Vec<_> = responses
@@ -405,10 +549,13 @@ fn validate_response_body(
                 .filter(|(media, _)| is_json_media(media))
                 .collect();
             if schemas.is_empty() {
-                Err("JSON body does not match declared response media")
-            } else if schemas.iter().any(|(media, schema)| {
-                matches!(
-                    schema_matches(
+                Err("JSON body does not match declared response media".to_owned())
+            } else {
+                let mut all_errors = Vec::new();
+                let mut any_passed = false;
+
+                for (media, schema) in &schemas {
+                    match schema_matches(
                         catalog,
                         &response.operation_id,
                         crate::catalog::SchemaSlot::ResponseBody {
@@ -418,25 +565,49 @@ fn validate_response_body(
                         schema,
                         value,
                         Direction::Response,
-                    ),
-                    Ok(true)
-                )
-            }) {
-                Ok(())
-            } else {
-                Err("JSON body violates declared response schema")
+                    ) {
+                        Ok(Ok(())) => {
+                            any_passed = true;
+                            break;
+                        }
+                        Ok(Err(details)) => {
+                            all_errors.push(format!("Schema for {}:\n{}", media, details));
+                        }
+                        Err(()) => {
+                            all_errors.push(format!("Schema for {}: compilation failed", media));
+                        }
+                    }
+                }
+
+                if any_passed {
+                    Ok(())
+                } else if all_errors.is_empty() {
+                    Err(
+                        "JSON body violates declared response schema (no details available)"
+                            .to_owned(),
+                    )
+                } else {
+                    Err(format!(
+                        "JSON body violates declared response schema:\n{}",
+                        all_errors.join("\n\n")
+                    ))
+                }
             }
         }
         MistResponseBody::Text(_) if responses.keys().any(|media| media.starts_with("text/")) => {
             Ok(())
         }
-        MistResponseBody::Text(_) => Err("text body does not match declared response media"),
+        MistResponseBody::Text(_) => {
+            Err("text body does not match declared response media".to_owned())
+        }
         MistResponseBody::Binary(_) if responses.contains_key("application/octet-stream") => Ok(()),
-        MistResponseBody::Binary(_) => Err("binary body does not match declared response media"),
+        MistResponseBody::Binary(_) => {
+            Err("binary body does not match declared response media".to_owned())
+        }
     };
     result.map_err(|reason| MistError::InvalidResponse {
         operation_id: response.operation_id.clone(),
-        reason: reason.to_owned(),
+        reason,
     })
 }
 
