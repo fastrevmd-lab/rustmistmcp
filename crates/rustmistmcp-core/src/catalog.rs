@@ -882,13 +882,18 @@ fn canonical_json(value: serde_json::Value) -> serde_json::Value {
 ///   `alarmtemplate_id` in the same schema is declared `["string","null"]` — so
 ///   the spec is inconsistent about optionality rather than missing a convention.
 ///
-/// Three relaxations, each covering an *additive* vendor change:
+/// Five relaxations, each covering an *additive* vendor change or vendor precision drift:
 ///
 /// 1. `enum` is dropped — a new member is data, not a violation.
 /// 2. `additionalProperties: false` is dropped — a new field is data too, and
 ///    this is the largest exposure of the three.
 /// 3. Any declared `type` is widened to admit `null`, since an absent optional
 ///    field is routinely returned as null.
+/// 4. `required` is dropped — Mist omits fields the schema declares required
+///    (e.g., `orggroup_ids` in `stats_org`).
+/// 5. Declared `integer` is widened to accept `number` — Mist returns fractional
+///    epoch seconds (`1790089263.3111906`) for fields declared `type: integer`
+///    (e.g., `start`/`end` in `searchOrgInventory` and `searchOrgDevices`).
 ///
 /// What deliberately survives: containers, and the declared types of the fields
 /// that are present and non-null. A response that is structurally wrong is still
@@ -901,10 +906,12 @@ pub(crate) fn relax_for_responses(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
             map.remove("enum");
+            map.remove("required");
             if map.get("additionalProperties") == Some(&serde_json::Value::Bool(false)) {
                 map.remove("additionalProperties");
             }
             widen_type_to_admit_null(map);
+            widen_integer_to_admit_number(map);
             for nested in map.values_mut() {
                 relax_for_responses(nested);
             }
@@ -930,6 +937,35 @@ fn widen_type_to_admit_null(map: &mut serde_json::Map<String, serde_json::Value>
         serde_json::Value::Array(names) if !names.iter().any(|n| n.as_str() == Some("null")) => {
             let mut widened = names.clone();
             widened.push(serde_json::Value::String("null".to_owned()));
+            Some(serde_json::Value::Array(widened))
+        }
+        _ => None,
+    };
+    if let Some(widened) = widened {
+        map.insert("type".to_owned(), widened);
+    }
+}
+
+/// Widen declared `integer` to also accept `number` for vendor precision drift.
+///
+/// Mist returns fractional epoch seconds (e.g., `1790089263.3111906`) for fields
+/// declared `type: integer`. Rather than reject the response, widen `integer` to
+/// `["integer", "number"]` so validation accepts both integral and fractional values.
+/// Same justification as admitting null: judge response structure, not vendor precision.
+fn widen_integer_to_admit_number(map: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(declared) = map.get("type") else {
+        return;
+    };
+    let widened = match declared {
+        serde_json::Value::String(name) if name == "integer" => {
+            Some(serde_json::json!(["integer", "number"]))
+        }
+        serde_json::Value::Array(names)
+            if names.iter().any(|n| n.as_str() == Some("integer"))
+                && !names.iter().any(|n| n.as_str() == Some("number")) =>
+        {
+            let mut widened = names.clone();
+            widened.push(serde_json::Value::String("number".to_owned()));
             Some(serde_json::Value::Array(widened))
         }
         _ => None,
