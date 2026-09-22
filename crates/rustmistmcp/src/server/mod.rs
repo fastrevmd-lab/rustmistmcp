@@ -1,6 +1,7 @@
 //! Curated read-only Mist MCP handler.
 
 mod change_set;
+mod similarity;
 mod wan;
 mod wan_write;
 
@@ -416,11 +417,37 @@ impl MistHandler {
             Some(operation) => operation,
             None => {
                 let mut audit = audit_scope(caller, tool, "read", Vec::new());
-                let error = MistCallError::UnknownOperation(format!(
+
+                // Find similar operation IDs to suggest
+                let suggestions = similarity::find_similar_operations(&self.catalog, &operation_id);
+
+                let mut error_msg = format!(
                     "operation {} is not in the catalog (pinned Mist OpenAPI snapshot: revision {})",
                     operation_id,
                     &self.catalog.source.revision[..8.min(self.catalog.source.revision.len())]
-                ));
+                );
+
+                if !suggestions.is_empty() {
+                    error_msg.push_str(". Did you mean:");
+                    for (suggested_id, _, capability) in suggestions {
+                        error_msg.push_str(&format!("\n  - {}", suggested_id));
+                        // Check if the suggested operation requires a different dispatcher
+                        if capability != required_capability {
+                            let dispatcher_name = match capability {
+                                rustmistmcp_core::catalog::MistCapability::OrdinaryRead => {
+                                    "invoke_mist_read"
+                                }
+                                rustmistmcp_core::catalog::MistCapability::PrivilegedRead => {
+                                    "invoke_mist_privileged_read"
+                                }
+                                _ => "(no read dispatcher available for this operation)",
+                            };
+                            error_msg.push_str(&format!(" (use {} to invoke it)", dispatcher_name));
+                        }
+                    }
+                }
+
+                let error = MistCallError::UnknownOperation(error_msg);
                 audit.fail(&error);
                 return tool_result::<ReadEnvelope, _>(
                     Err(error),
