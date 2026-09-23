@@ -910,6 +910,14 @@ pub(crate) fn relax_for_responses(value: &mut serde_json::Value) {
             if map.get("additionalProperties") == Some(&serde_json::Value::Bool(false)) {
                 map.remove("additionalProperties");
             }
+            // Rewrite oneOf to anyOf for responses. The enum removal destroys the
+            // discriminator that separated the branches, so a record can now match
+            // multiple branches. oneOf requires exactly one match, which becomes
+            // unsatisfiable; anyOf requires at least one, which is the property we
+            // actually care about — the record resembles some declared shape.
+            if let Some(one_of) = map.remove("oneOf") {
+                map.insert("anyOf".to_owned(), one_of);
+            }
             widen_type_to_admit_null(map);
             widen_integer_to_admit_number(map);
             for nested in map.values_mut() {
