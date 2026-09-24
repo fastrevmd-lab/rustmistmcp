@@ -2321,7 +2321,7 @@ dependencies = [
 
 [[package]]
 name = "rustmistmcp"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2361,7 +2361,7 @@ dependencies = [
 
 [[package]]
 name = "rustmistmcp-core"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "axum",

@@ -10,11 +10,47 @@ visible rather than looking like those versions never existed.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-24
+
+### Added
+
+- **"Did you mean" suggestions for unknown operation IDs** (#99, closes #96).
+  An operation ID not in the catalog now returns up to three similar real IDs
+  (e.g. `listOrgInventory` -> `getOrgInventory`), and says when a suggestion
+  needs a different dispatcher. Nonsense IDs get no suggestions; the threshold
+  and cap keep this from becoming an enumeration aid.
+
+### Fixed
+
+- **Response-schema validation no longer rejects real Mist responses** (#100,
+  #102, #95). Three vendor-drift cases captured from the live API on
+  2026-09-22, each relaxed for *responses only* — requests stay strict:
+  - `searchOrgInventory` / `searchOrgDevices` return fractional epoch seconds
+    where the spec declares `integer`; responses now accept `number`.
+  - `getOrgStats` declares 15 required properties but Mist never sends
+    `orggroup_ids`; `required` is dropped for responses.
+  - `searchOrgDevices` failed on any non-empty result: removing enum
+    constraints erased the `type` discriminator between `oneOf` branches, so
+    records matched several. Responses now use `anyOf`.
+- **Validation errors name the failing field** (#98, #95). Messages include the
+  field path, expected type, and actual value, capped at five errors.
+- **`get_mist_operation_schema` describes any catalog operation** (#98, #97).
+  Introspection no longer requires the execution grant; tool-level
+  authorization still applies.
+- **Scope errors say what is actually wrong** (#98, #97). `list_mist_wan_edges`
+  given only a `site_id` no longer reports "organization is not configured or
+  authorized"; org-not-allowlisted, unknown site, and site-in-unconfigured-org
+  are now distinct. `invoke_mist_read`'s description documents that `path` and
+  `query` are maps.
+
 ### Changed
 
-- **MSRV raised to 1.89** — family-wide decision.
-- Build toolchain 1.98.0 -> 1.98.1 in full (Dockerfile, release workflow,
-  OCI smoke script, `rust-toolchain.toml`).
+- **MSRV raised to 1.89** (#94) — family-wide decision.
+- Build toolchain 1.98.0 -> 1.98.1 in full (#103): Dockerfile, release
+  workflow, OCI smoke script, `rust-toolchain.toml`.
+- `clap` 4.6.6 -> 4.6.7, `rustix` 1.1.4 -> 1.1.5; CI actions
+  `docker/setup-qemu-action` 4.4.0, `docker/setup-buildx-action` 4.4.1,
+  `docker/build-push-action` 7.4.0.
 
 
 ## [0.3.1] - 2026-09-16
