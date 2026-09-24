@@ -13,6 +13,8 @@ visible rather than looking like those versions never existed.
 ### Changed
 
 - **MSRV raised to 1.89** — family-wide decision.
+- Build toolchain 1.98.0 -> 1.98.1 in full (Dockerfile, release workflow,
+  OCI smoke script, `rust-toolchain.toml`).
 
 
 ## [0.3.1] - 2026-09-16
