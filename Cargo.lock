@@ -1457,7 +1457,7 @@ dependencies = [
  "mecmcp-auth",
  "metrics",
  "rand_core 0.6.4",
- "rustix 1.1.4",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1501,7 +1501,7 @@ dependencies = [
  "hex",
  "mecmcp-audit",
  "mecmcp-secret",
- "rustix 1.1.4",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1518,7 +1518,7 @@ version = "0.23.0"
 source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=v0.23.0#d61867d7ae37cc9c5fcf760d57ca07d3a7560325"
 dependencies = [
  "async-trait",
- "rustix 1.1.4",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1579,7 +1579,7 @@ dependencies = [
  "mecmcp-audit",
  "mecmcp-auth",
  "mecmcp-secret",
- "rustix 1.1.4",
+ "rustix 1.1.5",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -1591,7 +1591,7 @@ name = "mecmcp-secret"
 version = "0.23.0"
 source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=v0.23.0#d61867d7ae37cc9c5fcf760d57ca07d3a7560325"
 dependencies = [
- "rustix 1.1.4",
+ "rustix 1.1.5",
  "thiserror",
  "zeroize",
 ]
@@ -2234,9 +2234,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.4"
+version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
 dependencies = [
  "bitflags",
  "errno",
@@ -2341,7 +2341,7 @@ dependencies = [
  "mecmcp-transport",
  "reqwest",
  "rmcp",
- "rustix 1.1.4",
+ "rustix 1.1.5",
  "rustls",
  "rustmistmcp-core",
  "schemars",
@@ -2783,7 +2783,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.3",
  "once_cell",
- "rustix 1.1.4",
+ "rustix 1.1.5",
  "windows-sys 0.61.2",
 ]
 
