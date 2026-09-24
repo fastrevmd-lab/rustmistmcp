@@ -47,7 +47,7 @@ at least `--host` — that replaces the CMD flags (`--transport`, `--host`,
 `--port`) but the audit configuration in ENTRYPOINT survives.
 
 **Before v0.3.1** (fixed in #78), all flags lived in `CMD`, so any `--host`
-override silently lost the audit configuration. Measured on the published 0.3.2
+override silently lost the audit configuration. Measured on the published 0.3.0
 image:
 
 ```
