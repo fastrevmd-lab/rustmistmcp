@@ -1,0 +1,46 @@
+name: Bug report
+description: Report something that isn't working as expected
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. If this is a security vulnerability, please use "Report a vulnerability" below instead — do not file it here.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: rustmistmcp version (or commit SHA) you're using
+      placeholder: "0.3.2"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal CLI invocation, config, or MCP tool call that reproduces the issue. Please sanitize any Mist output — no real org/site IDs, device serials, hostnames, or bearer credentials.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Rust version (`rustc --version`), OS, deployment mode (Docker/LXC/bare binary), and Mist region if relevant
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Sanitized `tracing`/audit output or error text, if any
+      render: shell
+    validations:
+      required: false
