@@ -65,7 +65,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # Egress policy -- DEFENCE IN DEPTH ONLY. Read this before relying on it.
 #
 # Mist reaches the Juniper Mist cloud API (internet HTTPS) and an SSDF evidence
-# endpoint at 192.168.1.151:8443. Denying link-local and cloud metadata services
+# endpoint at 192.0.2.151:8443. Denying link-local and cloud metadata services
 # has no legitimate impact on either.
 #
 # NOTE: IPAddressAllow/IPAddressDeny are accepted by systemd and reported by
