@@ -174,10 +174,12 @@ pub struct MistHandler {
     ///
     /// Held here rather than reached through the coordinator, because mecmcp
     /// emits the four records from its *lifecycle* APIs -- `create_change_set`,
-    /// `approve_change_set`, `commit_operation` -- and this server drives the
-    /// coordinator through `insert_change_set` / `update_change_set` instead.
-    /// Attaching a recorder to the coordinator alone produces nothing at all
-    /// here, so the emission points are ours to place.
+    /// `approve_change_set`, `commit_operation` -- and this server only drives
+    /// `approve_mist_change_set` through the coordinator's `approve_change_set`
+    /// (MEC-408); planning and apply still go through `insert_change_set` /
+    /// `update_change_set` directly. Attaching a recorder to the coordinator
+    /// alone produces nothing at those call sites, so the emission points are
+    /// ours to place.
     evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
     /// Whether lab mode is enabled (auto-waive on creation).
     lab_mode: bool,
@@ -1272,6 +1274,11 @@ read_args!(GetChangeSetArgs {
 read_args!(ApproveChangeSetArgs {
     /// Change-set identifier (64 hex characters).
     change_set_id: String,
+    /// The plan digest the approver was shown (from `plan_mist_change` or
+    /// `get_mist_change_set`). mecmcp's `ChangesetCoordinator::approve_change_set`
+    /// refuses the approval unless this matches the stored digest exactly, so an
+    /// approver who echoes the wrong digest -- or none -- cannot approve.
+    plan_digest: String,
     /// Which configuration object type. Not sent to Mist.
     #[serde(skip_serializing)]
     object: WanObjectArg,
@@ -2686,6 +2693,12 @@ impl MistHandler {
             Some(ctx) => ctx.token_name.clone(),
             None => "stdio".to_owned(),
         };
+        // Truthful, not permissive: a stdio caller carries no verified token
+        // entry, so its actor type is unknown rather than assumed human. mecmcp's
+        // `approve_change_set` refuses anything but `Human` (mecmcp#390, the
+        // house rule that a human approves), which is exactly the outcome an
+        // unattributed caller should get.
+        let approver_actor_type = change_set::actor_type(caller);
         let mut audit = audit_scope(
             caller,
             "approve_mist_change_set",
@@ -2696,14 +2709,36 @@ impl MistHandler {
         let object: wan::WanObject = args.object.into();
         let device = change_set::object_key(object, args.object_id.as_deref());
 
-        let mut record = match self
+        // Routed through mecmcp's own lifecycle API rather than a self-managed
+        // `change_set` fetch + mutate + `update_change_set` write. The
+        // coordinator enforces, in order: the digest format is well-formed, the
+        // change set exists for this device, the approver is distinct from the
+        // owner, the approver is a verified human principal, the change set is
+        // still `Planned`, the approval window has not expired, and the
+        // `plan_digest` the caller echoed back matches the stored digest exactly
+        // -- a change set cannot be committed by an approver who never saw (or
+        // misquoted) the plan.
+        let output = match self
             .coordinator
-            .change_set(&args.change_set_id, &device)
+            .approve_change_set(
+                args.change_set_id.clone(),
+                device,
+                approver.clone(),
+                args.plan_digest.clone(),
+                approver_actor_type,
+            )
             .await
         {
-            Ok(record) => record,
+            Ok(output) => output,
             Err(error) => {
-                audit.fail(error.to_string());
+                // `field() == "change_set_id"` covers both "not found" and the
+                // self-approval refusal; only the latter is a deny rather than a
+                // plain failure, so match the message the coordinator uses for it.
+                if error.field() == "change_set_id" && error.message().contains("own plan") {
+                    audit.deny("self-approval");
+                } else {
+                    audit.fail(error.to_string());
+                }
                 return Ok(tool_result::<serde_json::Value, _>(
                     Err::<serde_json::Value, _>(error.to_string()),
                     ResultFormat::PrettyJson,
@@ -2712,88 +2747,19 @@ impl MistHandler {
             }
         };
 
-        // CRITICAL: Check self-approval BEFORE any state mutation.
-        if record.owner == approver {
-            audit.deny("self-approval");
-            return Ok(tool_result::<serde_json::Value, _>(
-                Err::<serde_json::Value, _>(
-                    "the planning principal cannot approve their own change set",
-                ),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ));
-        }
-
-        if record.state != mecmcp_changeset::ChangeSetState::Planned {
-            audit.fail(format!(
-                "change set is {}, not planned",
-                record.state.as_str()
-            ));
-            return Ok(tool_result::<serde_json::Value, _>(
-                Err::<serde_json::Value, _>(format!(
-                    "change set is {}, not planned",
-                    record.state.as_str()
-                )),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ));
-        }
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| {
-                audit.fail(format!("time error: {error}"));
-                rmcp::ErrorData::invalid_params(format!("time error: {error}"), None)
-            })?
-            .as_secs();
-
-        // v5 binds the stored preview digest into the approval, so the
-        // approval vouches for the exact preview the approver was shown rather
-        // than only for the plan. This server does store a preview -- see
-        // `change_set::stage` -- so v4, which has no preview field at all,
-        // would sign away that guarantee.
-        let approval_digest = mecmcp_changeset::digest::compute_approval_digest_v5(
-            &record.id,
-            &record.digest,
-            record
-                .preview
-                .as_ref()
-                .map(|preview| preview.digest.as_str()),
-            &record.owner,
-            &approver,
-            now,
-        );
-
-        record.approval = Some(mecmcp_changeset::ApprovalRecord {
-            approver: Some(approver.clone()),
-            approved_at_unix: now,
-            digest: approval_digest,
-            digest_version: 5,
-            waived: None,
-        });
-        record.approver = Some(approver.clone());
-        record.state = mecmcp_changeset::ChangeSetState::Approved;
-        let approved_device = record.device.clone();
-        let approved_id = record.id.clone();
-
-        if let Err(error) = self.coordinator.update_change_set(record).await {
-            audit.fail(error.to_string());
-            return Ok(tool_result::<serde_json::Value, _>(
-                Err::<serde_json::Value, _>(error.to_string()),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ));
-        }
-
         // A second person decided. Recorded after the state write, so the trail
         // cannot claim an approval the coordinator failed to persist.
         if let Some(recorder) = &self.evidence {
-            let _ = &approved_device;
-            recorder.approval(&approved_id, &approved_id, &approver, "approved");
+            recorder.approval(
+                &output.change_set_id,
+                &output.change_set_id,
+                &approver,
+                "approved",
+            );
         }
 
         let response = serde_json::json!({
-            "change_set_id": args.change_set_id,
+            "change_set_id": output.change_set_id,
             "state": "approved",
             "expires_in_seconds": self.coordinator.approval_ttl().as_secs(),
         });
