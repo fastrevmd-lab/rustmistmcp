@@ -52,6 +52,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "get_mist_wan_edge_stats",
     "invoke_mist_privileged_read",
     "invoke_mist_read",
+    "list_mist_alarm_definitions",
     "list_mist_applications",
     "list_mist_orgs",
     "list_mist_rogues",
@@ -1291,7 +1292,13 @@ read_args!(EventSearchArgs {
     #[serde(rename = "type")] r#type: Option<String>,
 });
 read_args!(AlarmSearchArgs {
-    site_id: String, ack_admin_name: Option<String>, acked: Option<bool>,
+    /// Organization UUID. Mutually exclusive with `site_id`.
+    org_id: Option<String>,
+    /// Site UUID. Mutually exclusive with `org_id`.
+    site_id: Option<String>,
+    /// Records or count distribution. Not sent to Mist.
+    #[serde(default, skip_serializing)] mode: StatsModeArg,
+    ack_admin_name: Option<String>, acked: Option<bool>,
     duration: Option<String>, end: Option<String>, group: Option<String>,
     #[schemars(range(min = 1, max = 100))] limit: Option<u32>,
     search_after: Option<String>, severity: Option<String>, sort: Option<String>,
@@ -2031,18 +2038,52 @@ impl MistHandler {
             )
             .await)
     }
-    #[tool(name = "search_mist_alarms", description = "Search site alarms.")]
+    #[tool(
+        name = "search_mist_alarms",
+        description = "Search organization or site alarms, or count them."
+    )]
     async fn search_mist_alarms(
         &self,
         Parameters(args): Parameters<AlarmSearchArgs>,
         extensions: rmcp::model::Extensions,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = match wan::resolve_scope(args.org_id.as_deref(), args.site_id.as_deref()) {
+            Ok(scope) => scope,
+            Err(_) => {
+                return Ok(tool_result::<ReadEnvelope, _>(
+                    Err(MistCallError::AmbiguousScope),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        };
+        let resolved = wan::alarms(scope, args.mode.into());
         Ok(self
             .dispatch_named(
                 "search_mist_alarms",
-                "searchSiteAlarms",
+                resolved.operation_id,
                 args,
-                &["site_id"],
+                resolved.path_names,
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "list_mist_alarm_definitions",
+        description = "List the constant Mist alarm definition catalog."
+    )]
+    async fn list_mist_alarm_definitions(
+        &self,
+        Parameters(args): Parameters<EmptyArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "list_mist_alarm_definitions",
+                "listAlarmDefinitions",
+                args,
+                &[],
                 MistCapability::OrdinaryRead,
                 &extensions,
             )

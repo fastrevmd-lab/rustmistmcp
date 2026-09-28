@@ -38,6 +38,7 @@ async fn registry_contains_only_the_approved_read_tools() {
         "get_mist_wan_edge_stats",
         "invoke_mist_privileged_read",
         "invoke_mist_read",
+        "list_mist_alarm_definitions",
         "list_mist_applications",
         "list_mist_orgs",
         "list_mist_rogues",
@@ -391,6 +392,26 @@ async fn every_remote_named_workflow_resolves_to_its_one_approved_operation() {
             "search_mist_alarms",
             serde_json::json!({"site_id": site, "acked": false, "limit": 25}),
             "searchSiteAlarms",
+        ),
+        (
+            "search_mist_alarms",
+            serde_json::json!({"org_id": ORG_ID, "limit": 25}),
+            "searchOrgAlarms",
+        ),
+        (
+            "search_mist_alarms",
+            serde_json::json!({"site_id": site, "mode": "count"}),
+            "countSiteAlarms",
+        ),
+        (
+            "search_mist_alarms",
+            serde_json::json!({"org_id": ORG_ID, "mode": "count"}),
+            "countOrgAlarms",
+        ),
+        (
+            "list_mist_alarm_definitions",
+            serde_json::json!({}),
+            "listAlarmDefinitions",
         ),
         (
             "search_mist_audit_logs",
