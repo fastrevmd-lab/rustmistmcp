@@ -223,8 +223,12 @@ impl MistClient for PagingClient {
                 request.operation_id,
                 &url::Url::parse("https://api.mist.com/").expect("origin"),
                 mode,
-                "next-page".to_owned(),
+                match mode {
+                    PaginationMode::PageLimit => "2".to_owned(),
+                    _ => "next-page".to_owned(),
+                },
             )?),
+            page: None,
         })
     }
 }
@@ -254,6 +258,7 @@ impl MistClient for RecordingClient {
             status: 200,
             body: MistResponseBody::Json(serde_json::json!({"name": "Example Org"})),
             cursor: None,
+            page: None,
         })
     }
 }

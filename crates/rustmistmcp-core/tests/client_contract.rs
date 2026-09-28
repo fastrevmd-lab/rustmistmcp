@@ -152,7 +152,7 @@ fn cursors_are_opaque_but_bound_to_origin_operation_and_pagination_mode() {
         "listOrgSites".to_owned(),
         &origin,
         PaginationMode::PageLimit,
-        "opaque-next-page".to_owned(),
+        "2".to_owned(),
     )
     .expect("valid cursor");
     assert_eq!(cursor.operation_id(), "listOrgSites");
@@ -221,7 +221,7 @@ fn continuation_context_round_trips_for_revalidation_and_reauthorization() {
         "listOrgSites".to_owned(),
         &origin(),
         PaginationMode::PageLimit,
-        "opaque-next-page".to_owned(),
+        "2".to_owned(),
     )
     .expect("cursor")
     .with_request_context(path.clone(), query.clone(), Some(target.clone()))
@@ -241,7 +241,7 @@ fn serde_contract_rejects_unknown_fields_and_preserves_response_variants() {
         "listOrgSites".to_owned(),
         &origin(),
         PaginationMode::PageLimit,
-        "opaque".to_owned(),
+        "2".to_owned(),
     )
     .expect("cursor");
     let request = MistRequest {
@@ -278,6 +278,7 @@ fn serde_contract_rejects_unknown_fields_and_preserves_response_variants() {
             status: 200,
             body,
             cursor: None,
+            page: None,
         };
         assert_eq!(
             serde_json::from_str::<MistResponse>(
@@ -298,6 +299,7 @@ fn response_validation_is_catalog_bound_and_bounded() {
         status: 200,
         body: MistResponseBody::Json(json!({})),
         cursor: None,
+        page: None,
     };
     assert_eq!(
         valid_json.clone().validate(&catalog, &origin),
@@ -308,6 +310,7 @@ fn response_validation_is_catalog_bound_and_bounded() {
         status: 200,
         body: MistResponseBody::Empty,
         cursor: None,
+        page: None,
     };
     assert!(valid_empty.validate(&catalog, &origin).is_ok());
     let valid_binary = MistResponse {
@@ -315,6 +318,7 @@ fn response_validation_is_catalog_bound_and_bounded() {
         status: 200,
         body: MistResponseBody::Binary(vec![1, 2, 3]),
         cursor: None,
+        page: None,
     };
     assert!(valid_binary.validate(&catalog, &origin).is_ok());
 
@@ -322,7 +326,7 @@ fn response_validation_is_catalog_bound_and_bounded() {
         "listOrgSites".to_owned(),
         &origin,
         PaginationMode::PageLimit,
-        "opaque".to_owned(),
+        "2".to_owned(),
     )
     .expect("cursor");
     for invalid in [
@@ -331,42 +335,49 @@ fn response_validation_is_catalog_bound_and_bounded() {
             status: 200,
             body: MistResponseBody::Json(json!({})),
             cursor: None,
+            page: None,
         },
         MistResponse {
             operation_id: "getSelf".to_owned(),
             status: 201,
             body: MistResponseBody::Json(json!({})),
             cursor: None,
+            page: None,
         },
         MistResponse {
             operation_id: "getSelf".to_owned(),
             status: 200,
             body: MistResponseBody::Text("not declared as text".to_owned()),
             cursor: None,
+            page: None,
         },
         MistResponse {
             operation_id: "getSelf".to_owned(),
             status: 200,
             body: MistResponseBody::Json(json!([])),
             cursor: None,
+            page: None,
         },
         MistResponse {
             operation_id: "getSelf".to_owned(),
             status: 200,
             body: MistResponseBody::Empty,
             cursor: None,
+            page: None,
         },
         MistResponse {
             operation_id: "getSelf".to_owned(),
             status: 200,
             body: MistResponseBody::Json(json!({})),
             cursor: Some(cursor),
+            page: None,
         },
         MistResponse {
             operation_id: "getSelf".to_owned(),
             status: 200,
             body: MistResponseBody::Text("x".repeat(1_048_577)),
             cursor: None,
+            page: None,
         },
     ] {
         assert!(matches!(
@@ -399,6 +410,7 @@ impl MistClient for RecordingMock {
             status: 200,
             body: MistResponseBody::Json(json!({})),
             cursor: None,
+            page: None,
         })
     }
 }
