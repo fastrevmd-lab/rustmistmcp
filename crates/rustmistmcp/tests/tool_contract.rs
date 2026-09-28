@@ -869,3 +869,33 @@ async fn invalid_targets_parameters_limits_and_msp_selectors_never_reach_the_cli
     client.cancel().await.expect("client shutdown");
     server_task.abort();
 }
+
+#[test]
+fn server_instructions_do_not_claim_read_only() {
+    use rmcp::ServerHandler;
+
+    let handler =
+        MistHandler::blocked("https://api.mist.com/", vec![ORG_ID.to_owned()], site_map())
+            .expect("valid blocked handler");
+    let instructions = handler
+        .get_info()
+        .instructions
+        .expect("server instructions present");
+    // #120: the instructions called the server read-only after the WAN edge
+    // change-set write tools had been registered.
+    assert!(
+        !instructions.to_ascii_lowercase().contains("read-only"),
+        "instructions must not describe a server with mutating tools as read-only: {instructions}"
+    );
+    for tool in [
+        "plan_mist_change",
+        "approve_mist_change_set",
+        "apply_mist_change_set",
+    ] {
+        assert!(KNOWN_TOOLS.contains(&tool));
+        assert!(
+            instructions.contains(tool),
+            "instructions must name the {tool} lifecycle step"
+        );
+    }
+}
