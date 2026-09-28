@@ -898,6 +898,8 @@ struct ReadEnvelope {
     content_type: &'static str,
     data: serde_json::Value,
     next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page: Option<rustmistmcp_core::MistPageInfo>,
     truncated: bool,
 }
 
@@ -930,6 +932,7 @@ impl ReadEnvelope {
         let next_cursor = response
             .cursor
             .and_then(|cursor| serde_json::to_vec(&cursor).ok().map(hex::encode));
+        let page = response.page.filter(|page| !page.is_empty());
         Self {
             operation_id: response.operation_id,
             target: target.map(MistTarget::subject),
@@ -937,6 +940,7 @@ impl ReadEnvelope {
             content_type,
             data,
             next_cursor,
+            page,
             truncated: false,
         }
     }
@@ -3716,6 +3720,42 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn page_limit_headers_are_surfaced_to_the_tool_caller() {
+        let handler = MistHandler::with_client(
+            "https://api.mist.com/",
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
+            Arc::new(FixedResponseClient {
+                response: rustmistmcp_core::MistResponse {
+                    operation_id: "listOrgSites".to_owned(),
+                    status: 200,
+                    body: MistResponseBody::Json(serde_json::json!([{"name": "site-a"}])),
+                    cursor: None,
+                    page: Some(rustmistmcp_core::MistPageInfo {
+                        page: Some(1),
+                        limit: Some(1),
+                        total: Some(2),
+                    }),
+                },
+            }),
+        )
+        .expect("handler");
+        let result = handler
+            .dispatch_catalogued_read(org_read("listOrgSites"), &rmcp::model::Extensions::new())
+            .await;
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let text = result.content[0]
+            .as_text()
+            .expect("text content")
+            .text
+            .clone();
+        let body: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(body["page"]["page"], 1);
+        assert_eq!(body["page"]["limit"], 1);
+        assert_eq!(body["page"]["total"], 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn cursor_shape_bounds_are_enforced_before_client_dispatch() {
         let recorder = Arc::new(RecordingClient::default());
         let handler = MistHandler::with_client(
@@ -3765,7 +3805,7 @@ mod tests {
             "listOrgSites".to_owned(),
             &Url::parse("https://api.mist.com/").expect("origin"),
             rustmistmcp_core::PaginationMode::PageLimit,
-            "next".to_owned(),
+            "2".to_owned(),
         )
         .expect("cursor")
         .with_request_context(
