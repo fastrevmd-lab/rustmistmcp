@@ -40,7 +40,7 @@ fn request_validation_is_catalog_bound_and_preserves_schema_constraints() {
     let valid = MistRequest {
         path: BTreeMap::from([("site_id".to_owned(), ORG.to_owned())]),
         query: BTreeMap::from([
-            ("rating".to_owned(), json!(5)),
+            ("rating".to_owned(), json!("5")),
             ("distinct".to_owned(), json!("mac")),
         ]),
         ..request("countSiteCalls")
@@ -49,7 +49,7 @@ fn request_validation_is_catalog_bound_and_preserves_schema_constraints() {
 
     for invalid in [
         MistRequest {
-            query: BTreeMap::from([("rating".to_owned(), json!(0))]),
+            query: BTreeMap::from([("rating".to_owned(), json!("0"))]),
             path: BTreeMap::from([("site_id".to_owned(), ORG.to_owned())]),
             ..request("countSiteCalls")
         },

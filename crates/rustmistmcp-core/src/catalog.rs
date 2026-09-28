@@ -193,8 +193,8 @@ pub struct CatalogAudit {
     pub missing_current_operations: u8,
     /// Frozen wrapper count with no current source operation.
     pub stale_unmatched_wrappers: u8,
-    /// The excluded stale wrapper's derived name.
-    pub stale_wrapper_tool: String,
+    /// The excluded stale wrappers' derived names.
+    pub stale_wrapper_tools: Vec<String>,
     /// Audited request-media distribution.
     pub media_accounting: MediaAccounting,
 }
@@ -555,12 +555,12 @@ fn validate_document(document: &CatalogDocument) -> Result<(), CatalogError> {
         || document.platform != "mist"
         || document.source.url
             != "https://raw.githubusercontent.com/mistsys/mist_openapi/master/mist.openapi.json"
-        || document.source.revision != "f3af90c696747d003b2d22fd15e7dcc94d288cac"
+        || document.source.revision != "feeb569a409dcc5119c4d8935c99cc46d482d770"
         || document.source.sha256
-            != "2c3d769ef188bbce1b9db7a0774b5a10812d0a5bc11960b768de47b66bb88bbf"
+            != "22f55432535ab38f6c0539392a729b8fd515a9ccae9df693fbd4ff23d40b8fac"
         || document.source.openapi_version != "3.1.0"
-        || document.source.api_version != "2607.1.0"
-        || document.operations.len() != 1_059
+        || document.source.api_version != "2609.1.0"
+        || document.operations.len() != 1_072
     {
         return Err(CatalogError::Invalid(
             "unexpected catalog source or operation count".into(),
@@ -569,15 +569,20 @@ fn validate_document(document: &CatalogDocument) -> Result<(), CatalogError> {
     if document.audit.reference_commit != "2b91700b9049c2c27ce6a811a272f2ddfa8091e5"
         || document.audit.operation_wrappers != 1_050
         || document.audit.meta_tools != 3
-        || document.audit.missing_current_operations != 10
-        || document.audit.stale_unmatched_wrappers != 1
-        || document.audit.stale_wrapper_tool != "mist_get_org_aos_register_cmd"
+        || document.audit.missing_current_operations != 25
+        || document.audit.stale_unmatched_wrappers != 3
+        || document.audit.stale_wrapper_tools
+            != [
+                "mist_count_site_client_fingerprints",
+                "mist_get_org_aos_register_cmd",
+                "mist_search_site_client_fingerprints",
+            ]
         || document.audit.media_accounting
             != (MediaAccounting {
-                json_only_operations: 333,
+                json_only_operations: 337,
                 multipart_only_operations: 16,
                 mixed_media_operations: 7,
-                json_media_entries: 340,
+                json_media_entries: 344,
                 multipart_media_entries: 23,
             })
         || !document.components.is_object()

@@ -405,7 +405,7 @@ async fn every_remote_named_workflow_resolves_to_its_one_approved_operation() {
         (
             "get_mist_sle",
             serde_json::json!({"site_id": site, "scope": "site", "scope_id": site, "metric": "coverage"}),
-            "getSiteSleSummary",
+            "getSiteSleSummaryTrend",
         ),
         (
             "get_mist_insight",

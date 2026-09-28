@@ -93,6 +93,51 @@ fn response_accepts_missing_required_field() {
     );
 }
 
+/// Test that responses with an unrecognized vendor-added field validate cleanly.
+///
+/// A minor Mist API bump can add a new field to a response body without any
+/// spec refresh on our side. `additionalProperties: false` must not turn that
+/// into a hard parse failure (MEC-410).
+#[test]
+fn response_accepts_unrecognized_extra_field() {
+    let catalog = Catalog::embedded().expect("catalog");
+    let origin = Url::parse("https://api.mist.com").expect("origin");
+
+    let body = serde_json::json!({
+        "alarmtemplate_id": null,
+        "allow_mist": true,
+        "created_time": 1609459200,
+        "id": "b069b358-4c97-5319-1f8c-7c5ca64d6ab1",
+        "modified_time": 1609459200,
+        "msp_id": null,
+        "name": "Test Org",
+        "num_devices": 42,
+        "num_inventory": 50,
+        "num_sites": 5,
+        "orggroup_ids": [],
+        "session_expiry": 1440,
+        "sle_enabled": false,
+        "trial_enabled": false,
+        "trial_expiry": null,
+        "vendor_added_future_field": "unrecognized value from a newer spec"
+    });
+
+    let response = MistResponse {
+        operation_id: "getOrgStats".to_owned(),
+        status: 200,
+        body: MistResponseBody::Json(body),
+        cursor: None,
+        page: None,
+    };
+
+    let result = response.validate(&catalog, &origin);
+    assert!(
+        result.is_ok(),
+        "Expected response with an unrecognized extra field to validate, got: {:?}",
+        result
+    );
+}
+
 /// Test that requests with floats where integers are declared are REJECTED.
 ///
 /// Requests must remain strict: the response relaxations must not leak into the

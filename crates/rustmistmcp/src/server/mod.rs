@@ -1717,7 +1717,7 @@ impl MistHandler {
         Ok(self
             .dispatch_named(
                 "get_mist_sle",
-                "getSiteSleSummary",
+                "getSiteSleSummaryTrend",
                 args,
                 &["site_id", "scope", "scope_id", "metric"],
                 MistCapability::OrdinaryRead,

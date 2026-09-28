@@ -19,9 +19,9 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_SHA256 = "2c3d769ef188bbce1b9db7a0774b5a10812d0a5bc11960b768de47b66bb88bbf"
-EXPECTED_INVENTORY_SHA256 = "d7aedc775485c00cde5160b96e9496652dde3e847f4fb4cdd2dc87ce2996f1e2"
-UPSTREAM_COMMIT = "f3af90c696747d003b2d22fd15e7dcc94d288cac"
+EXPECTED_SHA256 = "22f55432535ab38f6c0539392a729b8fd515a9ccae9df693fbd4ff23d40b8fac"
+EXPECTED_INVENTORY_SHA256 = "a436faf085ad8dd632979ceb3d4ed97d53faed40c3933f42a37b33ee45eacb56"
+UPSTREAM_COMMIT = "feeb569a409dcc5119c4d8935c99cc46d482d770"
 SOURCE_URL = "https://raw.githubusercontent.com/mistsys/mist_openapi/master/mist.openapi.json"
 ALLOWED_METHODS = {"get", "post", "put", "patch", "delete"}
 PATH_ITEM_METADATA = {"parameters", "summary", "description", "servers", "$ref"}
@@ -360,7 +360,7 @@ def frozen_parity(records: list[dict[str, Any]], inventory: dict[str, Any], sour
     mapped.sort(key=lambda record: record["operation_key"])
     missing_tools = comparison.get("missing_tools")
     extra_tools = comparison.get("extra_tools")
-    if not isinstance(missing_tools, list) or not isinstance(extra_tools, list) or len(mapped) != 1049 or len(missing_tools) != 10 or len(stale) != 1 or len(extra_tools) != 1:
+    if not isinstance(missing_tools, list) or not isinstance(extra_tools, list) or len(mapped) != 1047 or len(missing_tools) != 25 or len(stale) != 3 or len(extra_tools) != 3:
         raise ValueError("frozen wrapper/current-spec accounting is invalid")
     exceptions: list[dict[str, str]] = []
     mapped_tools = {record["tool"] for record in mapped}
@@ -368,18 +368,19 @@ def frozen_parity(records: list[dict[str, Any]], inventory: dict[str, Any], sour
         matching = [record for record in records if record["tool"] == tool]
         if len(matching) != 1 or tool in mapped_tools:
             raise ValueError(f"frozen missing-tool identity is invalid: {tool!r}")
-        exceptions.append({"operation_key": matching[0]["operation_key"], "status": "unsupported", "reason": f"Missing frozen reference wrapper {tool}; audited in docs/mist-api/frozen-reference-inventory.json.", "issue": "docs/mist-api/frozen-reference-inventory.json", "expires_on": "2026-08-28"})
-    stale_wrapper = stale[0]
-    if stale_wrapper.get("tool") != extra_tools[0]:
+        exceptions.append({"operation_key": matching[0]["operation_key"], "status": "unsupported", "reason": f"Missing frozen reference wrapper {tool}; audited in docs/mist-api/frozen-reference-inventory.json.", "issue": "docs/mist-api/frozen-reference-inventory.json", "expires_on": "2026-12-28"})
+    stale_tools = {stale_wrapper.get("tool") for stale_wrapper in stale}
+    if stale_tools != set(extra_tools) or len(stale_tools) != len(stale):
         raise ValueError("frozen stale wrapper identity is invalid")
-    exceptions.append({"operation_key": f"{stale_wrapper['method']} {stale_wrapper['path']}", "status": "unsupported", "reason": f"Stale frozen wrapper {stale_wrapper['tool']} is excluded; no current OpenAPI operation exists. Audited in docs/mist-api/frozen-reference-inventory.json.", "issue": "docs/mist-api/frozen-reference-inventory.json", "expires_on": "2026-08-28"})
+    for stale_wrapper in sorted(stale, key=lambda wrapper: wrapper["tool"]):
+        exceptions.append({"operation_key": f"{stale_wrapper['method']} {stale_wrapper['path']}", "status": "unsupported", "reason": f"Stale frozen wrapper {stale_wrapper['tool']} is excluded; no current OpenAPI operation exists. Audited in docs/mist-api/frozen-reference-inventory.json.", "issue": "docs/mist-api/frozen-reference-inventory.json", "expires_on": "2026-12-28"})
     for record in mapped:
         media = record["request_media_types"]
         if "multipart/form-data" in media:
             kind = "multipart-only" if media == ["multipart/form-data"] else "mixed-media"
-            exceptions.append({"operation_key": record["operation_key"], "status": "transport_blocked", "reason": f"Frozen wrapper {record['tool']} is JSON-only; {kind} media is blocked. Audited in docs/mist-api/frozen-reference-inventory.json.", "issue": "docs/mist-api/frozen-reference-inventory.json", "expires_on": "2026-08-28"})
+            exceptions.append({"operation_key": record["operation_key"], "status": "transport_blocked", "reason": f"Frozen wrapper {record['tool']} is JSON-only; {kind} media is blocked. Audited in docs/mist-api/frozen-reference-inventory.json.", "issue": "docs/mist-api/frozen-reference-inventory.json", "expires_on": "2026-12-28"})
     blocked_count = sum(item["status"] == "transport_blocked" for item in exceptions)
-    if len(exceptions) != 34 or blocked_count != 23:
+    if len(exceptions) != 51 or blocked_count != 23:
         raise ValueError(f"frozen transport-gap accounting is invalid: exceptions={len(exceptions)}, blocked={blocked_count}")
     if any(not item["issue"] or date.fromisoformat(item["expires_on"]) <= date.today() for item in exceptions):
         raise ValueError("frozen parity exception is unaudited or expired")
@@ -394,7 +395,7 @@ def generate(spec: Path, policy_path: Path, inventory_path: Path) -> tuple[dict[
     if hashlib.sha256(source_bytes).hexdigest() != EXPECTED_SHA256:
         raise ValueError("source SHA-256 does not match the audited Mist snapshot")
     document = json.loads(source_bytes)
-    if document.get("openapi") != "3.1.0" or document.get("info", {}).get("version") != "2607.1.0":
+    if document.get("openapi") != "3.1.0" or document.get("info", {}).get("version") != "2609.1.0":
         raise ValueError("source OpenAPI/API version does not match the audited Mist snapshot")
     components = document.get("components", {})
     if not isinstance(components, dict):
@@ -430,8 +431,8 @@ def generate(spec: Path, policy_path: Path, inventory_path: Path) -> tuple[dict[
         values = [record[field] for record in records]
         if len(values) != len(set(values)):
             raise ValueError(f"duplicate {field} in catalog")
-    if len(records) != 1059:
-        raise ValueError(f"incomplete operation accounting: expected 1059, found {len(records)}")
+    if len(records) != 1072:
+        raise ValueError(f"incomplete operation accounting: expected 1072, found {len(records)}")
     records_by_id = {record["operation_id"]: record for record in records}
     for record in records:
         if record["verification"] == "follow_up_read":
@@ -445,9 +446,12 @@ def generate(spec: Path, policy_path: Path, inventory_path: Path) -> tuple[dict[
         "json_media_entries": sum("application/json" in record["request_media_types"] for record in records),
         "multipart_media_entries": sum("multipart/form-data" in record["request_media_types"] for record in records),
     }
-    if media_accounting != {"json_only_operations": 333, "multipart_only_operations": 16, "mixed_media_operations": 7, "json_media_entries": 340, "multipart_media_entries": 23}:
+    if media_accounting != {"json_only_operations": 337, "multipart_only_operations": 16, "mixed_media_operations": 7, "json_media_entries": 344, "multipart_media_entries": 23}:
         raise ValueError(f"request media accounting changed: {media_accounting}")
-    source = {"url": SOURCE_URL, "revision": UPSTREAM_COMMIT, "sha256": EXPECTED_SHA256, "openapi_version": "3.1.0", "api_version": "2607.1.0"}
+    source = {"url": SOURCE_URL, "revision": UPSTREAM_COMMIT, "sha256": EXPECTED_SHA256, "openapi_version": "3.1.0", "api_version": "2609.1.0"}
+    inventory = load_locked_json(inventory_path, EXPECTED_INVENTORY_SHA256, "frozen reference inventory")
+    parity = frozen_parity(records, inventory, source)
+    comparison = inventory.get("wrapper_vs_vendored", {})
     catalog = {
         "catalog_version": 1,
         "platform": "mist",
@@ -458,14 +462,12 @@ def generate(spec: Path, policy_path: Path, inventory_path: Path) -> tuple[dict[
             "reference_commit": "2b91700b9049c2c27ce6a811a272f2ddfa8091e5",
             "operation_wrappers": 1050,
             "meta_tools": 3,
-            "missing_current_operations": 10,
-            "stale_unmatched_wrappers": 1,
-            "stale_wrapper_tool": "mist_get_org_aos_register_cmd",
+            "missing_current_operations": len(comparison["missing_tools"]),
+            "stale_unmatched_wrappers": len(comparison["extra_tools"]),
+            "stale_wrapper_tools": sorted(comparison["extra_tools"]),
             "media_accounting": media_accounting,
         },
     }
-    inventory = load_locked_json(inventory_path, EXPECTED_INVENTORY_SHA256, "frozen reference inventory")
-    parity = frozen_parity(records, inventory, source)
     return catalog, parity
 
 

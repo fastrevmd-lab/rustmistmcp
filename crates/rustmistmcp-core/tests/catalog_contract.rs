@@ -15,10 +15,10 @@ fn audited_catalog_covers_each_current_operation_safely_and_deterministically() 
 
     assert_eq!(
         catalog.source.sha256,
-        "2c3d769ef188bbce1b9db7a0774b5a10812d0a5bc11960b768de47b66bb88bbf"
+        "22f55432535ab38f6c0539392a729b8fd515a9ccae9df693fbd4ff23d40b8fac"
     );
-    assert_eq!(catalog.source.api_version, "2607.1.0");
-    assert_eq!(catalog.operations.len(), 1_059);
+    assert_eq!(catalog.source.api_version, "2609.1.0");
+    assert_eq!(catalog.operations.len(), 1_072);
     assert_eq!(
         catalog
             .operation("getOrgAoscxRegisterCmd")
@@ -87,15 +87,15 @@ fn parity_manifest_and_catalog_freeze_reference_delta_and_request_media_truth() 
             .as_array()
             .expect("parity operations are an array")
             .len(),
-        1_049
+        1_047
     );
     let exceptions = parity["exceptions"]
         .as_array()
         .expect("parity exceptions are an array");
     assert_eq!(
         exceptions.len(),
-        34,
-        "10 missing + 1 stale + 23 frozen transport gaps"
+        51,
+        "25 missing + 3 stale + 23 frozen transport gaps"
     );
     for operation_key in [
         "GET /api/v1/sites/{site_id}/iotendpoints/count",
@@ -109,12 +109,29 @@ fn parity_manifest_and_catalog_freeze_reference_delta_and_request_media_truth() 
         "POST /api/v1/sites/{site_id}/devices/{device_id}/zigbee_packet_trail",
         "DELETE /api/v1/sites/{site_id}/devices/{device_id}/zigbee_join",
         "GET /api/v1/orgs/{org_id}/aos/register_cmd",
+        "GET /api/v1/sites/{site_id}/insights/fingerprints/count",
+        "GET /api/v1/sites/{site_id}/insights/fingerprints/search",
+        "GET /api/v1/orgs/{org_id}/insights/fingerprints/count",
+        "GET /api/v1/orgs/{org_id}/insights/fingerprints/search",
+        "GET /api/v1/orgs/{org_id}/vars/count",
+        "GET /api/v1/orgs/{org_id}/securityzones",
+        "GET /api/v1/orgs/{org_id}/securityzones/{securityzone_id}",
+        "POST /api/v1/orgs/{org_id}/securityzones",
+        "PUT /api/v1/orgs/{org_id}/securityzones/{securityzone_id}",
+        "DELETE /api/v1/orgs/{org_id}/securityzones/{securityzone_id}",
+        "GET /api/v1/sites/{site_id}/flow_capture",
+        "POST /api/v1/sites/{site_id}/flow_capture",
+        "DELETE /api/v1/sites/{site_id}/flow_capture",
+        "GET /api/v1/sites/{site_id}/mapstacks/{mapstack_id}",
+        "PUT /api/v1/sites/{site_id}/mapstacks/{mapstack_id}",
+        "DELETE /api/v1/sites/{site_id}/mapstacks/{mapstack_id}",
+        "GET /api/v1/orgs/{org_id}/setting/mist_scep/events/search",
     ] {
         assert!(exceptions.iter().any(|exception| {
             exception["operation_key"] == operation_key
                 && exception["status"] == "unsupported"
                 && exception["issue"] == "docs/mist-api/frozen-reference-inventory.json"
-                && exception["expires_on"] == "2026-08-28"
+                && exception["expires_on"] == "2026-12-28"
         }));
     }
     assert!(exceptions.iter().any(|exception| {
@@ -130,16 +147,20 @@ fn parity_manifest_and_catalog_freeze_reference_delta_and_request_media_truth() 
     );
     assert_eq!(catalog.audit.operation_wrappers, 1_050);
     assert_eq!(catalog.audit.meta_tools, 3);
-    assert_eq!(catalog.audit.missing_current_operations, 10);
-    assert_eq!(catalog.audit.stale_unmatched_wrappers, 1);
+    assert_eq!(catalog.audit.missing_current_operations, 25);
+    assert_eq!(catalog.audit.stale_unmatched_wrappers, 3);
     assert_eq!(
-        catalog.audit.stale_wrapper_tool,
-        "mist_get_org_aos_register_cmd"
+        catalog.audit.stale_wrapper_tools,
+        vec![
+            "mist_count_site_client_fingerprints",
+            "mist_get_org_aos_register_cmd",
+            "mist_search_site_client_fingerprints",
+        ]
     );
-    assert_eq!(catalog.audit.media_accounting.json_only_operations, 333);
+    assert_eq!(catalog.audit.media_accounting.json_only_operations, 337);
     assert_eq!(catalog.audit.media_accounting.multipart_only_operations, 16);
     assert_eq!(catalog.audit.media_accounting.mixed_media_operations, 7);
-    assert_eq!(catalog.audit.media_accounting.json_media_entries, 340);
+    assert_eq!(catalog.audit.media_accounting.json_media_entries, 344);
     assert_eq!(catalog.audit.media_accounting.multipart_media_entries, 23);
 }
 
@@ -185,7 +206,7 @@ fn parity_capabilities_exactly_match_frozen_wrapper_capabilities() {
     }
     assert_eq!(
         distribution,
-        std::collections::BTreeMap::from([("read", 524), ("write", 408), ("write_delete", 117)])
+        std::collections::BTreeMap::from([("read", 522), ("write", 408), ("write_delete", 117)])
     );
 }
 
@@ -213,8 +234,8 @@ fn catalog_preserves_resolvable_response_and_request_schema_contracts() {
         .iter()
         .find(|parameter| parameter["name"] == "rating")
         .expect("rating is retained");
-    assert_eq!(rating["schema"]["minimum"], 1);
-    assert_eq!(rating["schema"]["maximum"], 5);
+    assert_eq!(rating["schema"]["type"], "string");
+    assert_eq!(rating["schema"]["pattern"], "^[1-5](,[1-5])*$");
     assert_eq!(
         catalog["components"]["parameters"]["client_mac"]["schema"]["pattern"],
         "^[0-9a-fA-F]{12}$"
@@ -290,7 +311,7 @@ fn catalog_uses_exact_reviewed_security_actions_and_verification_policies() {
             .iter()
             .filter(|operation| operation["verification"] == "follow_up_read")
             .count(),
-        74
+        76
     );
 }
 
