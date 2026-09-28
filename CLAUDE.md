@@ -9,7 +9,7 @@ workspace, pre-release packaging, and — since `mecmcp#90` closed — a real
 outbound `HttpMistClient` wired into the production path.
 
 **It has reached a live tenant.** A lab deployment runs as LXC **952** on
-**pve2** (hostname still `rustmistmcp-610`, `192.168.1.212`), and on 2026-08-10
+**pve2** (hostname still `rustmistmcp-610`, `192.0.2.212`), and on 2026-08-10
 `get_mist_self`, `get_mist_org`, and `list_mist_sites` each returned real data
 from `api.ac2.mist.com` in under 400 ms. That closed issue #11.
 
