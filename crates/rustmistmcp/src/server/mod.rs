@@ -23,8 +23,8 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use rustmistmcp_core::{
-    BlockedMistClient, Catalog, MAX_ENCODED_CURSOR_BYTES, MistClient, MistError, MistGrant,
-    MistRequest, MistResponseBody, MistTarget,
+    BlockedMistClient, BudgetStatus, CallPriority, Catalog, MAX_ENCODED_CURSOR_BYTES, MistClient,
+    MistError, MistGrant, MistRequest, MistResponseBody, MistTarget,
     catalog::{MistCapability, MistOperation, TargetSelector},
     validate_mist_endpoint,
 };
@@ -595,7 +595,8 @@ impl MistHandler {
         let expected_operation_id = request.operation_id.clone();
         let request_path = request.path.clone();
         let request_query = request.query.clone();
-        let response = match self.client.execute(request).await {
+        let priority = call_priority_for(caller);
+        let response = match self.client.execute_as(request, priority).await {
             Ok(response) => response,
             Err(error) => {
                 audit.fail(&error);
@@ -606,6 +607,7 @@ impl MistHandler {
                 );
             }
         };
+        let budget_remaining = self.client.budget_status();
         if response.operation_id != expected_operation_id {
             let error = MistError::InvalidResponse {
                 operation_id: expected_operation_id,
@@ -658,7 +660,7 @@ impl MistHandler {
                     }
                 };
         }
-        let envelope = ReadEnvelope::from_response(response, target.as_ref());
+        let envelope = ReadEnvelope::from_response(response, target.as_ref(), budget_remaining);
         audited_tool_result(&mut audit, Ok::<_, MistCallError>(envelope))
     }
 
@@ -899,6 +901,10 @@ struct ReadEnvelope {
     data: serde_json::Value,
     next_cursor: Option<String>,
     truncated: bool,
+    /// This token's hourly Mist call budget headroom after this call, when
+    /// the injected client tracks one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_remaining: Option<BudgetStatus>,
 }
 
 #[derive(Serialize)]
@@ -917,6 +923,7 @@ impl ReadEnvelope {
     fn from_response(
         response: rustmistmcp_core::MistResponse,
         target: Option<&MistTarget>,
+        budget_remaining: Option<BudgetStatus>,
     ) -> Self {
         let (content_type, data) = match response.body {
             MistResponseBody::Json(value) => ("application/json", value),
@@ -938,7 +945,24 @@ impl ReadEnvelope {
             data,
             next_cursor,
             truncated: false,
+            budget_remaining,
         }
+    }
+}
+
+/// Map a caller to the Mist hourly call budget pool it may draw from.
+///
+/// Only a token the server has verified declares `ActorType::Human` may draw
+/// on the reserve: an absent caller, an `Agent` actor, or an untagged legacy
+/// token (`ActorType::Unknown`) all get [`CallPriority::Standard`], since
+/// granting the reserve on anything less than a verified human claim would
+/// let an ordinary agent call starve the reserve it exists to protect.
+fn call_priority_for(caller: Option<&CallerCtx<MistGrant>>) -> CallPriority {
+    match caller {
+        Some(caller) if caller.actor_type == mecmcp_auth::ActorType::Human => {
+            CallPriority::Reserved
+        }
+        _ => CallPriority::Standard,
     }
 }
 
@@ -3200,7 +3224,10 @@ impl MistHandler {
             cursor: None,
         };
 
-        let write_result = self.client.execute(write_request).await;
+        let write_result = self
+            .client
+            .execute_as(write_request, call_priority_for(caller))
+            .await;
         let write_response = match write_result {
             Ok(response) => response,
             Err(error) => {

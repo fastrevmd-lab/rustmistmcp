@@ -40,7 +40,13 @@ test-util = []
 [dev-dependencies]
 axum.workspace = true
 rustls.workspace = true
+# Self-signed test certificates for the 429-retry and budget-tracking tests
+# in src/client.rs, which need a real TLS round trip: mecmcp-http's
+# HttpRequest::new() rejects non-https URLs unconditionally, so a plain-HTTP
+# mock cannot exercise HttpMistClient::execute_as at all.
+rcgen = "0.13"
 tempfile = "3"
+tokio-rustls = "0.26"
 toml = "1.1"
 tower.workspace = true
 
