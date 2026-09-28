@@ -152,7 +152,7 @@ fn cursors_are_opaque_but_bound_to_origin_operation_and_pagination_mode() {
         "listOrgSites".to_owned(),
         &origin,
         PaginationMode::PageLimit,
-        "opaque-next-page".to_owned(),
+        "2".to_owned(),
     )
     .expect("valid cursor");
     assert_eq!(cursor.operation_id(), "listOrgSites");
@@ -221,7 +221,7 @@ fn continuation_context_round_trips_for_revalidation_and_reauthorization() {
         "listOrgSites".to_owned(),
         &origin(),
         PaginationMode::PageLimit,
-        "opaque-next-page".to_owned(),
+        "2".to_owned(),
     )
     .expect("cursor")
     .with_request_context(path.clone(), query.clone(), Some(target.clone()))
@@ -241,7 +241,7 @@ fn serde_contract_rejects_unknown_fields_and_preserves_response_variants() {
         "listOrgSites".to_owned(),
         &origin(),
         PaginationMode::PageLimit,
-        "opaque".to_owned(),
+        "2".to_owned(),
     )
     .expect("cursor");
     let request = MistRequest {
@@ -326,7 +326,7 @@ fn response_validation_is_catalog_bound_and_bounded() {
         "listOrgSites".to_owned(),
         &origin,
         PaginationMode::PageLimit,
-        "opaque".to_owned(),
+        "2".to_owned(),
     )
     .expect("cursor");
     for invalid in [

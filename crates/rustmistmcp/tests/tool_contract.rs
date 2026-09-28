@@ -223,7 +223,10 @@ impl MistClient for PagingClient {
                 request.operation_id,
                 &url::Url::parse("https://api.mist.com/").expect("origin"),
                 mode,
-                "next-page".to_owned(),
+                match mode {
+                    PaginationMode::PageLimit => "2".to_owned(),
+                    _ => "next-page".to_owned(),
+                },
             )?),
             page: None,
         })

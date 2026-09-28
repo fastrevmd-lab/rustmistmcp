@@ -375,14 +375,14 @@ impl HttpMistClient {
             PaginationMode::PageLimit => {
                 let page = page?;
                 let (current_page, limit, total) = (page.page?, page.limit?, page.total?);
-                if current_page.saturating_mul(limit) >= total {
+                if limit == 0 || current_page.saturating_mul(limit) >= total {
                     return None;
                 }
                 MistCursor::new(
                     operation_id.to_owned(),
                     &self.base_url,
                     PaginationMode::PageLimit,
-                    (current_page + 1).to_string(),
+                    current_page.checked_add(1)?.to_string(),
                 )
                 .ok()
             }
@@ -761,6 +761,54 @@ mod tests {
                 .derive_next_cursor("listOrgSites", &body, Some(&last_page))
                 .is_none(),
             "page 3 * limit 10 already covers all 25 results"
+        );
+    }
+
+    #[test]
+    fn derive_next_cursor_refuses_a_zero_page_limit_instead_of_looping_forever() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let client = HttpMistClient::from_test_parts(
+            Url::parse("https://api.mist.com/").expect("url"),
+            TEST_TOKEN.to_owned(),
+            test_catalog(),
+            1024 * 1024,
+        );
+        let body = MistResponseBody::Json(serde_json::json!([]));
+        let zero_limit = MistPageInfo {
+            page: Some(7),
+            limit: Some(0),
+            total: Some(5),
+        };
+        assert!(
+            client
+                .derive_next_cursor("listOrgSites", &body, Some(&zero_limit))
+                .is_none(),
+            "a zero page size must not be treated as always-more-pages"
+        );
+    }
+
+    #[test]
+    fn derive_next_cursor_does_not_overflow_on_a_maximal_page_number() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let client = HttpMistClient::from_test_parts(
+            Url::parse("https://api.mist.com/").expect("url"),
+            TEST_TOKEN.to_owned(),
+            test_catalog(),
+            1024 * 1024,
+        );
+        let body = MistResponseBody::Json(serde_json::json!([]));
+        let max_page = MistPageInfo {
+            page: Some(u64::MAX),
+            limit: Some(1),
+            total: Some(u64::MAX),
+        };
+        assert!(
+            client
+                .derive_next_cursor("listOrgSites", &body, Some(&max_page))
+                .is_none(),
+            "current_page + 1 must not wrap past u64::MAX"
         );
     }
 }
