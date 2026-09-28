@@ -39,8 +39,11 @@ test-util = []
 
 [dev-dependencies]
 axum.workspace = true
+rcgen = "0.14"
 rustls.workspace = true
+rustmistmcp-core = { path = ".", features = ["test-util"] }
 tempfile = "3"
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12", "ring"] }
 toml = "1.1"
 tower.workspace = true
 

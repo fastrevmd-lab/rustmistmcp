@@ -6,7 +6,8 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use url::Url;
 
-use crate::{Catalog, MistCursor, MistRequest, MistResponse, MistResponseBody};
+use crate::catalog::PaginationMode;
+use crate::{Catalog, MistCursor, MistPageInfo, MistRequest, MistResponse, MistResponseBody};
 
 /// An injected, asynchronous dispatcher for already-validated Mist requests.
 ///
@@ -174,6 +175,23 @@ impl HttpMistClient {
         catalog: Arc<Catalog>,
         max_response_bytes: usize,
     ) -> Self {
+        Self::from_test_parts_with_roots(base_url, credential, catalog, max_response_bytes, vec![])
+    }
+
+    /// As [`Self::from_test_parts`], additionally trusting `extra_root_certificates`.
+    ///
+    /// `mecmcp-http` refuses any outbound scheme but `https` (there is no
+    /// plaintext escape hatch), so a mock server that proves real wire
+    /// behavior needs a certificate the client is told to trust rather than a
+    /// plain HTTP listener. Each certificate is PEM-encoded.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn from_test_parts_with_roots(
+        base_url: Url,
+        credential: String,
+        catalog: Arc<Catalog>,
+        max_response_bytes: usize,
+        extra_root_certificates: Vec<String>,
+    ) -> Self {
         let config = HttpMistClientConfig {
             connect_timeout: std::time::Duration::from_secs(1),
             request_timeout: std::time::Duration::from_secs(2),
@@ -190,7 +208,7 @@ impl HttpMistClient {
             pool_max_idle_per_host: config.max_concurrency,
             user_agent: "rustmistmcp-test".to_owned(),
             max_response_bytes: config.max_response_bytes,
-            extra_root_certificates: vec![],
+            extra_root_certificates,
         };
 
         let http = mecmcp_http::HttpClient::new(http_config).expect("test client");
@@ -204,11 +222,22 @@ impl HttpMistClient {
         }
     }
 
+    /// The query parameter Mist expects a continuation value written back to,
+    /// keyed by the pagination shape declared in the catalog.
+    fn cursor_query_key(mode: PaginationMode) -> Option<&'static str> {
+        match mode {
+            PaginationMode::SearchAfter => Some("search_after"),
+            PaginationMode::PageLimit => Some("page"),
+            PaginationMode::None => None,
+        }
+    }
+
     fn build_url(
         &self,
         operation_id: &str,
         path: &std::collections::BTreeMap<String, String>,
         query: &std::collections::BTreeMap<String, serde_json::Value>,
+        cursor: Option<&MistCursor>,
     ) -> Result<Url, MistError> {
         let operation = self
             .catalog
@@ -231,10 +260,25 @@ impl HttpMistClient {
 
         url.set_path(&expanded_path);
 
+        // A continuation replaces whatever page/search_after value the stored
+        // request context carried forward, so it is merged into the query map
+        // before encoding rather than appended: appending would send both the
+        // stale and the fresh value as duplicate query parameters.
+        let mut effective_query = query.clone();
+        if let Some(cursor) = cursor {
+            let key = Self::cursor_query_key(cursor.mode()).ok_or_else(|| {
+                MistError::InvalidCursor("cursor pagination mode must not be none".to_owned())
+            })?;
+            effective_query.insert(
+                key.to_owned(),
+                serde_json::Value::String(cursor.value().to_owned()),
+            );
+        }
+
         // Add query parameters
         {
             let mut pairs = url.query_pairs_mut();
-            for (key, value) in query {
+            for (key, value) in &effective_query {
                 let value_str = match value {
                     serde_json::Value::String(s) => s.clone(),
                     serde_json::Value::Number(n) => n.to_string(),
@@ -256,38 +300,93 @@ impl HttpMistClient {
         Ok(url)
     }
 
-    fn extract_cursor_from_json(
+    /// Parse the `X-Page-Page`, `X-Page-Limit`, and `X-Page-Total` response
+    /// headers Mist's `page`/`limit` endpoints use to report pagination state.
+    ///
+    /// Those endpoints return a bare JSON array as the body (see
+    /// `listOrgSites`), so the headers are the only place this state appears.
+    fn parse_page_info(response: &mecmcp_http::HttpResponse) -> Option<MistPageInfo> {
+        let info = MistPageInfo {
+            page: response
+                .header_str("X-Page-Page")
+                .and_then(|value| value.parse().ok()),
+            limit: response
+                .header_str("X-Page-Limit")
+                .and_then(|value| value.parse().ok()),
+            total: response
+                .header_str("X-Page-Total")
+                .and_then(|value| value.parse().ok()),
+        };
+        if info.is_empty() { None } else { Some(info) }
+    }
+
+    /// Extract the `search_after` value Mist embeds in the `next` URL of a
+    /// search-style response body.
+    ///
+    /// Mist's search-after endpoints (for example `searchOrgAlarms`) do not
+    /// return the continuation value as its own body field; they return a
+    /// `next` field holding a full (or origin-relative) URL for the next page,
+    /// and the `search_after` query parameter inside that URL is the only part
+    /// of it that changes between pages.
+    fn extract_search_after_cursor(
         &self,
         json: &serde_json::Value,
         operation_id: &str,
     ) -> Option<MistCursor> {
-        // Get the operation to determine pagination mode
-        let operation = self.catalog.operation(operation_id)?;
-
-        if operation.pagination == crate::catalog::PaginationMode::None {
+        let next = json.get("next")?.as_str()?;
+        if next.is_empty() {
             return None;
         }
-
-        // Mist pagination uses different cursor field names depending on the operation
-        let cursor_value = json
-            .get("next")
-            .or_else(|| json.get("cursor"))
-            .or_else(|| json.get("page_token"))
-            .or_else(|| json.get("search_after"))?;
-
-        let cursor_str = cursor_value.as_str()?;
-        if cursor_str.is_empty() {
+        let next_url = self.base_url.join(next).ok()?;
+        let search_after = next_url
+            .query_pairs()
+            .find(|(key, _)| key == "search_after")?
+            .1
+            .into_owned();
+        if search_after.is_empty() {
             return None;
         }
-
-        // Create cursor with proper pagination mode and origin
         MistCursor::new(
             operation_id.to_owned(),
             &self.base_url,
-            operation.pagination,
-            cursor_str.to_owned(),
+            PaginationMode::SearchAfter,
+            search_after,
         )
         .ok()
+    }
+
+    /// Derive the continuation cursor for a response, per the operation's
+    /// declared pagination shape.
+    fn derive_next_cursor(
+        &self,
+        operation_id: &str,
+        body: &MistResponseBody,
+        page: Option<&MistPageInfo>,
+    ) -> Option<MistCursor> {
+        let operation = self.catalog.operation(operation_id)?;
+        match operation.pagination {
+            PaginationMode::None => None,
+            PaginationMode::SearchAfter => {
+                let MistResponseBody::Json(json) = body else {
+                    return None;
+                };
+                self.extract_search_after_cursor(json, operation_id)
+            }
+            PaginationMode::PageLimit => {
+                let page = page?;
+                let (current_page, limit, total) = (page.page?, page.limit?, page.total?);
+                if limit == 0 || current_page.saturating_mul(limit) >= total {
+                    return None;
+                }
+                MistCursor::new(
+                    operation_id.to_owned(),
+                    &self.base_url,
+                    PaginationMode::PageLimit,
+                    current_page.checked_add(1)?.to_string(),
+                )
+                .ok()
+            }
+        }
     }
 }
 
@@ -296,7 +395,12 @@ impl MistClient for HttpMistClient {
     async fn execute(&self, request: MistRequest) -> Result<MistResponse, MistError> {
         let _permit = self.concurrency.acquire().await.expect("semaphore");
 
-        let url = self.build_url(&request.operation_id, &request.path, &request.query)?;
+        let url = self.build_url(
+            &request.operation_id,
+            &request.path,
+            &request.query,
+            request.cursor.as_ref(),
+        )?;
 
         let operation = self
             .catalog
@@ -371,18 +475,15 @@ impl MistClient for HttpMistClient {
             }
         };
 
-        // Extract cursor from response if present
-        let cursor = if let MistResponseBody::Json(ref json) = body {
-            self.extract_cursor_from_json(json, &request.operation_id)
-        } else {
-            None
-        };
+        let page = Self::parse_page_info(&http_response);
+        let cursor = self.derive_next_cursor(&request.operation_id, &body, page.as_ref());
 
         Ok(MistResponse {
             operation_id: request.operation_id,
             status,
             body,
             cursor,
+            page,
         })
     }
 }
@@ -509,7 +610,7 @@ mod tests {
         let query = BTreeMap::new();
 
         let url = client
-            .build_url("getOrg", &path, &query)
+            .build_url("getOrg", &path, &query, None)
             .expect("build URL");
         assert_eq!(url.path(), format!("/api/v1/orgs/{ORG_ID}"));
     }
@@ -531,7 +632,7 @@ mod tests {
         query.insert("page".to_owned(), serde_json::json!(2));
 
         let url = client
-            .build_url("listOrgSites", &path, &query)
+            .build_url("listOrgSites", &path, &query, None)
             .expect("build URL");
         let query_str = url.query().expect("query string");
         assert!(query_str.contains("limit=100"));
@@ -539,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn http_client_extracts_cursor_from_json_response() {
+    fn build_url_threads_the_cursor_value_into_the_next_request() {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let client = HttpMistClient::from_test_parts(
@@ -549,17 +650,32 @@ mod tests {
             1024 * 1024,
         );
 
-        let json_with_cursor = serde_json::json!({
-            "results": [],
-            "next": "cursor-token-123"
-        });
+        let path = BTreeMap::from([("org_id".to_owned(), ORG_ID.to_owned())]);
+        // The stored request context still carries page 1's own query values;
+        // the cursor for page 2 must override rather than duplicate them.
+        let mut query = BTreeMap::new();
+        query.insert("limit".to_owned(), serde_json::json!(10));
+        query.insert("page".to_owned(), serde_json::json!(1));
 
-        let cursor = client.extract_cursor_from_json(&json_with_cursor, "listOrgSites");
-        assert!(cursor.is_some());
+        let cursor = MistCursor::new(
+            "listOrgSites".to_owned(),
+            &Url::parse("https://api.mist.com/").expect("origin"),
+            PaginationMode::PageLimit,
+            "2".to_owned(),
+        )
+        .expect("cursor");
+
+        let url = client
+            .build_url("listOrgSites", &path, &query, Some(&cursor))
+            .expect("build URL");
+        let query_str = url.query().expect("query string");
+        assert!(query_str.contains("page=2"), "{query_str}");
+        assert!(!query_str.contains("page=1"), "{query_str}");
+        assert_eq!(query_str.matches("page=").count(), 1, "{query_str}");
     }
 
     #[test]
-    fn http_client_does_not_extract_cursor_from_non_paginated_operation() {
+    fn derive_next_cursor_extracts_search_after_from_the_next_url() {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let client = HttpMistClient::from_test_parts(
@@ -569,13 +685,130 @@ mod tests {
             1024 * 1024,
         );
 
-        let json_with_cursor = serde_json::json!({
+        // Mirrors the real Mist response shape: `next` is a relative URL, and
+        // `search_after` is the only part of it that changes between pages.
+        let body = MistResponseBody::Json(serde_json::json!({
+            "start": 0,
+            "end": 0,
+            "limit": 10,
+            "total": 25,
+            "results": [],
+            "next": format!(
+                "/api/v1/orgs/{ORG_ID}/alarms/search?limit=10&search_after=%5B123%2C+%22abc%22%5D"
+            ),
+        }));
+
+        let cursor = client
+            .derive_next_cursor("searchOrgAlarms", &body, None)
+            .expect("cursor");
+        assert_eq!(cursor.value(), "[123, \"abc\"]");
+        assert_eq!(cursor.mode(), PaginationMode::SearchAfter);
+    }
+
+    #[test]
+    fn derive_next_cursor_is_none_for_non_paginated_operations() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let client = HttpMistClient::from_test_parts(
+            Url::parse("https://api.mist.com/").expect("url"),
+            TEST_TOKEN.to_owned(),
+            test_catalog(),
+            1024 * 1024,
+        );
+
+        let body = MistResponseBody::Json(serde_json::json!({
             "id": ORG_ID,
             "next": "cursor-token-123"
-        });
+        }));
 
         // getOrg is not paginated
-        let cursor = client.extract_cursor_from_json(&json_with_cursor, "getOrg");
-        assert!(cursor.is_none());
+        assert!(client.derive_next_cursor("getOrg", &body, None).is_none());
+    }
+
+    #[test]
+    fn derive_next_cursor_advances_page_limit_operations_from_headers() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let client = HttpMistClient::from_test_parts(
+            Url::parse("https://api.mist.com/").expect("url"),
+            TEST_TOKEN.to_owned(),
+            test_catalog(),
+            1024 * 1024,
+        );
+
+        // listOrgSites returns a bare array; the only pagination signal is
+        // the X-Page-* headers.
+        let body = MistResponseBody::Json(serde_json::json!([]));
+
+        let more_pages = MistPageInfo {
+            page: Some(1),
+            limit: Some(10),
+            total: Some(25),
+        };
+        let cursor = client
+            .derive_next_cursor("listOrgSites", &body, Some(&more_pages))
+            .expect("cursor for remaining pages");
+        assert_eq!(cursor.value(), "2");
+        assert_eq!(cursor.mode(), PaginationMode::PageLimit);
+
+        let last_page = MistPageInfo {
+            page: Some(3),
+            limit: Some(10),
+            total: Some(25),
+        };
+        assert!(
+            client
+                .derive_next_cursor("listOrgSites", &body, Some(&last_page))
+                .is_none(),
+            "page 3 * limit 10 already covers all 25 results"
+        );
+    }
+
+    #[test]
+    fn derive_next_cursor_refuses_a_zero_page_limit_instead_of_looping_forever() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let client = HttpMistClient::from_test_parts(
+            Url::parse("https://api.mist.com/").expect("url"),
+            TEST_TOKEN.to_owned(),
+            test_catalog(),
+            1024 * 1024,
+        );
+        let body = MistResponseBody::Json(serde_json::json!([]));
+        let zero_limit = MistPageInfo {
+            page: Some(7),
+            limit: Some(0),
+            total: Some(5),
+        };
+        assert!(
+            client
+                .derive_next_cursor("listOrgSites", &body, Some(&zero_limit))
+                .is_none(),
+            "a zero page size must not be treated as always-more-pages"
+        );
+    }
+
+    #[test]
+    fn derive_next_cursor_does_not_overflow_on_a_maximal_page_number() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let client = HttpMistClient::from_test_parts(
+            Url::parse("https://api.mist.com/").expect("url"),
+            TEST_TOKEN.to_owned(),
+            test_catalog(),
+            1024 * 1024,
+        );
+        let body = MistResponseBody::Json(serde_json::json!([]));
+        let max_page = MistPageInfo {
+            page: Some(u64::MAX),
+            limit: Some(1),
+            total: Some(u64::MAX),
+        };
+        assert!(
+            client
+                .derive_next_cursor("listOrgSites", &body, Some(&max_page))
+                .is_none(),
+            "current_page + 1 must not wrap past u64::MAX"
+        );
     }
 }

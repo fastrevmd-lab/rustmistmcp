@@ -23,6 +23,7 @@ fn response(operation_id: &str, body: &str) -> MistResponse {
         status: 200,
         body: MistResponseBody::Json(serde_json::from_str(body).unwrap()),
         cursor: None,
+        page: None,
     }
 }
 

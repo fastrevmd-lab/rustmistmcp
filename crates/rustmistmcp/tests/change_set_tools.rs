@@ -51,6 +51,7 @@ impl MistClient for ScriptedClient {
             status: 200,
             body: MistResponseBody::Json(body),
             cursor: None,
+            page: None,
         })
     }
 }
