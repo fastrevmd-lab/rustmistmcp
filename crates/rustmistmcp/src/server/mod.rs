@@ -401,6 +401,33 @@ impl MistHandler {
         })
     }
 
+    /// Same as [`Self::with_client_options`], but with an evidence recorder
+    /// attached to both the coordinator and the handler, matching how
+    /// `from_config_with_lab_mode` wires production. Test-only: lets a test
+    /// inspect the evidence chain a tool call produces.
+    #[cfg(test)]
+    fn with_client_and_evidence(
+        endpoint: &str,
+        allowed_orgs: Vec<String>,
+        sites: BTreeMap<String, String>,
+        client: Arc<dyn MistClient>,
+        evidence: Arc<mecmcp_audit::recorder::EvidenceRecorder>,
+    ) -> Result<Self, MistServerError> {
+        let origin =
+            validate_mist_endpoint(endpoint).map_err(|_| MistServerError::InvalidEndpoint)?;
+        Ok(Self {
+            origin,
+            allowed_orgs: allowed_orgs.into(),
+            sites: Arc::new(sites),
+            catalog: Arc::new(Catalog::embedded()?),
+            client,
+            coordinator: load_coordinator(None, false, Some(evidence.clone()))?,
+            evidence: Some(evidence),
+            lab_mode: false,
+            tool_router: Self::mist_tool_router(),
+        })
+    }
+
     async fn dispatch_catalogued_read(
         &self,
         read: CatalogRead,
@@ -2747,16 +2774,10 @@ impl MistHandler {
             }
         };
 
-        // A second person decided. Recorded after the state write, so the trail
-        // cannot claim an approval the coordinator failed to persist.
-        if let Some(recorder) = &self.evidence {
-            recorder.approval(
-                &output.change_set_id,
-                &output.change_set_id,
-                &approver,
-                "approved",
-            );
-        }
+        // The coordinator itself already recorded the `Approval` evidence entry
+        // (mecmcp `ChangesetCoordinator::approve_change_set`, after its state
+        // write) since it now owns the lifecycle transition. Recording it again
+        // here would double the approval entry in the hash-chained evidence log.
 
         let response = serde_json::json!({
             "change_set_id": output.change_set_id,
@@ -3574,6 +3595,32 @@ mod tests {
         }
     }
 
+    /// A caller with a given token name and actor type, and no grant. Used by
+    /// the change-set write tools (`plan_mist_change`, `approve_mist_change_set`),
+    /// which key their owner/approver distinctness and human-actor checks off
+    /// `token_name`/`actor_type` rather than a `MistGrant`.
+    fn caller_named(token_name: &str, actor_type: ActorType) -> CallerCtx<MistGrant> {
+        CallerCtx {
+            request_id: uuid::Uuid::new_v4(),
+            token_name: token_name.to_owned(),
+            devices: ScopeSet::Allowlist(vec![
+                "org/11111111-1111-1111-1111-111111111111".to_owned(),
+            ]),
+            tools: ScopeSet::Allowlist(vec![
+                "plan_mist_change".to_owned(),
+                "approve_mist_change_set".to_owned(),
+            ]),
+            grant: None,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type,
+            client_name: None,
+            model_id: None,
+            session_id: None,
+        }
+    }
+
     fn extensions(caller: CallerCtx<MistGrant>) -> rmcp::model::Extensions {
         let request = http::Request::new(());
         let (mut parts, _) = request.into_parts();
@@ -4206,6 +4253,95 @@ mod tests {
             !output.contains("tool=audit_race_noise"),
             "noisy thread emissions must not leak into this thread's capture; \
              output: {output}"
+        );
+    }
+
+    /// Percy's MEC-425 review of PR#124: mecmcp's `ChangesetCoordinator::
+    /// approve_change_set` (v0.24.1) already emits an `Approval` evidence
+    /// record after its state write. `approve_mist_change_set` used to emit
+    /// its own, on top of that, so every approved change set carried two
+    /// `Approval` entries in the hash-chained evidence log -- the one fact
+    /// two-person control exists to prove. This fails against the pre-fix
+    /// handler (count == 2) and passes once the handler's own
+    /// `recorder.approval(...)` call is removed.
+    #[tokio::test]
+    async fn approving_a_change_set_records_exactly_one_approval_evidence_entry() {
+        let evidence = Arc::new(mecmcp_audit::recorder::EvidenceRecorder::new(
+            mecmcp_audit::recorder::RecorderConfig {
+                server_id: "rustmistmcp-test".to_owned(),
+                run_id: "approval-dedup".to_owned(),
+                resume_from: None,
+                records_per_segment: 64,
+            },
+        ));
+        let handler = MistHandler::with_client_and_evidence(
+            "https://api.mist.com/",
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
+            Arc::new(RecordingClient::default()),
+            evidence.clone(),
+        )
+        .expect("handler");
+
+        let planned = handler
+            .plan_mist_change(
+                Parameters(PlanChangeArgs {
+                    object: WanObjectArg::Network,
+                    verb: WriteVerbArg::Create,
+                    org_id: "11111111-1111-1111-1111-111111111111".to_owned(),
+                    object_id: None,
+                    patch: serde_json::json!({"name": "branch"}),
+                }),
+                extensions(caller_named("owner", ActorType::Human)),
+            )
+            .await
+            .expect("plan call");
+        assert_ne!(planned.is_error, Some(true), "{planned:?}");
+        let planned_text = planned.content[0]
+            .as_text()
+            .expect("plan text content")
+            .text
+            .clone();
+        let planned_json: serde_json::Value =
+            serde_json::from_str(&planned_text).expect("plan JSON");
+        let change_set_id = planned_json["change_set_id"]
+            .as_str()
+            .expect("change_set_id")
+            .to_owned();
+        let plan_digest = planned_json["plan_digest"]
+            .as_str()
+            .expect("plan_digest")
+            .to_owned();
+
+        let approved = handler
+            .approve_mist_change_set(
+                Parameters(ApproveChangeSetArgs {
+                    change_set_id: change_set_id.clone(),
+                    plan_digest,
+                    object: WanObjectArg::Network,
+                    object_id: None,
+                }),
+                extensions(caller_named("human-approver", ActorType::Human)),
+            )
+            .await
+            .expect("approve call");
+        assert_ne!(approved.is_error, Some(true), "{approved:?}");
+
+        let segment = evidence.close_current().expect("closed segment");
+        let approval_count = segment
+            .records()
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record,
+                    mecmcp_audit::evidence::EvidenceRecord::Approval(approval)
+                        if approval.changeset_id == change_set_id
+                )
+            })
+            .count();
+        assert_eq!(
+            approval_count, 1,
+            "exactly one Approval evidence record must exist per change set, got {approval_count}"
         );
     }
 }
