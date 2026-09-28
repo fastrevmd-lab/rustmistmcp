@@ -2,14 +2,3 @@ title = "rustmistmcp gitleaks config"
 
 [extend]
 path = ".gitleaks-vendor.toml"
-
-[[allowlists]]
-# Vendored, third-party Mist OpenAPI spec/catalog: illustrative example
-# values (sample JWTs, placeholder keys), not live credentials. Already
-# partially covered by .gitleaksignore fingerprints for default-ruleset
-# hits at a specific commit; this path allowlist keeps it quiet for
-# working-tree scans and for the custom vendor rules too.
-description = "vendored Mist OpenAPI docs contain illustrative example secrets"
-paths = [
-  '''^docs/mist-api/''',
-]
