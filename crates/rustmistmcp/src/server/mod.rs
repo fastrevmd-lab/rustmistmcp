@@ -634,6 +634,10 @@ impl MistHandler {
                 MistError::RateLimited {
                     retry_after_secs: None,
                 }
+            } else if response.status == 410 {
+                MistError::EndpointRetired {
+                    operation_id: response.operation_id.clone(),
+                }
             } else {
                 MistError::Service(format!("Mist API returned HTTP {}", response.status))
             };

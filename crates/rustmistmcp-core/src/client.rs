@@ -85,6 +85,15 @@ pub enum MistError {
     /// No production transport exists at this open-prerequisite seam.
     #[error("Mist client transport is unavailable")]
     TransportUnavailable,
+    /// The Mist API answered 410 Gone: the vendor has retired this endpoint.
+    #[error(
+        "Mist API operation {operation_id} has been retired by the vendor (HTTP 410); \
+         it needs a replacement operation, not a retry"
+    )]
+    EndpointRetired {
+        /// The operation that the vendor retired.
+        operation_id: String,
+    },
     /// A supplied client mapped a Mist service failure.
     #[error("Mist API request failed: {0}")]
     Service(String),
@@ -454,6 +463,15 @@ impl MistClient for HttpMistClient {
                 .and_then(|s| s.parse::<u64>().ok());
             return Err(MistError::RateLimited {
                 retry_after_secs: retry_after,
+            });
+        }
+
+        // The vendor retires endpoints outright rather than deprecating them
+        // in place; a 410 is a permanent, non-retryable signal that this
+        // operation needs a replacement, not a generic HTTP failure.
+        if status == 410 {
+            return Err(MistError::EndpointRetired {
+                operation_id: request.operation_id,
             });
         }
 
