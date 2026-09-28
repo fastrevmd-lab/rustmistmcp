@@ -40,6 +40,7 @@ impl MistClient for ScriptedClient {
             status: 200,
             body: MistResponseBody::Json(self.object.clone()),
             cursor: None,
+            page: None,
         })
     }
 }
