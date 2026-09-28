@@ -2192,6 +2192,13 @@ impl MistHandler {
             .catalog
             .operations
             .iter()
+            .filter(|operation| {
+                matches!(
+                    operation.capability,
+                    MistCapability::OrdinaryRead | MistCapability::PrivilegedRead
+                )
+            })
+            .filter(|operation| !operation.target_selectors.contains(&TargetSelector::Msp))
             .filter(|operation| capability.is_none_or(|value| operation.capability == value))
             .filter(|operation| {
                 target.is_none_or(|value| operation.target_selectors.contains(&value))
@@ -4051,6 +4058,71 @@ mod tests {
             "a token with no invoke_mist_privileged_read scope and no grant must still \
              discover the privileged getSelf operation by search: {matches:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn search_mist_operations_only_returns_invocable_reads() {
+        let handler = MistHandler::blocked(
+            "https://api.mist.com/",
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
+        )
+        .expect("handler");
+        let introspection_only = CallerCtx {
+            request_id: uuid::Uuid::new_v4(),
+            token_name: "introspection-only".to_owned(),
+            devices: ScopeSet::Allowlist(Vec::new()),
+            tools: ScopeSet::Allowlist(vec!["search_mist_operations".to_owned()]),
+            grant: None::<MistGrant>,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: ActorType::Human,
+            client_name: None,
+            model_id: None,
+            session_id: None,
+        };
+
+        let result = handler
+            .search_mist_operations(
+                Parameters(SearchOperationsArgs {
+                    query: "org".to_owned(),
+                    capability: None,
+                    target: None,
+                    limit: Some(50),
+                }),
+                extensions(introspection_only),
+            )
+            .await
+            .expect("call succeeds");
+
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let text = result.content[0]
+            .as_text()
+            .expect("text content")
+            .text
+            .clone();
+        let matches: Vec<serde_json::Value> = serde_json::from_str(&text).expect("valid JSON");
+        assert!(
+            !matches.is_empty(),
+            "search must surface invocable read operations, not just an empty list"
+        );
+        for operation in &matches {
+            let capability = operation["capability"]
+                .as_str()
+                .expect("capability is a string");
+            assert!(
+                capability == "ordinary_read" || capability == "privileged_read",
+                "search must not surface non-read operations that invoke_mist_read/invoke_mist_privileged_read cannot dispatch: {operation:?}"
+            );
+            let targets = operation["target_selectors"]
+                .as_array()
+                .expect("target_selectors is an array");
+            assert!(
+                !targets.iter().any(|target| target == "msp"),
+                "search must not surface MSP-targeted operations that dispatch_named rejects: {operation:?}"
+            );
+        }
     }
 
     #[test]
