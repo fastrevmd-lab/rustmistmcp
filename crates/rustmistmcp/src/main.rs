@@ -107,6 +107,43 @@ async fn main() -> Result<()> {
         config.endpoint
     );
 
+    // Populate the site map before serving. Without this, every site-scoped
+    // tool call is refused: `from_config_with_lab_mode` above was handed an
+    // empty map, and `MistHandler` treats an unknown site as unauthorized
+    // rather than guessing.
+    let discovered_sites = rustmistmcp::site_discovery::discover_sites(
+        handler.client().as_ref(),
+        handler.catalog(),
+        handler.origin(),
+        handler.allowed_orgs(),
+    )
+    .await;
+    let discovered_count = discovered_sites.len();
+    match handler.replace_sites(discovered_sites) {
+        Ok(()) => {
+            tracing::info!(
+                sites = discovered_count,
+                "discovered Mist org sites at startup"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                %error,
+                "discovered site map failed validation at startup; site-scoped tools will be \
+                 refused until a refresh succeeds"
+            );
+        }
+    }
+
+    let site_refresh = if args.site_refresh_interval_secs > 0 {
+        Some(rustmistmcp::site_discovery::spawn_refresh_loop(
+            handler.clone(),
+            std::time::Duration::from_secs(args.site_refresh_interval_secs),
+        ))
+    } else {
+        None
+    };
+
     let served = match args.shared.transport {
         Transport::Stdio => serve_stdio(handler).await,
         Transport::StreamableHttp => {
@@ -172,6 +209,10 @@ async fn main() -> Result<()> {
             .map_err(anyhow::Error::from)
         }
     };
+
+    if let Some(site_refresh) = site_refresh {
+        site_refresh.abort();
+    }
 
     // Deliver what is still spooled before leaving, whichever way serving
     // ended. Bound rather than returned directly so the flush runs even when
@@ -410,6 +451,7 @@ mod tests {
             approval_timeout_secs: 3600,
             lab_mode: false,
             web_approver: Default::default(),
+            site_refresh_interval_secs: 0,
         };
 
         let result = load_http_token_store(&args);
@@ -454,6 +496,7 @@ mod tests {
             approval_timeout_secs: 3600,
             lab_mode: false,
             web_approver: Default::default(),
+            site_refresh_interval_secs: 0,
         };
 
         let result = load_http_token_store(&args);

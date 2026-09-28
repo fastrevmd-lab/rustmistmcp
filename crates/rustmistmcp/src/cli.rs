@@ -41,4 +41,10 @@ pub struct MistCli {
     /// Web approver settings (--web-enabled-approver).
     #[command(flatten)]
     pub web_approver: WebApproverArgs,
+
+    /// Seconds between background refreshes of the org → site map used to
+    /// authorize site-scoped tool calls. `0` discovers once at startup and
+    /// never refreshes, so newly added or removed sites require a restart.
+    #[arg(long = "site-refresh-interval-secs", default_value_t = 300)]
+    pub site_refresh_interval_secs: u64,
 }
