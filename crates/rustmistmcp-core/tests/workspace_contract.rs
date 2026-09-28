@@ -122,3 +122,36 @@ fn assert_workspace_mecmcp_dependencies_are_pinned(manifest: &str) {
         );
     }
 }
+
+/// Source of the HTTP client, for the test-only constructor gate below.
+const CLIENT_SOURCE: &str = include_str!("../src/client.rs");
+
+/// MEC-61: `HttpMistClient::from_test_parts` skips endpoint validation and
+/// HTTPS enforcement, so it must never compile into a normal or release build.
+#[test]
+fn test_only_constructor_is_gated_out_of_normal_builds() {
+    let gate = "#[cfg(any(test, feature = \"test-util\"))]";
+    let (before, _) = CLIENT_SOURCE
+        .split_once("pub fn from_test_parts(")
+        .expect("from_test_parts is gone; delete this contract with it");
+    assert!(
+        before.trim_end().ends_with(gate),
+        "from_test_parts must sit directly under `{gate}`"
+    );
+
+    let normal_deps = SERVER_MANIFEST
+        .split_once("[dev-dependencies]")
+        .map_or(SERVER_MANIFEST, |(normal, _)| normal);
+    assert!(
+        !normal_deps
+            .lines()
+            .any(|line| line.contains("rustmistmcp-core") && line.contains("test-util")),
+        "the server's normal dependency on rustmistmcp-core must not enable test-util"
+    );
+    assert!(
+        !CORE_MANIFEST
+            .lines()
+            .any(|line| line.trim_start().starts_with("default") && line.contains("test-util")),
+        "test-util must not be a default feature"
+    );
+}
