@@ -162,6 +162,12 @@ impl MistCursor {
         Ok(())
     }
 
+    /// Return the opaque continuation value threaded onto the next request.
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
     fn validate_encoded_size(&self) -> Result<(), MistError> {
         let serialized = serde_json::to_vec(self)
             .map_err(|_| MistError::InvalidCursor("cursor could not be serialized".to_owned()))?;
@@ -171,5 +177,31 @@ impl MistCursor {
             ));
         }
         Ok(())
+    }
+}
+
+/// Parsed `X-Page-*` pagination headers from a Mist list response.
+///
+/// Mist's `page`/`limit` endpoints (for example `listOrgSites`) return a bare
+/// JSON array body with no in-body continuation field; the only place the
+/// current page, page size, and total count appear is these response headers.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MistPageInfo {
+    /// Current page number, from `X-Page-Page`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<u64>,
+    /// Page size, from `X-Page-Limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    /// Total matching record count across all pages, from `X-Page-Total`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+}
+
+impl MistPageInfo {
+    /// True when none of the `X-Page-*` headers were present.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.page.is_none() && self.limit.is_none() && self.total.is_none()
     }
 }

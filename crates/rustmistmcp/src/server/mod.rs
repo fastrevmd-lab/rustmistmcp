@@ -3559,6 +3559,7 @@ mod tests {
                 status: 200,
                 body: MistResponseBody::Json(serde_json::json!({"name": "authorized"})),
                 cursor: None,
+                page: None,
             })
         }
     }
@@ -3900,18 +3901,21 @@ mod tests {
                 status: 200,
                 body: MistResponseBody::Json(serde_json::json!({"name": "wrong operation"})),
                 cursor: None,
+                page: None,
             },
             rustmistmcp_core::MistResponse {
                 operation_id: "getOrg".to_owned(),
                 status: 403,
                 body: MistResponseBody::Json(serde_json::json!({"detail": "forbidden"})),
                 cursor: None,
+                page: None,
             },
             rustmistmcp_core::MistResponse {
                 operation_id: "getOrg".to_owned(),
                 status: 429,
                 body: MistResponseBody::Json(serde_json::json!({"detail": "slow down"})),
                 cursor: None,
+                page: None,
             },
         ];
         for response in cases {
@@ -3950,6 +3954,7 @@ mod tests {
                     status: 200,
                     body: MistResponseBody::Json(serde_json::Value::Array(sites)),
                     cursor: None,
+                    page: None,
                 },
             }),
         )

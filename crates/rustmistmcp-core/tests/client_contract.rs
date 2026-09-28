@@ -278,6 +278,7 @@ fn serde_contract_rejects_unknown_fields_and_preserves_response_variants() {
             status: 200,
             body,
             cursor: None,
+            page: None,
         };
         assert_eq!(
             serde_json::from_str::<MistResponse>(
@@ -298,6 +299,7 @@ fn response_validation_is_catalog_bound_and_bounded() {
         status: 200,
         body: MistResponseBody::Json(json!({})),
         cursor: None,
+        page: None,
     };
     assert_eq!(
         valid_json.clone().validate(&catalog, &origin),
@@ -308,6 +310,7 @@ fn response_validation_is_catalog_bound_and_bounded() {
         status: 200,
         body: MistResponseBody::Empty,
         cursor: None,
+        page: None,
     };
     assert!(valid_empty.validate(&catalog, &origin).is_ok());
     let valid_binary = MistResponse {
@@ -315,6 +318,7 @@ fn response_validation_is_catalog_bound_and_bounded() {
         status: 200,
         body: MistResponseBody::Binary(vec![1, 2, 3]),
         cursor: None,
+        page: None,
     };
     assert!(valid_binary.validate(&catalog, &origin).is_ok());
 
@@ -331,42 +335,49 @@ fn response_validation_is_catalog_bound_and_bounded() {
             status: 200,
             body: MistResponseBody::Json(json!({})),
             cursor: None,
+            page: None,
         },
         MistResponse {
             operation_id: "getSelf".to_owned(),
             status: 201,
             body: MistResponseBody::Json(json!({})),
             cursor: None,
+            page: None,
         },
         MistResponse {
             operation_id: "getSelf".to_owned(),
             status: 200,
             body: MistResponseBody::Text("not declared as text".to_owned()),
             cursor: None,
+            page: None,
         },
         MistResponse {
             operation_id: "getSelf".to_owned(),
             status: 200,
             body: MistResponseBody::Json(json!([])),
             cursor: None,
+            page: None,
         },
         MistResponse {
             operation_id: "getSelf".to_owned(),
             status: 200,
             body: MistResponseBody::Empty,
             cursor: None,
+            page: None,
         },
         MistResponse {
             operation_id: "getSelf".to_owned(),
             status: 200,
             body: MistResponseBody::Json(json!({})),
             cursor: Some(cursor),
+            page: None,
         },
         MistResponse {
             operation_id: "getSelf".to_owned(),
             status: 200,
             body: MistResponseBody::Text("x".repeat(1_048_577)),
             cursor: None,
+            page: None,
         },
     ] {
         assert!(matches!(
@@ -399,6 +410,7 @@ impl MistClient for RecordingMock {
             status: 200,
             body: MistResponseBody::Json(json!({})),
             cursor: None,
+            page: None,
         })
     }
 }

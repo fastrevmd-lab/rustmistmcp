@@ -15,6 +15,7 @@ fn response_validation_error_includes_field_path() {
         status: 200,
         body: MistResponseBody::Json(serde_json::json!(12345)),
         cursor: None,
+        page: None,
     };
 
     let result = response.validate(&catalog, &origin);
@@ -54,6 +55,7 @@ fn sentinel_value_not_leaked_in_error() {
             "msp_id": 12345, // Wrong type - should be string or null
         })),
         cursor: None,
+        page: None,
     };
 
     let result = response.validate(&catalog, &origin);
@@ -98,6 +100,7 @@ fn valid_response_still_passes() {
             "name": "Test Org"
         })),
         cursor: None,
+        page: None,
     };
 
     let result = response.validate(&catalog, &origin);

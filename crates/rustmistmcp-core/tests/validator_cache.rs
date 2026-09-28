@@ -121,6 +121,7 @@ fn a_cached_response_validator_does_not_answer_for_another_status() {
         status,
         body: body(),
         cursor: None,
+        page: None,
     };
 
     assert!(

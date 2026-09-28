@@ -225,6 +225,7 @@ impl MistClient for PagingClient {
                 mode,
                 "next-page".to_owned(),
             )?),
+            page: None,
         })
     }
 }
@@ -254,6 +255,7 @@ impl MistClient for RecordingClient {
             status: 200,
             body: MistResponseBody::Json(serde_json::json!({"name": "Example Org"})),
             cursor: None,
+            page: None,
         })
     }
 }
