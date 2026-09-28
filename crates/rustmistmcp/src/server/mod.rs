@@ -1,4 +1,4 @@
-//! Curated read-only Mist MCP handler.
+//! Curated Mist MCP handler: read tools plus change-set-gated WAN edge mutations.
 
 mod change_set;
 mod similarity;
@@ -815,56 +815,6 @@ impl MistHandler {
             extensions,
         )
         .await
-    }
-
-    fn operation_visible(
-        &self,
-        caller: Option<&CallerCtx<MistGrant>>,
-        operation: &MistOperation,
-    ) -> bool {
-        let dispatcher = match operation.capability {
-            MistCapability::OrdinaryRead => "invoke_mist_read",
-            MistCapability::PrivilegedRead => "invoke_mist_privileged_read",
-            _ => return false,
-        };
-        if operation.target_selectors.contains(&TargetSelector::Msp) {
-            return false;
-        }
-        let Some(caller) = caller else {
-            return operation.capability == MistCapability::OrdinaryRead;
-        };
-        if !caller.tools.allows_tool(dispatcher, RESTRICTED_TOOLS) {
-            return false;
-        }
-        let grant = caller.grant.as_ref();
-        if operation.capability == MistCapability::PrivilegedRead && grant.is_none() {
-            return false;
-        }
-        if grant.is_some_and(|grant| {
-            !grant.allows_operation(&operation.operation_id)
-                || !grant.actions.contains(&operation.capability)
-        }) {
-            return false;
-        }
-        operation
-            .target_selectors
-            .iter()
-            .all(|selector| match selector {
-                TargetSelector::None => true,
-                TargetSelector::Org => self.allowed_orgs.iter().any(|org_id| {
-                    let target = MistTarget::org(org_id).expect("validated organization");
-                    caller.devices.allows(&target.subject())
-                        && grant.is_none_or(|grant| grant.allows_target(&target))
-                }),
-                TargetSelector::Site => self.sites.iter().any(|(site_id, org_id)| {
-                    self.allowed_orgs.iter().any(|allowed| allowed == org_id)
-                        && MistTarget::site(site_id).is_ok_and(|target| {
-                            caller.devices.allows(&target.subject())
-                                && grant.is_none_or(|grant| grant.allows_target(&target))
-                        })
-                }),
-                TargetSelector::Msp => false,
-            })
     }
 }
 
@@ -2246,7 +2196,13 @@ impl MistHandler {
             .catalog
             .operations
             .iter()
-            .filter(|operation| self.operation_visible(caller, operation))
+            .filter(|operation| {
+                matches!(
+                    operation.capability,
+                    MistCapability::OrdinaryRead | MistCapability::PrivilegedRead
+                )
+            })
+            .filter(|operation| !operation.target_selectors.contains(&TargetSelector::Msp))
             .filter(|operation| capability.is_none_or(|value| operation.capability == value))
             .filter(|operation| {
                 target.is_none_or(|value| operation.target_selectors.contains(&value))
@@ -3433,8 +3389,12 @@ impl ServerHandler for MistHandler {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "Read-only HPE Juniper Mist MCP server. Use named workflows first; \
-                 catalog dispatchers accept operation IDs, never methods or URLs.",
+                "HPE Juniper Mist MCP server. Read tools dominate the surface; batch-1 \
+                 WAN edge mutations exist only behind the plan_mist_change -> \
+                 approve_mist_change_set -> apply_mist_change_set lifecycle, and \
+                 approval must come from a principal other than the planner. Use \
+                 named workflows first; catalog dispatchers accept operation IDs, \
+                 never methods or URLs.",
             )
     }
 
@@ -4050,96 +4010,26 @@ mod tests {
         }
     }
 
-    #[test]
-    fn metadata_visibility_requires_an_invocable_configured_target_intersection() {
-        let org_id = "11111111-1111-1111-1111-111111111111";
-        let site_id = "22222222-2222-2222-2222-222222222222";
+    /// `search_mist_operations` is pure catalog introspection: describing an
+    /// operation and being allowed to invoke it are different privileges. A
+    /// caller scoped only to the search tool itself (no `invoke_mist_read` or
+    /// `invoke_mist_privileged_read`, no [`MistGrant`]) must still see every
+    /// catalogued operation matching the query, mirroring the same fix
+    /// already applied to `get_mist_operation_schema`.
+    #[tokio::test]
+    async fn search_mist_operations_does_not_require_execution_scope() {
         let handler = MistHandler::blocked(
             "https://api.mist.com/",
-            vec![org_id.to_owned()],
-            BTreeMap::from([(site_id.to_owned(), org_id.to_owned())]),
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
         )
         .expect("handler");
-        let get_org = handler.catalog.operation("getOrg").expect("getOrg");
-        let get_site = handler
-            .catalog
-            .operation("getSiteInfo")
-            .expect("getSiteInfo");
-        let get_self = handler.catalog.operation("getSelf").expect("getSelf");
-
-        let grantless_org = CallerCtx {
+        let introspection_only = CallerCtx {
             request_id: uuid::Uuid::new_v4(),
-            token_name: "grantless-org".to_owned(),
-            devices: ScopeSet::Allowlist(vec![format!("org/{org_id}")]),
-            tools: ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]),
-            grant: None::<MistGrant>,
-            provider: None,
-            provider_tier: None,
-            on_behalf_of: None,
-            actor_type: ActorType::Human,
-            client_name: None,
-            model_id: None,
-            session_id: None,
-        };
-        assert!(
-            handler.operation_visible(Some(&grantless_org), get_org),
-            "grantless scoped ordinary read must be discoverable when executable"
-        );
-        assert!(
-            !handler.operation_visible(Some(&grantless_org), get_site),
-            "configured inventory still intersects caller target scope"
-        );
-        let grantless_site = CallerCtx {
-            request_id: uuid::Uuid::new_v4(),
-            token_name: "grantless-site".to_owned(),
-            devices: ScopeSet::Allowlist(vec![format!("site/{site_id}")]),
-            tools: ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]),
-            grant: None::<MistGrant>,
-            provider: None,
-            provider_tier: None,
-            on_behalf_of: None,
-            actor_type: ActorType::Human,
-            client_name: None,
-            model_id: None,
-            session_id: None,
-        };
-        assert!(handler.operation_visible(Some(&grantless_site), get_site));
-        let missing_dispatcher_scope = CallerCtx {
+            token_name: "introspection-only".to_owned(),
+            devices: ScopeSet::Allowlist(Vec::new()),
             tools: ScopeSet::Allowlist(vec!["search_mist_operations".to_owned()]),
-            ..grantless_org.clone()
-        };
-        assert!(!handler.operation_visible(Some(&missing_dispatcher_scope), get_org));
-        let grantless_privileged = CallerCtx {
-            tools: ScopeSet::Allowlist(vec!["invoke_mist_privileged_read".to_owned()]),
-            ..grantless_org.clone()
-        };
-        assert!(
-            !handler.operation_visible(Some(&grantless_privileged), get_self),
-            "privileged metadata remains hidden without an exact grant"
-        );
-        let privileged_exact = CallerCtx {
-            grant: Some(MistGrant {
-                allowed_operations: vec!["getSelf".to_owned()],
-                actions: vec![MistCapability::PrivilegedRead],
-                subjects: vec![MistTarget::org(org_id).expect("target")],
-            }),
-            ..grantless_privileged
-        };
-        assert!(
-            handler.operation_visible(Some(&privileged_exact), get_self),
-            "privileged metadata is visible only with exact tool and grant authority"
-        );
-
-        let ordinary_wildcard = CallerCtx {
-            request_id: uuid::Uuid::new_v4(),
-            token_name: "ordinary".to_owned(),
-            devices: ScopeSet::Wildcard,
-            tools: ScopeSet::Wildcard,
-            grant: Some(MistGrant {
-                allowed_operations: vec!["getOrg".to_owned(), "getSelf".to_owned()],
-                actions: vec![MistCapability::OrdinaryRead, MistCapability::PrivilegedRead],
-                subjects: vec![MistTarget::org(org_id).expect("target")],
-            }),
+            grant: None::<MistGrant>,
             provider: None,
             provider_tier: None,
             on_behalf_of: None,
@@ -4148,23 +4038,99 @@ mod tests {
             model_id: None,
             session_id: None,
         };
-        assert!(handler.operation_visible(Some(&ordinary_wildcard), get_org));
-        assert!(
-            !handler.operation_visible(Some(&ordinary_wildcard), get_self),
-            "wildcard tool scope must not expose the restricted dispatcher"
-        );
 
-        let out_of_scope = CallerCtx {
-            devices: ScopeSet::Allowlist(vec![
-                "org/44444444-4444-4444-4444-444444444444".to_owned(),
-            ]),
-            tools: ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]),
-            ..ordinary_wildcard
-        };
+        let result = handler
+            .search_mist_operations(
+                Parameters(SearchOperationsArgs {
+                    query: "getself".to_owned(),
+                    capability: Some(SearchCapability::PrivilegedRead),
+                    target: None,
+                    limit: None,
+                }),
+                extensions(introspection_only),
+            )
+            .await
+            .expect("call succeeds");
+
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let text = result.content[0]
+            .as_text()
+            .expect("text content")
+            .text
+            .clone();
+        let matches: Vec<serde_json::Value> = serde_json::from_str(&text).expect("valid JSON");
         assert!(
-            !handler.operation_visible(Some(&out_of_scope), get_org),
-            "grant subjects without caller.devices intersection are not invocable"
+            matches
+                .iter()
+                .any(|operation| operation["operation_id"] == "getSelf"),
+            "a token with no invoke_mist_privileged_read scope and no grant must still \
+             discover the privileged getSelf operation by search: {matches:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn search_mist_operations_only_returns_invocable_reads() {
+        let handler = MistHandler::blocked(
+            "https://api.mist.com/",
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
+        )
+        .expect("handler");
+        let introspection_only = CallerCtx {
+            request_id: uuid::Uuid::new_v4(),
+            token_name: "introspection-only".to_owned(),
+            devices: ScopeSet::Allowlist(Vec::new()),
+            tools: ScopeSet::Allowlist(vec!["search_mist_operations".to_owned()]),
+            grant: None::<MistGrant>,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: ActorType::Human,
+            client_name: None,
+            model_id: None,
+            session_id: None,
+        };
+
+        let result = handler
+            .search_mist_operations(
+                Parameters(SearchOperationsArgs {
+                    query: "org".to_owned(),
+                    capability: None,
+                    target: None,
+                    limit: Some(50),
+                }),
+                extensions(introspection_only),
+            )
+            .await
+            .expect("call succeeds");
+
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let text = result.content[0]
+            .as_text()
+            .expect("text content")
+            .text
+            .clone();
+        let matches: Vec<serde_json::Value> = serde_json::from_str(&text).expect("valid JSON");
+        assert!(
+            !matches.is_empty(),
+            "search must surface invocable read operations, not just an empty list"
+        );
+        for operation in &matches {
+            let capability = operation["capability"]
+                .as_str()
+                .expect("capability is a string");
+            assert!(
+                capability == "ordinary_read" || capability == "privileged_read",
+                "search must not surface non-read operations that invoke_mist_read/invoke_mist_privileged_read cannot dispatch: {operation:?}"
+            );
+            let targets = operation["target_selectors"]
+                .as_array()
+                .expect("target_selectors is an array");
+            assert!(
+                !targets.iter().any(|target| target == "msp"),
+                "search must not surface MSP-targeted operations that dispatch_named rejects: {operation:?}"
+            );
+        }
     }
 
     #[test]

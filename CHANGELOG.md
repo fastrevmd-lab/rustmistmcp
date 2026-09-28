@@ -10,6 +10,23 @@ visible rather than looking like those versions never existed.
 
 ## [Unreleased]
 
+### Added
+
+- **Threat model and token-role guidance docs** (#120). `docs/THREAT_MODEL.md`
+  documents trust boundaries, security principals, and the blast radius of a
+  compromised MCP token, compromised Mist API token, or compromised agent
+  against a real Mist org, plus mitigations in place vs. planned.
+  `docs/TOKEN_ROLE_GUIDANCE.md` recommends a dedicated, least-privilege Mist
+  organization API token over a personal or super-admin token.
+
+### Fixed
+
+- **Stale "read-only" server instructions and dev-guidance wording** (#120).
+  The MCP `get_info` instructions string and `CLAUDE.md`'s cloud-control-plane
+  guidance called this server read-only after the batch-1 WAN edge
+  change-set write lifecycle had already landed. Both now describe the
+  plan → approve → apply mutation path.
+
 ## [0.3.2] - 2026-09-24
 
 ### Added
