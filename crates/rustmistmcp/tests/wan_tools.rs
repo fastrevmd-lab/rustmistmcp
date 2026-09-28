@@ -171,6 +171,7 @@ impl MistClient for RecordingClient {
             status: 200,
             body: MistResponseBody::Json(body),
             cursor: None,
+            page: None,
         })
     }
 }

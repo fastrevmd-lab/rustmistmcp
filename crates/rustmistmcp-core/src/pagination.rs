@@ -96,6 +96,16 @@ impl MistCursor {
                 "cursor value must contain 1-4096 bytes".to_owned(),
             ));
         }
+        if mode == PaginationMode::PageLimit {
+            match value.parse::<u64>() {
+                Ok(0) | Err(_) => {
+                    return Err(MistError::InvalidCursor(
+                        "page-limit cursor value must be a positive integer".to_owned(),
+                    ));
+                }
+                Ok(_) => {}
+            }
+        }
         Ok(Self {
             operation_id,
             origin: origin.as_str().to_owned(),
@@ -162,6 +172,12 @@ impl MistCursor {
         Ok(())
     }
 
+    /// Return the opaque continuation value threaded onto the next request.
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
     fn validate_encoded_size(&self) -> Result<(), MistError> {
         let serialized = serde_json::to_vec(self)
             .map_err(|_| MistError::InvalidCursor("cursor could not be serialized".to_owned()))?;
@@ -171,5 +187,72 @@ impl MistCursor {
             ));
         }
         Ok(())
+    }
+}
+
+/// Parsed `X-Page-*` pagination headers from a Mist list response.
+///
+/// Mist's `page`/`limit` endpoints (for example `listOrgSites`) return a bare
+/// JSON array body with no in-body continuation field; the only place the
+/// current page, page size, and total count appear is these response headers.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MistPageInfo {
+    /// Current page number, from `X-Page-Page`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<u64>,
+    /// Page size, from `X-Page-Limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    /// Total matching record count across all pages, from `X-Page-Total`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+}
+
+impl MistPageInfo {
+    /// True when none of the `X-Page-*` headers were present.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.page.is_none() && self.limit.is_none() && self.total.is_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_limit_cursor_requires_a_positive_integer_value() {
+        let origin = Url::parse("https://api.mist.com/").expect("url");
+        for value in ["0", "not-a-number", "-1", ""] {
+            if value.is_empty() {
+                continue;
+            }
+            let result = MistCursor::new(
+                "listOrgSites".to_owned(),
+                &origin,
+                PaginationMode::PageLimit,
+                value.to_owned(),
+            );
+            assert!(result.is_err(), "{value} must be rejected");
+        }
+        MistCursor::new(
+            "listOrgSites".to_owned(),
+            &origin,
+            PaginationMode::PageLimit,
+            "2".to_owned(),
+        )
+        .expect("a positive page number is accepted");
+    }
+
+    #[test]
+    fn search_after_cursor_accepts_arbitrary_opaque_values() {
+        let origin = Url::parse("https://api.mist.com/").expect("url");
+        MistCursor::new(
+            "searchOrgAlarms".to_owned(),
+            &origin,
+            PaginationMode::SearchAfter,
+            "not-a-number".to_owned(),
+        )
+        .expect("search_after cursors are opaque, not integer-typed");
     }
 }

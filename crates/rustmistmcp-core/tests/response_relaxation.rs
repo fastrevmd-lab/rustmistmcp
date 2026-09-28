@@ -35,6 +35,7 @@ fn response_accepts_fractional_epoch_seconds() {
         status: 200,
         body: MistResponseBody::Json(body),
         cursor: None,
+        page: None,
     };
 
     // Should validate cleanly after the fix
@@ -80,6 +81,7 @@ fn response_accepts_missing_required_field() {
         status: 200,
         body: MistResponseBody::Json(body),
         cursor: None,
+        page: None,
     };
 
     // Should validate cleanly after the fix
@@ -203,6 +205,7 @@ fn response_accepts_device_search_with_non_empty_results() {
         status: 200,
         body: MistResponseBody::Json(body),
         cursor: None,
+        page: None,
     };
 
     // Should validate cleanly after the oneOf→anyOf fix
