@@ -30,6 +30,13 @@ mecmcp-inventory.workspace = true
 mecmcp-secret.workspace = true
 mecmcp-server.workspace = true
 
+[features]
+# Gates HttpMistClient::from_test_parts, which skips endpoint validation and
+# HTTPS enforcement. A consumer's integration tests enable this in their own
+# [dev-dependencies] entry for this crate; it must never be on for the normal
+# dependency.
+test-util = []
+
 [dev-dependencies]
 axum.workspace = true
 rustls.workspace = true

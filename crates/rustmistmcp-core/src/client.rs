@@ -161,6 +161,13 @@ impl HttpMistClient {
     ///
     /// Bypasses endpoint validation and HTTPS enforcement, allowing tests to use
     /// plain HTTP mock servers. Do not use in production code.
+    ///
+    /// Gated behind `test-util` rather than compiled unconditionally: this was
+    /// `pub` with no gate at all, so every normal build -- including a release
+    /// binary -- shipped a constructor that skips both checks
+    /// [`HttpMistClient::new`] enforces. A consumer's integration tests enable
+    /// the feature in their own `[dev-dependencies]` entry for this crate.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn from_test_parts(
         base_url: Url,
         credential: String,
