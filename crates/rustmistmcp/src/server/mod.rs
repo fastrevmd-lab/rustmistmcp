@@ -313,11 +313,10 @@ impl MistHandler {
 
     /// Snapshot the current site map.
     ///
-    /// Test-only: production code has no reason to read the map back out,
-    /// only to dispatch against it. Exists so `crate::site_discovery`'s
-    /// tests can observe that a background refresh actually landed, rather
-    /// than inferring it indirectly.
-    #[cfg(test)]
+    /// Used by `crate::site_discovery`'s refresh loop to carry forward the
+    /// sites of an org whose discovery pass failed or was truncated this
+    /// round, so a transient error never wipes out sites already known; also
+    /// used by tests to observe that a background refresh landed.
     pub(crate) fn sites_snapshot(&self) -> BTreeMap<String, String> {
         self.sites
             .read()

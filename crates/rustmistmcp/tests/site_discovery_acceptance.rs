@@ -61,12 +61,12 @@ async fn site_scoped_tool_succeeds_once_startup_discovery_populates_the_map() {
     )
     .await;
     assert_eq!(
-        discovered.get(SITE_ID),
+        discovered.sites.get(SITE_ID),
         Some(&ORG_ID.to_owned()),
         "discovery should have learned the site from listOrgSites"
     );
     handler
-        .replace_sites(discovered)
+        .replace_sites(discovered.sites)
         .expect("a discovered map naming only the allowlisted org must validate");
 
     let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);

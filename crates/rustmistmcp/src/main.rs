@@ -111,18 +111,20 @@ async fn main() -> Result<()> {
     // tool call is refused: `from_config_with_lab_mode` above was handed an
     // empty map, and `MistHandler` treats an unknown site as unauthorized
     // rather than guessing.
-    let discovered_sites = rustmistmcp::site_discovery::discover_sites(
+    let discovered = rustmistmcp::site_discovery::discover_sites(
         handler.client().as_ref(),
         handler.catalog(),
         handler.origin(),
         handler.allowed_orgs(),
     )
     .await;
-    let discovered_count = discovered_sites.len();
-    match handler.replace_sites(discovered_sites) {
+    let discovered_count = discovered.sites.len();
+    let incomplete_orgs = discovered.incomplete_orgs.len();
+    match handler.replace_sites(discovered.sites) {
         Ok(()) => {
             tracing::info!(
                 sites = discovered_count,
+                incomplete_orgs,
                 "discovered Mist org sites at startup"
             );
         }
