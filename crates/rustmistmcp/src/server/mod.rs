@@ -1,4 +1,4 @@
-//! Curated read-only Mist MCP handler.
+//! Curated Mist MCP handler: read tools plus change-set-gated WAN edge mutations.
 
 mod change_set;
 mod similarity;
@@ -3431,9 +3431,10 @@ impl ServerHandler for MistHandler {
             .with_instructions(
                 "HPE Juniper Mist MCP server. Read tools dominate the surface; batch-1 \
                  WAN edge mutations exist only behind the plan_mist_change -> \
-                 approve_mist_change_set -> apply_mist_change_set lifecycle and require \
-                 explicit per-token tool grants. Use named workflows first; catalog \
-                 dispatchers accept operation IDs, never methods or URLs.",
+                 approve_mist_change_set -> apply_mist_change_set lifecycle, and \
+                 approval must come from a principal other than the planner. Use \
+                 named workflows first; catalog dispatchers accept operation IDs, \
+                 never methods or URLs.",
             )
     }
 

@@ -170,8 +170,10 @@ do.
 1. Remote MCP requests are authenticated before tool execution.
 2. Authentication and authorization failures never reveal whether another
    token, org, site, or secret exists beyond what the caller may already know.
-3. A token's scope and `MistGrant` are checked for both the tool and every
-   target subject before any Mist network I/O begins.
+3. On the HTTP transport, a token's scope and `MistGrant` are checked for
+   both the tool and every target subject before any Mist network I/O
+   begins. On stdio there is no token; only the server's `allowed_orgs` and
+   site map bound the target.
 4. Caller input cannot select an arbitrary Mist host. The region/endpoint
    comes only from operator configuration (`mist.json`), never a request field.
 5. Mist API tokens and MCP bearer secrets never appear in URLs, logs, errors,
