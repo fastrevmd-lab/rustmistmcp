@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod client;
 pub mod execute_class;
 pub mod pagination;
+pub mod rate_limit;
 pub mod request;
 
 mod config;
@@ -22,5 +23,6 @@ pub use grant::MistGrant;
 pub use pagination::{
     MAX_ENCODED_CURSOR_BYTES, MistCursor, MistCursorRequestContext, MistPageInfo,
 };
+pub use rate_limit::{BudgetExhausted, BudgetStatus, CallPriority, RateLimitBudget};
 pub use request::{MistRequest, MistResponse, MistResponseBody};
 pub use target::{MistTarget, MistTargetError};
