@@ -1,6 +1,7 @@
 //! Curated Mist MCP handler: read tools plus change-set-gated WAN edge mutations.
 
 mod change_set;
+mod redact;
 mod similarity;
 mod wan;
 mod wan_write;
@@ -23,8 +24,8 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use rustmistmcp_core::{
-    BlockedMistClient, Catalog, MAX_ENCODED_CURSOR_BYTES, MistClient, MistError, MistGrant,
-    MistRequest, MistResponseBody, MistTarget,
+    BlockedMistClient, BudgetStatus, CallPriority, Catalog, MAX_ENCODED_CURSOR_BYTES, MistClient,
+    MistError, MistGrant, MistRequest, MistResponseBody, MistTarget,
     catalog::{MistCapability, MistOperation, TargetSelector},
     validate_mist_endpoint,
 };
@@ -127,6 +128,19 @@ struct CatalogRead {
     query: QueryValues,
     cursor: Option<rustmistmcp_core::MistCursor>,
     capability: MistCapability,
+    /// Whether the response body should be redacted before it reaches this
+    /// call's [`CallToolResult`].
+    ///
+    /// `true` for every tool-facing read. `false` only for the handful of
+    /// internal reads a write tool issues purely to compare against, or
+    /// feed into, its own request body (drift-check fingerprinting,
+    /// pre-write verification, the `plan_mist_change` before-state read) --
+    /// those results are never handed to the model as-is, and redacting
+    /// them would corrupt the comparison or splice `[REDACTED]` into a
+    /// device write. Callers that reuse the raw value in a model-facing
+    /// response (`plan_mist_change`, `get_mist_change_set`) redact their own
+    /// copy of it separately before returning.
+    redact_output: bool,
 }
 
 /// Failure to construct the immutable Mist handler.
@@ -152,6 +166,30 @@ pub enum MistServerError {
     ChangeSetState(String),
 }
 
+/// Validate a candidate site map against the bounds the handler enforces:
+/// every site ID and its recorded org ID must be canonical UUIDs, the org
+/// must be in the configured allowlist, and the map must not exceed the
+/// tracked-site ceiling.
+///
+/// Shared by both constructors and by [`MistHandler::replace_sites`], so a
+/// discovery refresh can never install a map the constructor itself would
+/// have rejected.
+fn validate_sites(
+    sites: &BTreeMap<String, String>,
+    allowed_orgs: &[String],
+) -> Result<(), MistServerError> {
+    if sites.len() > 4096
+        || sites.iter().any(|(site_id, org_id)| {
+            MistTarget::site(site_id).is_err()
+                || MistTarget::org(org_id).is_err()
+                || !allowed_orgs.iter().any(|allowed| allowed == org_id)
+        })
+    {
+        return Err(MistServerError::InvalidOrganization);
+    }
+    Ok(())
+}
+
 /// Mist MCP handler with catalogued reads and change-set-gated writes.
 ///
 /// Serves read-only Mist tools and mutating tools gated through the
@@ -163,8 +201,13 @@ pub struct MistHandler {
     origin: Url,
     #[allow(dead_code)]
     allowed_orgs: Arc<[String]>,
-    /// Immutable site inventory discovered during startup, keyed by site UUID.
-    sites: Arc<BTreeMap<String, String>>,
+    /// Site inventory discovered at startup and refreshed periodically by
+    /// `crate::site_discovery`, keyed by site UUID.
+    ///
+    /// `RwLock` rather than an atomic-swap crate: a refresh happens roughly
+    /// once every few minutes, every read is synchronous and never held
+    /// across an `.await`, and this avoids a new dependency for that.
+    sites: Arc<std::sync::RwLock<BTreeMap<String, String>>>,
     #[allow(dead_code)]
     catalog: Arc<Catalog>,
     client: Arc<dyn MistClient>,
@@ -246,6 +289,58 @@ impl MistHandler {
         &self.client
     }
 
+    /// The catalog this handler validates requests and responses against.
+    ///
+    /// Exposed so startup and periodic site discovery (`crate::site_discovery`)
+    /// can validate and issue `listOrgSites` requests through the same
+    /// catalog the handler dispatches with, rather than loading a second copy.
+    #[must_use]
+    pub fn catalog(&self) -> &Arc<Catalog> {
+        &self.catalog
+    }
+
+    /// The validated Mist API origin this handler was constructed against.
+    #[must_use]
+    pub fn origin(&self) -> &Url {
+        &self.origin
+    }
+
+    /// The configured organization allowlist.
+    #[must_use]
+    pub fn allowed_orgs(&self) -> &Arc<[String]> {
+        &self.allowed_orgs
+    }
+
+    /// Atomically replace the discovered site map.
+    ///
+    /// Used by the periodic site-discovery refresh (`crate::site_discovery`)
+    /// so newly added or removed sites are picked up without a restart.
+    /// Re-validated exactly as the constructors validate their initial
+    /// `sites` argument, so a discovered map naming an org outside the
+    /// allowlist, or a malformed ID, never reaches request dispatch.
+    ///
+    /// # Errors
+    /// Returns an error, leaving the previous map in place, when `sites`
+    /// fails the bounds the constructors enforce.
+    pub fn replace_sites(&self, sites: BTreeMap<String, String>) -> Result<(), MistServerError> {
+        validate_sites(&sites, &self.allowed_orgs)?;
+        *self.sites.write().expect("mist site map lock poisoned") = sites;
+        Ok(())
+    }
+
+    /// Snapshot the current site map.
+    ///
+    /// Used by `crate::site_discovery`'s refresh loop to carry forward the
+    /// sites of an org whose discovery pass failed or was truncated this
+    /// round, so a transient error never wipes out sites already known; also
+    /// used by tests to observe that a background refresh landed.
+    pub(crate) fn sites_snapshot(&self) -> BTreeMap<String, String> {
+        self.sites
+            .read()
+            .expect("mist site map lock poisoned")
+            .clone()
+    }
+
     /// Construct a production handler with real HTTPS client.
     ///
     /// Loads the credential from the config's credential_file and constructs
@@ -319,19 +414,11 @@ impl MistHandler {
         {
             return Err(MistServerError::InvalidOrganization);
         }
-        if sites.len() > 4096
-            || sites.iter().any(|(site_id, org_id)| {
-                MistTarget::site(site_id).is_err()
-                    || MistTarget::org(org_id).is_err()
-                    || !allowed_orgs.iter().any(|allowed| allowed == org_id)
-            })
-        {
-            return Err(MistServerError::InvalidOrganization);
-        }
+        validate_sites(&sites, allowed_orgs)?;
         Ok(Self {
             origin,
             allowed_orgs: allowed_orgs.clone().into(),
-            sites: Arc::new(sites),
+            sites: Arc::new(std::sync::RwLock::new(sites)),
             catalog,
             client: Arc::new(http_client),
             coordinator,
@@ -380,19 +467,11 @@ impl MistHandler {
         {
             return Err(MistServerError::InvalidOrganization);
         }
-        if sites.len() > 4096
-            || sites.iter().any(|(site_id, org_id)| {
-                MistTarget::site(site_id).is_err()
-                    || MistTarget::org(org_id).is_err()
-                    || !allowed_orgs.iter().any(|allowed| allowed == org_id)
-            })
-        {
-            return Err(MistServerError::InvalidOrganization);
-        }
+        validate_sites(&sites, &allowed_orgs)?;
         Ok(Self {
             origin,
             allowed_orgs: allowed_orgs.into(),
-            sites: Arc::new(sites),
+            sites: Arc::new(std::sync::RwLock::new(sites)),
             catalog: Arc::new(Catalog::embedded()?),
             client,
             coordinator: load_coordinator(state_path, lab_mode, None)?,
@@ -419,7 +498,7 @@ impl MistHandler {
         Ok(Self {
             origin,
             allowed_orgs: allowed_orgs.into(),
-            sites: Arc::new(sites),
+            sites: Arc::new(std::sync::RwLock::new(sites)),
             catalog: Arc::new(Catalog::embedded()?),
             client,
             coordinator: load_coordinator(None, false, Some(evidence.clone()))?,
@@ -441,6 +520,7 @@ impl MistHandler {
             query,
             cursor,
             capability: required_capability,
+            redact_output,
         } = read;
         let caller = caller_from_extensions::<MistGrant>(extensions);
         let operation = match self.catalog.operation(&operation_id) {
@@ -567,7 +647,12 @@ impl MistHandler {
                     None
                 }
             } else if target.to_string().starts_with("site/") {
-                match self.sites.get(target.id()) {
+                match self
+                    .sites
+                    .read()
+                    .expect("mist site map lock poisoned")
+                    .get(target.id())
+                {
                     None => Some(format!(
                         "site {} is not known (requires org_id for site queries, or the site's parent org in the allowlist)",
                         target.id()
@@ -625,7 +710,8 @@ impl MistHandler {
         let expected_operation_id = request.operation_id.clone();
         let request_path = request.path.clone();
         let request_query = request.query.clone();
-        let response = match self.client.execute(request).await {
+        let priority = call_priority_for(caller);
+        let response = match self.client.execute_as(request, priority).await {
             Ok(response) => response,
             Err(error) => {
                 audit.fail(&error);
@@ -636,6 +722,7 @@ impl MistHandler {
                 );
             }
         };
+        let budget_remaining = self.client.budget_status();
         if response.operation_id != expected_operation_id {
             let error = MistError::InvalidResponse {
                 operation_id: expected_operation_id,
@@ -692,7 +779,8 @@ impl MistHandler {
                     }
                 };
         }
-        let envelope = ReadEnvelope::from_response(response, target.as_ref());
+        let envelope =
+            ReadEnvelope::from_response(response, target.as_ref(), budget_remaining, redact_output);
         audited_tool_result(&mut audit, Ok::<_, MistCallError>(envelope))
     }
 
@@ -723,6 +811,7 @@ impl MistHandler {
                 query,
                 cursor: None,
                 capability,
+                redact_output: true,
             },
             extensions,
         )
@@ -841,6 +930,7 @@ impl MistHandler {
                 query,
                 cursor,
                 capability,
+                redact_output: true,
             },
             extensions,
         )
@@ -885,6 +975,10 @@ struct ReadEnvelope {
     #[serde(skip_serializing_if = "Option::is_none")]
     page: Option<rustmistmcp_core::MistPageInfo>,
     truncated: bool,
+    /// This token's hourly Mist call budget headroom after this call, when
+    /// the injected client tracks one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_remaining: Option<BudgetStatus>,
 }
 
 #[derive(Serialize)]
@@ -900,11 +994,21 @@ struct LocalOrg {
 }
 
 impl ReadEnvelope {
+    /// Build the envelope a read tool hands back to the model.
+    ///
+    /// `redact_output` runs `data` through [`mecmcp_redact::redact_json_value`]
+    /// before it is wrapped -- this is the single choke point every
+    /// catalogued read passes through, so it is where the Mist device's own
+    /// WLAN PSKs, RADIUS/SNMP secrets, API keys, and gateway-template tunnel
+    /// PSKs get scrubbed before a model ever sees them. See [`CatalogRead::redact_output`]
+    /// for why a handful of internal-only callers pass `false`.
     fn from_response(
         response: rustmistmcp_core::MistResponse,
         target: Option<&MistTarget>,
+        budget_remaining: Option<BudgetStatus>,
+        redact_output: bool,
     ) -> Self {
-        let (content_type, data) = match response.body {
+        let (content_type, mut data) = match response.body {
             MistResponseBody::Json(value) => ("application/json", value),
             MistResponseBody::Text(value) => ("text/plain; charset=utf-8", value.into()),
             MistResponseBody::Binary(value) => (
@@ -913,6 +1017,10 @@ impl ReadEnvelope {
             ),
             MistResponseBody::Empty => ("application/octet-stream", serde_json::Value::Null),
         };
+        if redact_output {
+            mecmcp_redact::redact_json_value(&mut data);
+            redact::redact_mist_extra_fields(&mut data);
+        }
         let next_cursor = response
             .cursor
             .and_then(|cursor| serde_json::to_vec(&cursor).ok().map(hex::encode));
@@ -926,7 +1034,24 @@ impl ReadEnvelope {
             next_cursor,
             page,
             truncated: false,
+            budget_remaining,
         }
+    }
+}
+
+/// Map a caller to the Mist hourly call budget pool it may draw from.
+///
+/// Only a token the server has verified declares `ActorType::Human` may draw
+/// on the reserve: an absent caller, an `Agent` actor, or an untagged legacy
+/// token (`ActorType::Unknown`) all get [`CallPriority::Standard`], since
+/// granting the reserve on anything less than a verified human claim would
+/// let an ordinary agent call starve the reserve it exists to protect.
+fn call_priority_for(caller: Option<&CallerCtx<MistGrant>>) -> CallPriority {
+    match caller {
+        Some(caller) if caller.actor_type == mecmcp_auth::ActorType::Human => {
+            CallPriority::Reserved
+        }
+        _ => CallPriority::Standard,
     }
 }
 
@@ -1526,7 +1651,10 @@ read_args!(WanConfigGetArgs {
 
 #[tool_router(router = mist_tool_router, vis = "pub(crate)")]
 impl MistHandler {
-    #[tool(name = "get_mist_device", description = "Get one site device.")]
+    #[tool(
+        name = "get_mist_device",
+        description = "Get one site device. Secret-bearing fields (PSKs, shared secrets, API keys/tokens) are redacted from the response; structural fields and non-secret metadata are preserved."
+    )]
     async fn get_mist_device(
         &self,
         Parameters(args): Parameters<SiteDeviceArgs>,
@@ -1641,6 +1769,7 @@ impl MistHandler {
                     query: BTreeMap::new(),
                     cursor: None,
                     capability: MistCapability::OrdinaryRead,
+                    redact_output: true,
                 },
                 &extensions,
             )
@@ -1743,7 +1872,7 @@ impl MistHandler {
     }
     #[tool(
         name = "get_mist_wan_config",
-        description = "Get one WAN edge configuration object by ID."
+        description = "Get one WAN edge configuration object by ID. Secret-bearing fields (gateway-template tunnel PSKs, shared secrets, API keys/tokens) are redacted from the response; structural fields and non-secret metadata are preserved."
     )]
     async fn get_mist_wan_config(
         &self,
@@ -1772,6 +1901,7 @@ impl MistHandler {
                     query: BTreeMap::new(),
                     cursor: None,
                     capability,
+                    redact_output: true,
                 },
                 &extensions,
             )
@@ -1800,7 +1930,7 @@ impl MistHandler {
     }
     #[tool(
         name = "invoke_mist_privileged_read",
-        description = "Invoke one privileged read selected only by catalog operation ID."
+        description = "Invoke one privileged read selected only by catalog operation ID. Secret-bearing fields (PSKs, RADIUS/SNMP shared secrets, API keys/tokens) are redacted from the response; structural fields and non-secret metadata are preserved."
     )]
     async fn invoke_mist_privileged_read(
         &self,
@@ -1818,7 +1948,7 @@ impl MistHandler {
     }
     #[tool(
         name = "invoke_mist_read",
-        description = "Invoke one ordinary read selected by catalog operation ID. The `path` and `query` parameters are maps (e.g., path={\"org_id\": \"...\"}, query={\"limit\": 10}), not top-level parameters like the named workflow tools."
+        description = "Invoke one ordinary read selected by catalog operation ID. The `path` and `query` parameters are maps (e.g., path={\"org_id\": \"...\"}, query={\"limit\": 10}), not top-level parameters like the named workflow tools. Secret-bearing fields (PSKs, RADIUS/SNMP shared secrets, API keys/tokens) are redacted from the response; structural fields and non-secret metadata are preserved."
     )]
     async fn invoke_mist_read(
         &self,
@@ -1984,7 +2114,7 @@ impl MistHandler {
     }
     #[tool(
         name = "list_mist_wan_config",
-        description = "List WAN edge configuration objects: networks, services, service policies, gateway templates, or device profiles."
+        description = "List WAN edge configuration objects: networks, services, service policies, gateway templates, or device profiles. Secret-bearing fields (gateway-template tunnel PSKs, shared secrets, API keys/tokens) are redacted from the response; structural fields and non-secret metadata are preserved."
     )]
     async fn list_mist_wan_config(
         &self,
@@ -2054,7 +2184,7 @@ impl MistHandler {
     }
     #[tool(
         name = "list_mist_wlans",
-        description = "List privileged site WLAN configuration."
+        description = "List privileged site WLAN configuration. WLAN PSKs and other secret-bearing fields are redacted from the response; structural fields and non-secret metadata (SSID, VLAN, band settings, etc.) are preserved."
     )]
     async fn list_mist_wlans(
         &self,
@@ -2372,7 +2502,7 @@ impl MistHandler {
     }
     #[tool(
         name = "plan_mist_change",
-        description = "Stage a change set for a WAN edge configuration object (network, service, service policy, gateway template, or device profile). Returns a digest-bound plan ready for approval. Arrays replace wholesale; null deletes a field."
+        description = "Stage a change set for a WAN edge configuration object (network, service, service policy, gateway template, or device profile). Returns a digest-bound plan ready for approval. Arrays replace wholesale; null deletes a field. Secret-bearing fields in the returned `before`/`after` (PSKs, shared secrets, API keys/tokens) are redacted; structural fields and non-secret metadata are preserved. The digest and plan lifecycle operate on the unredacted values, so redaction here never affects what is actually written. A patch containing the literal redaction placeholder is refused: omit a secret field to keep its current value, or supply the real value."
     )]
     async fn plan_mist_change(
         &self,
@@ -2399,6 +2529,25 @@ impl MistHandler {
             return Ok(tool_result::<serde_json::Value, _>(
                 Err::<serde_json::Value, _>(
                     "patch sets mist_configured, which controls who may configure the device",
+                ),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
+        // Reject the redaction placeholder BEFORE anything else: the before/
+        // after preview this tool returns redacts secret fields to this same
+        // literal, so a model that echoes it back must never have that
+        // literal merged into a device write.
+        if let Err(wan_write::PatchError::RedactionPlaceholder) =
+            wan_write::reject_redaction_placeholder(&args.patch)
+        {
+            audit.fail("patch contains the redaction placeholder");
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(
+                    "patch contains the redaction placeholder; omit secret fields to keep \
+                     their current value (merge-patch preserves omitted keys), or supply the \
+                     real value",
                 ),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
@@ -2455,6 +2604,12 @@ impl MistHandler {
                 } else {
                     MistCapability::OrdinaryRead
                 },
+                // Internal: `data` feeds `merge_patch` below to build the
+                // actual device write body. Redacting it here would splice
+                // "[REDACTED]" into the write. The `before`/`after` this
+                // produces are redacted separately before they reach the
+                // model-facing response.
+                redact_output: false,
             };
 
             let result = self.dispatch_catalogued_read(read, &extensions).await;
@@ -2561,6 +2716,13 @@ impl MistHandler {
             }
         }
 
+        // `staged.before`/`staged.after` came from the unredacted internal
+        // read above (needed raw for `merge_patch`); redact each own copy
+        // now, at the point they join a response the model will see.
+        let mut redacted_after = staged.after.clone();
+        mecmcp_redact::redact_json_value(&mut redacted_after);
+        redact::redact_mist_extra_fields(&mut redacted_after);
+
         let response = if before.is_null() {
             serde_json::json!({
                 "change_set_id": staged.change_set_id,
@@ -2568,15 +2730,18 @@ impl MistHandler {
                 "preview_digest": staged.preview_digest,
                 "before": null,
                 "before_state": "absent (create)",
-                "after": staged.after,
+                "after": redacted_after,
             })
         } else {
+            let mut redacted_before = staged.before.clone();
+            mecmcp_redact::redact_json_value(&mut redacted_before);
+            redact::redact_mist_extra_fields(&mut redacted_before);
             serde_json::json!({
                 "change_set_id": staged.change_set_id,
                 "plan_digest": staged.plan_digest,
                 "preview_digest": staged.preview_digest,
-                "before": staged.before,
-                "after": staged.after,
+                "before": redacted_before,
+                "after": redacted_after,
             })
         };
 
@@ -2588,7 +2753,7 @@ impl MistHandler {
 
     #[tool(
         name = "get_mist_change_set",
-        description = "Inspect a staged change set, returning its state, owner, before/after, and approval status."
+        description = "Inspect a staged change set, returning its state, owner, before/after, and approval status. Secret-bearing fields in `before`/`after` (PSKs, shared secrets, API keys/tokens) are redacted; structural fields and non-secret metadata are preserved."
     )]
     async fn get_mist_change_set(
         &self,
@@ -2635,14 +2800,21 @@ impl MistHandler {
                     ));
                 }
             };
-            let before_value = parsed
+            let mut before_value = parsed
                 .get("before")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            let after_value = parsed
+            let mut after_value = parsed
                 .get("after")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
+            // The stored preview artifact is the raw, unredacted plan (it
+            // must stay that way so a later apply can still use it); redact
+            // this response's own copy before it reaches the model.
+            mecmcp_redact::redact_json_value(&mut before_value);
+            mecmcp_redact::redact_json_value(&mut after_value);
+            redact::redact_mist_extra_fields(&mut before_value);
+            redact::redact_mist_extra_fields(&mut after_value);
             (before_value, after_value)
         } else {
             (serde_json::Value::Null, serde_json::Value::Null)
@@ -2982,6 +3154,12 @@ impl MistHandler {
                 } else {
                     MistCapability::OrdinaryRead
                 },
+                // Internal: the drift fingerprint is a SHA-256 over this
+                // exact device state. Redacting it first would fold every
+                // secret-bearing object down to the same "[REDACTED]"
+                // fingerprint and blind drift detection to a real device
+                // change. Never returned to the model.
+                redact_output: false,
             };
 
             let result = self.dispatch_catalogued_read(read, &extensions).await;
@@ -3192,7 +3370,10 @@ impl MistHandler {
             cursor: None,
         };
 
-        let write_result = self.client.execute(write_request).await;
+        let write_result = self
+            .client
+            .execute_as(write_request, call_priority_for(caller))
+            .await;
         let write_response = match write_result {
             Ok(response) => response,
             Err(error) => {
@@ -3284,6 +3465,9 @@ impl MistHandler {
             } else {
                 MistCapability::OrdinaryRead
             },
+            // Internal: compared byte-for-byte against `after` below to
+            // confirm the write landed. Never returned to the model.
+            redact_output: false,
         };
 
         let verify_result = self
@@ -3581,6 +3765,7 @@ mod tests {
             query: BTreeMap::new(),
             cursor: None,
             capability: MistCapability::OrdinaryRead,
+            redact_output: true,
         }
     }
 
@@ -3696,6 +3881,7 @@ mod tests {
                     query: BTreeMap::new(),
                     cursor: None,
                     capability: MistCapability::PrivilegedRead,
+                    redact_output: true,
                 },
                 &extensions(caller),
             )
@@ -3875,6 +4061,7 @@ mod tests {
                     query: BTreeMap::new(),
                     cursor: None,
                     capability: MistCapability::OrdinaryRead,
+                    redact_output: true,
                 },
                 &extensions(caller("org/11111111-1111-1111-1111-111111111111")),
             )
@@ -3891,6 +4078,7 @@ mod tests {
                     query: BTreeMap::new(),
                     cursor: None,
                     capability: MistCapability::OrdinaryRead,
+                    redact_output: true,
                 },
                 &extensions(caller("org/44444444-4444-4444-4444-444444444444")),
             )
@@ -3943,6 +4131,7 @@ mod tests {
                     query: BTreeMap::new(),
                     cursor: None,
                     capability: MistCapability::OrdinaryRead,
+                    redact_output: true,
                 },
                 &extensions(caller),
             )
@@ -4398,6 +4587,635 @@ mod tests {
         assert_eq!(
             approval_count, 1,
             "exactly one Approval evidence record must exist per change set, got {approval_count}"
+        );
+    }
+    /// A Mist backend whose response body always carries the same
+    /// fixture secrets, regardless of which operation was requested. This is
+    /// deliberately shape-agnostic (`ReadEnvelope::from_response` wraps
+    /// whatever JSON value it is given; nothing in the dispatch path branches
+    /// on body shape), so one fixture stands in for every WLAN, RADIUS, SNMP,
+    /// and API-key-bearing device response this server can read.
+    struct SecretLeakClient {
+        catalog: Arc<Catalog>,
+    }
+
+    const FIXTURE_ORG_ID: &str = "11111111-1111-1111-1111-111111111111";
+    const FIXTURE_SITE_ID: &str = "22222222-2222-2222-2222-222222222222";
+    const FIXTURE_NETWORK_ID: &str = "33333333-3333-3333-3333-333333333333";
+    const FIXTURE_DEVICE_ID: &str = "44444444-4444-4444-4444-444444444444";
+
+    const FAKE_WLAN_PSK: &str = "FAKE-WLAN-PSK-9f2b7a11e5";
+    const FAKE_RADIUS_SECRET: &str = "FAKE-RADIUS-SECRET-3d81ffec02";
+    const FAKE_SNMP_COMMUNITY: &str = "FAKE-SNMP-COMMUNITY-7e0c1a44b6";
+    const FAKE_API_KEY: &str = "FAKE-API-KEY-5b6e221019a4";
+    const FAKE_BGP_AUTH_KEY: &str = "FAKE-BGP-AUTH-KEY-1a2b3c4d5e";
+    const FAKE_OSPF_AUTH_KEY: &str = "FAKE-OSPF-AUTH-KEY-6f7g8h9i0j";
+    const FAKE_RADIUS_KEK: &str = "FAKE-RADIUS-KEK-a1b2c3d4e5";
+    const FAKE_RADIUS_MACK: &str = "FAKE-RADIUS-MACK-f6g7h8i9j0";
+    const FAKE_WEP_KEY: &str = "FAKE-WEP-KEY-0102030405";
+
+    /// Paired with the constant's own name, not its value, so a leak failure
+    /// can name which fixture secret leaked without printing the secret
+    /// itself into the test log (CodeQL `rust/cleartext-logging`).
+    const FIXTURE_SECRETS: &[(&str, &str)] = &[
+        ("FAKE_WLAN_PSK", FAKE_WLAN_PSK),
+        ("FAKE_RADIUS_SECRET", FAKE_RADIUS_SECRET),
+        ("FAKE_SNMP_COMMUNITY", FAKE_SNMP_COMMUNITY),
+        ("FAKE_API_KEY", FAKE_API_KEY),
+        ("FAKE_BGP_AUTH_KEY", FAKE_BGP_AUTH_KEY),
+        ("FAKE_OSPF_AUTH_KEY", FAKE_OSPF_AUTH_KEY),
+        ("FAKE_RADIUS_KEK", FAKE_RADIUS_KEK),
+        ("FAKE_RADIUS_MACK", FAKE_RADIUS_MACK),
+        ("FAKE_WEP_KEY", FAKE_WEP_KEY),
+    ];
+
+    /// A fixture marker present on every response this client returns, so a
+    /// test can prove a tool actually reached the fixture rather than short-
+    /// circuiting (an authorization refusal, an ambiguous-scope error, a
+    /// response-schema mismatch) before ever calling `execute`.
+    const FIXTURE_MARKER: &str = "branch-fixture";
+
+    fn secret_bearing_fixture() -> serde_json::Value {
+        serde_json::json!({
+            "id": FIXTURE_NETWORK_ID,
+            "name": FIXTURE_MARKER,
+            "vlan_id": 10,
+            "ip": "203.0.113.5",
+            "hostname": "gw1.example.net",
+            "psk": FAKE_WLAN_PSK,
+            "wlans": [{
+                "ssid": "corp",
+                "psk": FAKE_WLAN_PSK,
+                "auth": {"type": "wep", "keys": [FAKE_WEP_KEY]},
+            }],
+            "radius_config": {
+                "auth_servers": [{
+                    "host": "198.51.100.10",
+                    "secret": FAKE_RADIUS_SECRET,
+                    "keywrap_kek": FAKE_RADIUS_KEK,
+                    "keywrap_mack": FAKE_RADIUS_MACK,
+                }]
+            },
+            "snmp_config": {"community": FAKE_SNMP_COMMUNITY},
+            "api_token": FAKE_API_KEY,
+            "bgp_config": {"peer1": {"auth_key": FAKE_BGP_AUTH_KEY}},
+            "ospf_areas": {
+                "0.0.0.0": {"networks": [{"network": "10.0.0.0/24", "auth_keys": [FAKE_OSPF_AUTH_KEY]}]}
+            },
+        })
+    }
+
+    /// Resolve a `$ref` against the catalog's own component registry, one
+    /// hop at a time, until a schema with no `$ref` is reached.
+    fn resolve_schema<'a>(
+        catalog: &'a Catalog,
+        schema: &'a serde_json::Value,
+    ) -> &'a serde_json::Value {
+        let mut current = schema;
+        while let Some(reference) = current.get("$ref").and_then(serde_json::Value::as_str) {
+            let name = reference
+                .rsplit('/')
+                .next()
+                .expect("non-empty $ref pointer");
+            current = catalog
+                .components
+                .get("schemas")
+                .and_then(|schemas| schemas.get(name))
+                .unwrap_or_else(|| panic!("unresolved $ref: {reference}"));
+        }
+        current
+    }
+
+    /// Whether an operation's declared 200 JSON response is an array, so the
+    /// fixture client can hand back an array-shaped body list operations
+    /// require instead of failing catalog response-schema validation.
+    fn response_is_array_shaped(catalog: &Catalog, operation_id: &str) -> bool {
+        let operation = catalog
+            .operation(operation_id)
+            .unwrap_or_else(|| panic!("{operation_id} is not in the embedded catalog"));
+        let Some(schema) = operation
+            .responses
+            .get("200")
+            .and_then(|by_media| by_media.get("application/json"))
+        else {
+            return false;
+        };
+        resolve_schema(catalog, schema)
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            == Some("array")
+    }
+
+    #[async_trait]
+    impl MistClient for SecretLeakClient {
+        async fn execute(
+            &self,
+            request: MistRequest,
+        ) -> Result<rustmistmcp_core::MistResponse, MistError> {
+            let body = if response_is_array_shaped(&self.catalog, &request.operation_id) {
+                serde_json::Value::Array(vec![secret_bearing_fixture()])
+            } else {
+                secret_bearing_fixture()
+            };
+            Ok(rustmistmcp_core::MistResponse {
+                operation_id: request.operation_id,
+                status: 200,
+                body: MistResponseBody::Json(body),
+                cursor: None,
+                page: None,
+            })
+        }
+    }
+
+    /// A caller with every read-relevant catalog operation this sweep uses,
+    /// granted for both capability tiers and both fixture targets. Real
+    /// deployments never grant this broadly; here it exists purely to open
+    /// every tool this sweep needs, so the redaction proof is not
+    /// accidentally reduced by an authorization refusal being mistaken for a
+    /// clean (no-secret) result.
+    fn full_sweep_caller() -> CallerCtx<MistGrant> {
+        const GRANTED_OPERATIONS: &[&str] = &[
+            "getSelf",
+            "getOrg",
+            "listOrgSites",
+            "getSiteInfo",
+            "searchOrgInventory",
+            "getSiteDevice",
+            "getSiteDeviceStats",
+            "listSiteWlans",
+            "searchSiteWirelessClients",
+            "searchSiteSystemEvents",
+            "searchSiteAlarms",
+            "searchOrgAlarms",
+            "listAlarmDefinitions",
+            "listOrgAuditLogs",
+            "listSiteSlesMetrics",
+            "getSiteSleSummary",
+            "getSiteSleImpactSummary",
+            "getSiteInsightMetrics",
+            "listSiteTroubleshootCalls",
+            "listSiteRogueAPs",
+            "getSiteCurrentChannelPlanning",
+            "listSiteDeviceUpgrades",
+            "getSiteGatewayMetrics",
+            "searchOrgDevices",
+            "getOrgNetwork",
+            "listOrgNetworks",
+            "listGatewayApplications",
+            "searchOrgTunnelsStats",
+            "searchOrgPeerPathStats",
+            "searchOrgBgpStats",
+            "searchSiteServicePathEvents",
+        ];
+        CallerCtx {
+            request_id: uuid::Uuid::new_v4(),
+            token_name: "redaction-sweep".to_owned(),
+            devices: ScopeSet::Wildcard,
+            tools: ScopeSet::Allowlist(KNOWN_TOOLS.iter().map(|name| (*name).to_owned()).collect()),
+            grant: Some(MistGrant {
+                allowed_operations: GRANTED_OPERATIONS
+                    .iter()
+                    .map(|op| (*op).to_owned())
+                    .collect(),
+                actions: vec![MistCapability::OrdinaryRead, MistCapability::PrivilegedRead],
+                subjects: vec![
+                    MistTarget::org(FIXTURE_ORG_ID).expect("org target"),
+                    MistTarget::site(FIXTURE_SITE_ID).expect("site target"),
+                ],
+            }),
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: ActorType::Human,
+            client_name: None,
+            model_id: None,
+            session_id: None,
+        }
+    }
+
+    /// Panics naming the tool and leaked secret's constant, rather than a
+    /// bare `assert!`, so a failure here points straight at which tool and
+    /// which fixture value leaked without needing to re-run under a
+    /// debugger. Prints the constant's *name*, not its value or the
+    /// surrounding result, so the failure message itself never echoes the
+    /// secret into the test log (CodeQL `rust/cleartext-logging`).
+    fn assert_no_secret_leak(tool: &str, result: &CallToolResult) {
+        let rendered = format!("{result:?}");
+        for (name, secret) in FIXTURE_SECRETS {
+            assert!(
+                !rendered.contains(secret),
+                "{tool} leaked fixture secret {name}"
+            );
+        }
+    }
+
+    /// Tools whose result legitimately carries no device data under this
+    /// sweep's fixture and single self-approving caller, so a fixture-marker
+    /// assertion does not apply to them: `get_mist_operation_schema`/
+    /// `search_mist_operations` answer from catalog metadata, not a device
+    /// response; `list_mist_orgs` answers from the server's local
+    /// configured-org allowlist; `approve_mist_change_set` is correctly
+    /// refused because the sweep's single caller is also the plan's owner
+    /// (self-approval); `apply_mist_change_set` runs in lab mode, where the
+    /// plan was already approved on creation, so it succeeds -- but its
+    /// response carries only ids/state, no device data, so it is still
+    /// exempt from the fixture-marker check. Its success is asserted
+    /// separately, below.
+    const NO_DEVICE_DATA_TOOLS: &[&str] = &[
+        "get_mist_operation_schema",
+        "search_mist_operations",
+        "list_mist_orgs",
+        "approve_mist_change_set",
+        "apply_mist_change_set",
+    ];
+
+    /// MEC-710 / F3: a tool-level failure comes back as
+    /// `Ok(CallToolResult { is_error: Some(true), .. })`, not `Err`, so
+    /// `assert_no_secret_leak` alone passes on a call that never reached the
+    /// fixture at all -- proving nothing about redaction. This asserts the
+    /// call actually succeeded and that the fixture's own marker shows up in
+    /// the output, for every tool except [`NO_DEVICE_DATA_TOOLS`].
+    fn assert_reached_fixture(tool: &str, result: &CallToolResult) {
+        if NO_DEVICE_DATA_TOOLS.contains(&tool) {
+            return;
+        }
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "{tool} must succeed against the fixture to prove anything about redaction, \
+             got an error result: {result:?}"
+        );
+        let rendered = format!("{result:?}");
+        assert!(
+            rendered.contains(FIXTURE_MARKER),
+            "{tool} never reached the fixture (no {FIXTURE_MARKER:?} marker in the output), \
+             so it proves nothing about redaction: {rendered}"
+        );
+    }
+
+    /// MEC-699: every tool that can return device data must run its response
+    /// through `mecmcp_redact` before the model ever sees it. This is a
+    /// regression guard, not a design proof -- it iterates the server's own
+    /// `KNOWN_TOOLS` registry (rather than a hand-maintained list) so a tool
+    /// added later without redaction wiring fails this test instead of
+    /// shipping quietly.
+    ///
+    /// One handler, one client, one caller for the whole sweep: transport or
+    /// authorization failures are propagated as panics (via `.expect`), not
+    /// swallowed as "no secret seen this call" passes -- a call that never
+    /// reached the fixture proves nothing.
+    #[tokio::test]
+    async fn every_known_tool_redacts_fixture_secrets() {
+        let handler = MistHandler::with_client_options(
+            "https://api.mist.com/",
+            vec![FIXTURE_ORG_ID.to_owned()],
+            BTreeMap::from([(FIXTURE_SITE_ID.to_owned(), FIXTURE_ORG_ID.to_owned())]),
+            Arc::new(SecretLeakClient {
+                catalog: Arc::new(Catalog::embedded().expect("embedded catalog")),
+            }),
+            None,
+            // Lab mode auto-waives approval at plan time, so this single
+            // caller can drive the full plan -> approve -> apply lifecycle
+            // without standing up the two-principal HTTP auth flow
+            // `approver_gate.rs` covers separately.
+            true,
+        )
+        .expect("handler");
+
+        let mut covered = std::collections::BTreeSet::new();
+        let ext = extensions(full_sweep_caller());
+
+        macro_rules! sweep {
+            ($tool:ident, $args:expr) => {{
+                let name = stringify!($tool);
+                covered.insert(name);
+                let result = handler
+                    .$tool(Parameters($args), ext.clone())
+                    .await
+                    .unwrap_or_else(|error| panic!("{name} transport error: {error}"));
+                assert_no_secret_leak(name, &result);
+                assert_reached_fixture(name, &result);
+                result
+            }};
+        }
+
+        sweep!(
+            get_mist_self,
+            serde_json::from_value::<EmptyArgs>(serde_json::json!({})).expect("args")
+        );
+        sweep!(
+            get_mist_org,
+            serde_json::from_value::<GetOrgArgs>(serde_json::json!({"org_id": FIXTURE_ORG_ID}))
+                .expect("args")
+        );
+        sweep!(
+            list_mist_sites,
+            serde_json::from_value::<OrgPageArgs>(serde_json::json!({"org_id": FIXTURE_ORG_ID}))
+                .expect("args")
+        );
+        sweep!(
+            get_mist_site,
+            serde_json::from_value::<SiteArgs>(serde_json::json!({"site_id": FIXTURE_SITE_ID}))
+                .expect("args")
+        );
+        sweep!(
+            search_mist_inventory,
+            serde_json::from_value::<InventoryArgs>(serde_json::json!({"org_id": FIXTURE_ORG_ID}))
+                .expect("args")
+        );
+        sweep!(
+            get_mist_device,
+            serde_json::from_value::<SiteDeviceArgs>(
+                serde_json::json!({"site_id": FIXTURE_SITE_ID, "device_id": FIXTURE_DEVICE_ID})
+            )
+            .expect("args")
+        );
+        sweep!(
+            get_mist_device_stats,
+            serde_json::from_value::<DeviceStatsArgs>(
+                serde_json::json!({"site_id": FIXTURE_SITE_ID, "device_id": FIXTURE_DEVICE_ID})
+            )
+            .expect("args")
+        );
+        sweep!(
+            get_mist_insight,
+            serde_json::from_value::<InsightArgs>(
+                serde_json::json!({"site_id": FIXTURE_SITE_ID, "metrics": "num_clients"})
+            )
+            .expect("args")
+        );
+        sweep!(
+            get_mist_operation_schema,
+            serde_json::from_value::<OperationSchemaArgs>(
+                serde_json::json!({"operation_id": "getOrg"})
+            )
+            .expect("args")
+        );
+        sweep!(
+            get_mist_rrm,
+            serde_json::from_value::<SiteArgs>(serde_json::json!({"site_id": FIXTURE_SITE_ID}))
+                .expect("args")
+        );
+        sweep!(
+            get_mist_sle,
+            serde_json::from_value::<SleArgs>(serde_json::json!({
+                "site_id": FIXTURE_SITE_ID, "scope": "site", "scope_id": FIXTURE_SITE_ID,
+                "metric": "wan-link-health"
+            }))
+            .expect("args")
+        );
+        sweep!(
+            get_mist_sle_impact,
+            serde_json::from_value::<SleImpactArgs>(serde_json::json!({
+                "site_id": FIXTURE_SITE_ID, "scope": "site", "scope_id": FIXTURE_SITE_ID,
+                "metric": "wan-link-health", "impact": "summary"
+            }))
+            .expect("args")
+        );
+        sweep!(
+            get_mist_wan_config,
+            serde_json::from_value::<WanConfigGetArgs>(serde_json::json!({
+                "object": "network", "org_id": FIXTURE_ORG_ID, "object_id": FIXTURE_NETWORK_ID
+            }))
+            .expect("args")
+        );
+        sweep!(
+            get_mist_wan_edge_stats,
+            serde_json::from_value::<WanEdgeStatsArgs>(
+                serde_json::json!({"site_id": FIXTURE_SITE_ID})
+            )
+            .expect("args")
+        );
+        sweep!(
+            invoke_mist_privileged_read,
+            serde_json::from_value::<InvokeReadArgs>(
+                serde_json::json!({"operation_id": "getSelf"})
+            )
+            .expect("args")
+        );
+        sweep!(
+            invoke_mist_read,
+            serde_json::from_value::<InvokeReadArgs>(serde_json::json!({
+                "operation_id": "getOrg", "path": {"org_id": FIXTURE_ORG_ID}
+            }))
+            .expect("args")
+        );
+        sweep!(
+            list_mist_alarm_definitions,
+            serde_json::from_value::<EmptyArgs>(serde_json::json!({})).expect("args")
+        );
+        sweep!(
+            list_mist_applications,
+            serde_json::from_value::<ApplicationListArgs>(serde_json::json!({"source": "catalog"}))
+                .expect("args")
+        );
+        {
+            covered.insert("list_mist_orgs");
+            let result = handler
+                .list_mist_orgs(Parameters(EmptyArgs {}), ext.clone())
+                .await
+                .expect("list_mist_orgs transport error");
+            assert_no_secret_leak("list_mist_orgs", &result);
+            assert_reached_fixture("list_mist_orgs", &result);
+        }
+        sweep!(
+            list_mist_rogues,
+            serde_json::from_value::<RogueArgs>(serde_json::json!({"site_id": FIXTURE_SITE_ID}))
+                .expect("args")
+        );
+        sweep!(
+            list_mist_sle_metrics,
+            serde_json::from_value::<SleMetricsArgs>(serde_json::json!({
+                "site_id": FIXTURE_SITE_ID, "scope": "site", "scope_id": FIXTURE_SITE_ID
+            }))
+            .expect("args")
+        );
+        sweep!(
+            list_mist_upgrades,
+            serde_json::from_value::<UpgradeArgs>(
+                serde_json::json!({"site_id": FIXTURE_SITE_ID, "status": null})
+            )
+            .expect("args")
+        );
+        sweep!(
+            list_mist_wan_config,
+            serde_json::from_value::<WanConfigListArgs>(serde_json::json!({
+                "object": "network", "org_id": FIXTURE_ORG_ID
+            }))
+            .expect("args")
+        );
+        sweep!(
+            list_mist_wan_edges,
+            serde_json::from_value::<WanEdgeListArgs>(
+                serde_json::json!({"org_id": FIXTURE_ORG_ID})
+            )
+            .expect("args")
+        );
+        sweep!(
+            list_mist_wlans,
+            serde_json::from_value::<SitePageArgs>(serde_json::json!({"site_id": FIXTURE_SITE_ID}))
+                .expect("args")
+        );
+        sweep!(
+            search_mist_alarms,
+            serde_json::from_value::<AlarmSearchArgs>(
+                serde_json::json!({"org_id": FIXTURE_ORG_ID})
+            )
+            .expect("args")
+        );
+        sweep!(
+            search_mist_audit_logs,
+            serde_json::from_value::<AuditSearchArgs>(
+                serde_json::json!({"org_id": FIXTURE_ORG_ID})
+            )
+            .expect("args")
+        );
+        sweep!(
+            search_mist_bgp_peers,
+            serde_json::from_value::<BgpPeerSearchArgs>(
+                serde_json::json!({"org_id": FIXTURE_ORG_ID})
+            )
+            .expect("args")
+        );
+        sweep!(
+            search_mist_clients,
+            serde_json::from_value::<ClientSearchArgs>(
+                serde_json::json!({"site_id": FIXTURE_SITE_ID})
+            )
+            .expect("args")
+        );
+        sweep!(
+            search_mist_events,
+            serde_json::from_value::<EventSearchArgs>(
+                serde_json::json!({"site_id": FIXTURE_SITE_ID})
+            )
+            .expect("args")
+        );
+        {
+            covered.insert("search_mist_operations");
+            let result = handler
+                .search_mist_operations(
+                    Parameters(
+                        serde_json::from_value::<SearchOperationsArgs>(
+                            serde_json::json!({"query": "org"}),
+                        )
+                        .expect("args"),
+                    ),
+                    ext.clone(),
+                )
+                .await
+                .expect("search_mist_operations transport error");
+            assert_no_secret_leak("search_mist_operations", &result);
+            assert_reached_fixture("search_mist_operations", &result);
+        }
+        sweep!(
+            search_mist_peer_paths,
+            serde_json::from_value::<PeerPathSearchArgs>(
+                serde_json::json!({"org_id": FIXTURE_ORG_ID})
+            )
+            .expect("args")
+        );
+        sweep!(
+            search_mist_service_path_events,
+            serde_json::from_value::<ServicePathEventArgs>(
+                serde_json::json!({"site_id": FIXTURE_SITE_ID})
+            )
+            .expect("args")
+        );
+        sweep!(
+            search_mist_tunnels,
+            serde_json::from_value::<TunnelSearchArgs>(
+                serde_json::json!({"org_id": FIXTURE_ORG_ID})
+            )
+            .expect("args")
+        );
+        sweep!(
+            troubleshoot_mist,
+            serde_json::from_value::<TroubleshootArgs>(
+                serde_json::json!({"site_id": FIXTURE_SITE_ID})
+            )
+            .expect("args")
+        );
+
+        // The change-set lifecycle: `plan_mist_change` reads the fixture as
+        // `before`, and `get_mist_change_set` re-reads the staged preview.
+        // Both are the exact call sites `mecmcp_redact` was added to in this
+        // change (`server/mod.rs` around `plan_mist_change`/
+        // `get_mist_change_set`), so this is the sweep's most direct proof.
+        let plan_result = sweep!(
+            plan_mist_change,
+            serde_json::from_value::<PlanChangeArgs>(serde_json::json!({
+                "object": "network",
+                "verb": "update",
+                "org_id": FIXTURE_ORG_ID,
+                "object_id": FIXTURE_NETWORK_ID,
+                "patch": {"name": "renamed-branch"},
+            }))
+            .expect("args")
+        );
+        let plan_text = plan_result.content[0]
+            .as_text()
+            .expect("plan_mist_change returns text")
+            .text
+            .clone();
+        let plan_json: serde_json::Value = serde_json::from_str(&plan_text).expect("plan JSON");
+        let change_set_id = plan_json["change_set_id"]
+            .as_str()
+            .expect("change_set_id")
+            .to_owned();
+        let plan_digest = plan_json["plan_digest"]
+            .as_str()
+            .expect("plan_digest")
+            .to_owned();
+
+        sweep!(
+            get_mist_change_set,
+            serde_json::from_value::<GetChangeSetArgs>(serde_json::json!({
+                "change_set_id": change_set_id, "object": "network", "object_id": FIXTURE_NETWORK_ID
+            }))
+            .expect("args")
+        );
+        sweep!(
+            approve_mist_change_set,
+            serde_json::from_value::<ApproveChangeSetArgs>(serde_json::json!({
+                "change_set_id": change_set_id, "plan_digest": plan_digest,
+                "object": "network", "object_id": FIXTURE_NETWORK_ID
+            }))
+            .expect("args")
+        );
+        {
+            covered.insert("apply_mist_change_set");
+            let result = handler
+                .apply_mist_change_set(
+                    Parameters(
+                        serde_json::from_value::<ApplyChangeSetArgs>(serde_json::json!({
+                            "change_set_id": change_set_id, "object": "network",
+                            "object_id": FIXTURE_NETWORK_ID
+                        }))
+                        .expect("args"),
+                    ),
+                    ext.clone(),
+                )
+                .await
+                .expect("apply_mist_change_set transport error");
+            assert_no_secret_leak("apply_mist_change_set", &result);
+            // Lab mode approved the plan on creation, so apply must succeed
+            // here, not be refused -- the stale `NO_DEVICE_DATA_TOOLS` comment
+            // previously claimed apply was "correctly refused", which was
+            // never true under this sweep's lab-mode handler.
+            assert_eq!(
+                result.is_error,
+                Some(false),
+                "apply_mist_change_set must succeed in lab mode: {result:?}"
+            );
+        }
+
+        let expected: std::collections::BTreeSet<&str> = KNOWN_TOOLS.iter().copied().collect();
+        assert_eq!(
+            covered, expected,
+            "every tool in KNOWN_TOOLS must be swept for fixture-secret leakage; \
+             a tool present in one set but not the other means this test was not \
+             updated alongside the registry"
         );
     }
 }

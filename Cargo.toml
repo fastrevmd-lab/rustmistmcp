@@ -29,7 +29,7 @@ clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 hex = "0.4"
 http = "1"
-jsonschema = { version = "0.56.0", default-features = false }
+jsonschema = { version = "0.58.0", default-features = false }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls-no-provider"] }
 rmcp = { version = "3.1", features = ["server", "transport-io", "transport-streamable-http-server", "transport-streamable-http-server-session"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
@@ -59,6 +59,11 @@ mecmcp-changeset = { version = "0.24.1", git = "https://github.com/fastrevmd-lab
 mecmcp-http = { version = "0.24.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.24.1" }
 mecmcp-inventory = { version = "0.24.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.24.1" }
 mecmcp-job = { version = "0.24.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.24.1" }
+# mecmcp-redact landed on mecmcp's main branch after v0.24.1 was tagged and
+# has not shipped in a tagged release yet, so this pins the exact commit
+# rather than a tag like every other mecmcp-* crate above. Swap this to a
+# tag once one exists that includes it.
+mecmcp-redact = { version = "0.24.1", git = "https://github.com/fastrevmd-lab/mecmcp", rev = "2e157e0f09894e2a5309408523c0911425eebd20" }
 mecmcp-runtime = { version = "0.24.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.24.1" }
 mecmcp-secret = { version = "0.24.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.24.1" }
 mecmcp-server = { version = "0.24.1", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.24.1" }
