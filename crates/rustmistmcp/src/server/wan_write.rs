@@ -105,6 +105,47 @@ pub(crate) fn write_target(object: WanObject, verb: WriteVerb) -> WriteTarget {
 pub(crate) enum PatchError {
     /// The patch tried to set `mist_configured`.
     MistConfigured,
+    /// The patch echoed back the redaction placeholder.
+    RedactionPlaceholder,
+}
+
+/// The literal `mecmcp_redact` substitutes for a secret-bearing field.
+///
+/// `mecmcp-redact` (pinned via the `mecmcp-redact` dependency) does not
+/// export this as a public constant as of the rev this crate depends on, so
+/// it is duplicated here rather than imported. If `mecmcp-redact` starts
+/// exporting its `PLACEHOLDER` constant, replace this literal with that.
+pub(crate) const REDACTION_PLACEHOLDER: &str = "[REDACTED]";
+
+/// Refuse any patch that echoes the redaction placeholder back, at any depth.
+///
+/// `plan_mist_change`'s `before`/`after` preview redacts secret-bearing
+/// fields to `"[REDACTED]"` before the model ever sees them. If the model
+/// copies that literal into a later patch, `merge_patch` would write it
+/// straight to the device, permanently destroying the real secret with no
+/// way for the approver to notice -- `before` and `after` both render as
+/// `"[REDACTED]"` in the preview either way. Refusing the literal forces the
+/// model to either omit the field (merge-patch preserves it unchanged) or
+/// supply the real value.
+pub(crate) fn reject_redaction_placeholder(patch: &serde_json::Value) -> Result<(), PatchError> {
+    match patch {
+        serde_json::Value::String(value) if value == REDACTION_PLACEHOLDER => {
+            Err(PatchError::RedactionPlaceholder)
+        }
+        serde_json::Value::Object(map) => {
+            for value in map.values() {
+                reject_redaction_placeholder(value)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                reject_redaction_placeholder(value)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Refuse any patch that touches `mist_configured`, at any depth.
@@ -285,5 +326,35 @@ mod tests {
             Err(PatchError::MistConfigured)
         );
         assert_eq!(reject_config_authority(&json!({"name": "branch"})), Ok(()));
+    }
+
+    #[test]
+    fn redaction_placeholder_is_refused_at_any_depth() {
+        assert_eq!(
+            reject_redaction_placeholder(&json!({"psk": "[REDACTED]"})),
+            Err(PatchError::RedactionPlaceholder)
+        );
+        assert_eq!(
+            reject_redaction_placeholder(&json!({
+                "tunnel_configs": {"t1": {"provider": "zscaler-ipsec", "psk": "[REDACTED]"}}
+            })),
+            Err(PatchError::RedactionPlaceholder)
+        );
+        assert_eq!(
+            reject_redaction_placeholder(&json!({
+                "radius_config": {"auth_servers": [{"host": "10.0.0.1", "secret": "[REDACTED]"}]}
+            })),
+            Err(PatchError::RedactionPlaceholder)
+        );
+        assert_eq!(
+            reject_redaction_placeholder(&json!({"name": "branch", "vlan_id": 20})),
+            Ok(())
+        );
+        // A value that merely contains the placeholder as a substring, rather
+        // than equalling it exactly, is not the redaction marker.
+        assert_eq!(
+            reject_redaction_placeholder(&json!({"note": "field is [REDACTED] upstream"})),
+            Ok(())
+        );
     }
 }

@@ -210,6 +210,44 @@ async fn plan_refuses_a_patch_that_sets_config_authority() {
     );
 }
 
+/// MEC-710 / F2: the model only ever sees `"[REDACTED]"` for a secret-bearing
+/// field in a `plan_mist_change` preview. If it echoes that literal back in a
+/// later patch, `merge_patch` would write it straight to the device,
+/// destroying the real secret -- and the approver cannot catch it, because
+/// `before.psk` and `after.psk` both render as `"[REDACTED]"` either way. The
+/// literal must be refused at plan time, before any Mist call.
+#[tokio::test]
+async fn plan_refuses_a_patch_containing_the_redaction_placeholder() {
+    let recorder = Arc::new(ScriptedClient::new(serde_json::json!({"id": NETWORK_ID})));
+    let handler = MistHandler::with_client(
+        "https://api.mist.com/",
+        vec![ORG_ID.to_owned()],
+        site_map(),
+        recorder.clone(),
+    )
+    .expect("handler");
+
+    let refused = call(
+        handler,
+        "plan_mist_change",
+        serde_json::json!({
+            "object": "gatewaytemplate", "verb": "update", "org_id": ORG_ID,
+            "object_id": NETWORK_ID,
+            "patch": {"tunnel_configs": {"t1": {"provider": "zscaler-ipsec", "psk": "[REDACTED]"}}}
+        }),
+    )
+    .await;
+
+    assert!(
+        refused.is_err(),
+        "the redaction placeholder must be refused"
+    );
+    assert!(
+        recorder.requests.lock().expect("recorder").is_empty(),
+        "the refusal must happen before any Mist call, so no write request can be recorded"
+    );
+}
+
 #[tokio::test]
 async fn plan_refuses_org_not_in_allowed_orgs() {
     const DISALLOWED_ORG: &str = "99999999-9999-9999-9999-999999999999";

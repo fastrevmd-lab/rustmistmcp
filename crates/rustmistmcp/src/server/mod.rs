@@ -1,6 +1,7 @@
 //! Curated Mist MCP handler: read tools plus change-set-gated WAN edge mutations.
 
 mod change_set;
+mod redact;
 mod similarity;
 mod wan;
 mod wan_write;
@@ -1014,6 +1015,7 @@ impl ReadEnvelope {
         };
         if redact_output {
             mecmcp_redact::redact_json_value(&mut data);
+            redact::redact_mist_extra_fields(&mut data);
         }
         let next_cursor = response
             .cursor
@@ -2496,7 +2498,7 @@ impl MistHandler {
     }
     #[tool(
         name = "plan_mist_change",
-        description = "Stage a change set for a WAN edge configuration object (network, service, service policy, gateway template, or device profile). Returns a digest-bound plan ready for approval. Arrays replace wholesale; null deletes a field. Secret-bearing fields in the returned `before`/`after` (PSKs, shared secrets, API keys/tokens) are redacted; structural fields and non-secret metadata are preserved. The digest and plan lifecycle operate on the unredacted values, so redaction here never affects what is actually written."
+        description = "Stage a change set for a WAN edge configuration object (network, service, service policy, gateway template, or device profile). Returns a digest-bound plan ready for approval. Arrays replace wholesale; null deletes a field. Secret-bearing fields in the returned `before`/`after` (PSKs, shared secrets, API keys/tokens) are redacted; structural fields and non-secret metadata are preserved. The digest and plan lifecycle operate on the unredacted values, so redaction here never affects what is actually written. A patch containing the literal redaction placeholder is refused: omit a secret field to keep its current value, or supply the real value."
     )]
     async fn plan_mist_change(
         &self,
@@ -2523,6 +2525,25 @@ impl MistHandler {
             return Ok(tool_result::<serde_json::Value, _>(
                 Err::<serde_json::Value, _>(
                     "patch sets mist_configured, which controls who may configure the device",
+                ),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ));
+        }
+
+        // Reject the redaction placeholder BEFORE anything else: the before/
+        // after preview this tool returns redacts secret fields to this same
+        // literal, so a model that echoes it back must never have that
+        // literal merged into a device write.
+        if let Err(wan_write::PatchError::RedactionPlaceholder) =
+            wan_write::reject_redaction_placeholder(&args.patch)
+        {
+            audit.fail("patch contains the redaction placeholder");
+            return Ok(tool_result::<serde_json::Value, _>(
+                Err::<serde_json::Value, _>(
+                    "patch contains the redaction placeholder; omit secret fields to keep \
+                     their current value (merge-patch preserves omitted keys), or supply the \
+                     real value",
                 ),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
@@ -2696,6 +2717,7 @@ impl MistHandler {
         // now, at the point they join a response the model will see.
         let mut redacted_after = staged.after.clone();
         mecmcp_redact::redact_json_value(&mut redacted_after);
+        redact::redact_mist_extra_fields(&mut redacted_after);
 
         let response = if before.is_null() {
             serde_json::json!({
@@ -2709,6 +2731,7 @@ impl MistHandler {
         } else {
             let mut redacted_before = staged.before.clone();
             mecmcp_redact::redact_json_value(&mut redacted_before);
+            redact::redact_mist_extra_fields(&mut redacted_before);
             serde_json::json!({
                 "change_set_id": staged.change_set_id,
                 "plan_digest": staged.plan_digest,
@@ -2786,6 +2809,8 @@ impl MistHandler {
             // this response's own copy before it reaches the model.
             mecmcp_redact::redact_json_value(&mut before_value);
             mecmcp_redact::redact_json_value(&mut after_value);
+            redact::redact_mist_extra_fields(&mut before_value);
+            redact::redact_mist_extra_fields(&mut after_value);
             (before_value, after_value)
         } else {
             (serde_json::Value::Null, serde_json::Value::Null)
@@ -4566,7 +4591,9 @@ mod tests {
     /// whatever JSON value it is given; nothing in the dispatch path branches
     /// on body shape), so one fixture stands in for every WLAN, RADIUS, SNMP,
     /// and API-key-bearing device response this server can read.
-    struct SecretLeakClient;
+    struct SecretLeakClient {
+        catalog: Arc<Catalog>,
+    }
 
     const FIXTURE_ORG_ID: &str = "11111111-1111-1111-1111-111111111111";
     const FIXTURE_SITE_ID: &str = "22222222-2222-2222-2222-222222222222";
@@ -4577,29 +4604,99 @@ mod tests {
     const FAKE_RADIUS_SECRET: &str = "FAKE-RADIUS-SECRET-3d81ffec02";
     const FAKE_SNMP_COMMUNITY: &str = "FAKE-SNMP-COMMUNITY-7e0c1a44b6";
     const FAKE_API_KEY: &str = "FAKE-API-KEY-5b6e221019a4";
+    const FAKE_BGP_AUTH_KEY: &str = "FAKE-BGP-AUTH-KEY-1a2b3c4d5e";
+    const FAKE_OSPF_AUTH_KEY: &str = "FAKE-OSPF-AUTH-KEY-6f7g8h9i0j";
+    const FAKE_RADIUS_KEK: &str = "FAKE-RADIUS-KEK-a1b2c3d4e5";
+    const FAKE_RADIUS_MACK: &str = "FAKE-RADIUS-MACK-f6g7h8i9j0";
+    const FAKE_WEP_KEY: &str = "FAKE-WEP-KEY-0102030405";
 
     const FIXTURE_SECRETS: &[&str] = &[
         FAKE_WLAN_PSK,
         FAKE_RADIUS_SECRET,
         FAKE_SNMP_COMMUNITY,
         FAKE_API_KEY,
+        FAKE_BGP_AUTH_KEY,
+        FAKE_OSPF_AUTH_KEY,
+        FAKE_RADIUS_KEK,
+        FAKE_RADIUS_MACK,
+        FAKE_WEP_KEY,
     ];
+
+    /// A fixture marker present on every response this client returns, so a
+    /// test can prove a tool actually reached the fixture rather than short-
+    /// circuiting (an authorization refusal, an ambiguous-scope error, a
+    /// response-schema mismatch) before ever calling `execute`.
+    const FIXTURE_MARKER: &str = "branch-fixture";
 
     fn secret_bearing_fixture() -> serde_json::Value {
         serde_json::json!({
             "id": FIXTURE_NETWORK_ID,
-            "name": "branch-fixture",
+            "name": FIXTURE_MARKER,
             "vlan_id": 10,
             "ip": "203.0.113.5",
             "hostname": "gw1.example.net",
             "psk": FAKE_WLAN_PSK,
-            "wlans": [{"ssid": "corp", "psk": FAKE_WLAN_PSK}],
+            "wlans": [{
+                "ssid": "corp",
+                "psk": FAKE_WLAN_PSK,
+                "auth": {"type": "wep", "keys": [FAKE_WEP_KEY]},
+            }],
             "radius_config": {
-                "auth_servers": [{"host": "198.51.100.10", "secret": FAKE_RADIUS_SECRET}]
+                "auth_servers": [{
+                    "host": "198.51.100.10",
+                    "secret": FAKE_RADIUS_SECRET,
+                    "keywrap_kek": FAKE_RADIUS_KEK,
+                    "keywrap_mack": FAKE_RADIUS_MACK,
+                }]
             },
             "snmp_config": {"community": FAKE_SNMP_COMMUNITY},
             "api_token": FAKE_API_KEY,
+            "bgp_config": {"peer1": {"auth_key": FAKE_BGP_AUTH_KEY}},
+            "ospf_areas": {
+                "0.0.0.0": {"networks": [{"network": "10.0.0.0/24", "auth_keys": [FAKE_OSPF_AUTH_KEY]}]}
+            },
         })
+    }
+
+    /// Resolve a `$ref` against the catalog's own component registry, one
+    /// hop at a time, until a schema with no `$ref` is reached.
+    fn resolve_schema<'a>(
+        catalog: &'a Catalog,
+        schema: &'a serde_json::Value,
+    ) -> &'a serde_json::Value {
+        let mut current = schema;
+        while let Some(reference) = current.get("$ref").and_then(serde_json::Value::as_str) {
+            let name = reference
+                .rsplit('/')
+                .next()
+                .expect("non-empty $ref pointer");
+            current = catalog
+                .components
+                .get("schemas")
+                .and_then(|schemas| schemas.get(name))
+                .unwrap_or_else(|| panic!("unresolved $ref: {reference}"));
+        }
+        current
+    }
+
+    /// Whether an operation's declared 200 JSON response is an array, so the
+    /// fixture client can hand back an array-shaped body list operations
+    /// require instead of failing catalog response-schema validation.
+    fn response_is_array_shaped(catalog: &Catalog, operation_id: &str) -> bool {
+        let operation = catalog
+            .operation(operation_id)
+            .unwrap_or_else(|| panic!("{operation_id} is not in the embedded catalog"));
+        let Some(schema) = operation
+            .responses
+            .get("200")
+            .and_then(|by_media| by_media.get("application/json"))
+        else {
+            return false;
+        };
+        resolve_schema(catalog, schema)
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            == Some("array")
     }
 
     #[async_trait]
@@ -4608,10 +4705,15 @@ mod tests {
             &self,
             request: MistRequest,
         ) -> Result<rustmistmcp_core::MistResponse, MistError> {
+            let body = if response_is_array_shaped(&self.catalog, &request.operation_id) {
+                serde_json::Value::Array(vec![secret_bearing_fixture()])
+            } else {
+                secret_bearing_fixture()
+            };
             Ok(rustmistmcp_core::MistResponse {
                 operation_id: request.operation_id,
                 status: 200,
-                body: MistResponseBody::Json(secret_bearing_fixture()),
+                body: MistResponseBody::Json(body),
                 cursor: None,
                 page: None,
             })
@@ -4637,6 +4739,7 @@ mod tests {
             "searchSiteWirelessClients",
             "searchSiteSystemEvents",
             "searchSiteAlarms",
+            "searchOrgAlarms",
             "listAlarmDefinitions",
             "listOrgAuditLogs",
             "listSiteSlesMetrics",
@@ -4696,6 +4799,47 @@ mod tests {
         }
     }
 
+    /// Tools whose result legitimately carries no device data under this
+    /// sweep's fixture and single self-approving caller, so neither a
+    /// success assertion nor a fixture-marker assertion applies to them:
+    /// `get_mist_operation_schema`/`search_mist_operations` answer from
+    /// catalog metadata, not a device response; `list_mist_orgs` answers from
+    /// the server's local configured-org allowlist; `approve_mist_change_set`
+    /// is correctly refused because the sweep's single caller is also the
+    /// plan's owner; `apply_mist_change_set` is correctly refused in turn
+    /// because approval never happened.
+    const NO_DEVICE_DATA_TOOLS: &[&str] = &[
+        "get_mist_operation_schema",
+        "search_mist_operations",
+        "list_mist_orgs",
+        "approve_mist_change_set",
+        "apply_mist_change_set",
+    ];
+
+    /// MEC-710 / F3: a tool-level failure comes back as
+    /// `Ok(CallToolResult { is_error: Some(true), .. })`, not `Err`, so
+    /// `assert_no_secret_leak` alone passes on a call that never reached the
+    /// fixture at all -- proving nothing about redaction. This asserts the
+    /// call actually succeeded and that the fixture's own marker shows up in
+    /// the output, for every tool except [`NO_DEVICE_DATA_TOOLS`].
+    fn assert_reached_fixture(tool: &str, result: &CallToolResult) {
+        if NO_DEVICE_DATA_TOOLS.contains(&tool) {
+            return;
+        }
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "{tool} must succeed against the fixture to prove anything about redaction, \
+             got an error result: {result:?}"
+        );
+        let rendered = format!("{result:?}");
+        assert!(
+            rendered.contains(FIXTURE_MARKER),
+            "{tool} never reached the fixture (no {FIXTURE_MARKER:?} marker in the output), \
+             so it proves nothing about redaction: {rendered}"
+        );
+    }
+
     /// MEC-699: every tool that can return device data must run its response
     /// through `mecmcp_redact` before the model ever sees it. This is a
     /// regression guard, not a design proof -- it iterates the server's own
@@ -4713,7 +4857,9 @@ mod tests {
             "https://api.mist.com/",
             vec![FIXTURE_ORG_ID.to_owned()],
             BTreeMap::from([(FIXTURE_SITE_ID.to_owned(), FIXTURE_ORG_ID.to_owned())]),
-            Arc::new(SecretLeakClient),
+            Arc::new(SecretLeakClient {
+                catalog: Arc::new(Catalog::embedded().expect("embedded catalog")),
+            }),
             None,
             // Lab mode auto-waives approval at plan time, so this single
             // caller can drive the full plan -> approve -> apply lifecycle
@@ -4735,6 +4881,7 @@ mod tests {
                     .await
                     .unwrap_or_else(|error| panic!("{name} transport error: {error}"));
                 assert_no_secret_leak(name, &result);
+                assert_reached_fixture(name, &result);
                 result
             }};
         }
@@ -4856,6 +5003,7 @@ mod tests {
                 .await
                 .expect("list_mist_orgs transport error");
             assert_no_secret_leak("list_mist_orgs", &result);
+            assert_reached_fixture("list_mist_orgs", &result);
         }
         sweep!(
             list_mist_rogues,
@@ -4945,6 +5093,7 @@ mod tests {
                 .await
                 .expect("search_mist_operations transport error");
             assert_no_secret_leak("search_mist_operations", &result);
+            assert_reached_fixture("search_mist_operations", &result);
         }
         sweep!(
             search_mist_peer_paths,
