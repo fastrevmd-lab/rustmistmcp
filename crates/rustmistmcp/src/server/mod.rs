@@ -4750,7 +4750,7 @@ mod tests {
             "listAlarmDefinitions",
             "listOrgAuditLogs",
             "listSiteSlesMetrics",
-            "getSiteSleSummary",
+            "getSiteSleSummaryTrend",
             "getSiteSleImpactSummary",
             "getSiteInsightMetrics",
             "listSiteTroubleshootCalls",
