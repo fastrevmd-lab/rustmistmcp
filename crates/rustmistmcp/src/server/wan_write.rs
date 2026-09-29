@@ -127,9 +127,14 @@ pub(crate) const REDACTION_PLACEHOLDER: &str = "[REDACTED]";
 /// `"[REDACTED]"` in the preview either way. Refusing the literal forces the
 /// model to either omit the field (merge-patch preserves it unchanged) or
 /// supply the real value.
+///
+/// The check is a substring match, not an equality match: some fields (for
+/// example `additional_config_cmds`, a list of raw CLI lines) embed the
+/// redacted value inside a larger string rather than replacing the whole
+/// field, and an equality check would let those reach the write.
 pub(crate) fn reject_redaction_placeholder(patch: &serde_json::Value) -> Result<(), PatchError> {
     match patch {
-        serde_json::Value::String(value) if value == REDACTION_PLACEHOLDER => {
+        serde_json::Value::String(value) if value.contains(REDACTION_PLACEHOLDER) => {
             Err(PatchError::RedactionPlaceholder)
         }
         serde_json::Value::Object(map) => {
@@ -350,11 +355,19 @@ mod tests {
             reject_redaction_placeholder(&json!({"name": "branch", "vlan_id": 20})),
             Ok(())
         );
-        // A value that merely contains the placeholder as a substring, rather
-        // than equalling it exactly, is not the redaction marker.
+        // The placeholder embedded mid-string (not just as the whole value)
+        // must still be refused -- an equality check would miss this.
         assert_eq!(
             reject_redaction_placeholder(&json!({"note": "field is [REDACTED] upstream"})),
-            Ok(())
+            Err(PatchError::RedactionPlaceholder)
+        );
+        // The repro from review: a CLI line in additional_config_cmds that
+        // echoes the placeholder mid-line, rather than as the whole value.
+        assert_eq!(
+            reject_redaction_placeholder(&json!({
+                "additional_config_cmds": ["set system radius-server 10.0.0.1 secret [REDACTED]"]
+            })),
+            Err(PatchError::RedactionPlaceholder)
         );
     }
 }

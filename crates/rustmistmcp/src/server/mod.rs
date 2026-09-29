@@ -4610,16 +4610,19 @@ mod tests {
     const FAKE_RADIUS_MACK: &str = "FAKE-RADIUS-MACK-f6g7h8i9j0";
     const FAKE_WEP_KEY: &str = "FAKE-WEP-KEY-0102030405";
 
-    const FIXTURE_SECRETS: &[&str] = &[
-        FAKE_WLAN_PSK,
-        FAKE_RADIUS_SECRET,
-        FAKE_SNMP_COMMUNITY,
-        FAKE_API_KEY,
-        FAKE_BGP_AUTH_KEY,
-        FAKE_OSPF_AUTH_KEY,
-        FAKE_RADIUS_KEK,
-        FAKE_RADIUS_MACK,
-        FAKE_WEP_KEY,
+    /// Paired with the constant's own name, not its value, so a leak failure
+    /// can name which fixture secret leaked without printing the secret
+    /// itself into the test log (CodeQL `rust/cleartext-logging`).
+    const FIXTURE_SECRETS: &[(&str, &str)] = &[
+        ("FAKE_WLAN_PSK", FAKE_WLAN_PSK),
+        ("FAKE_RADIUS_SECRET", FAKE_RADIUS_SECRET),
+        ("FAKE_SNMP_COMMUNITY", FAKE_SNMP_COMMUNITY),
+        ("FAKE_API_KEY", FAKE_API_KEY),
+        ("FAKE_BGP_AUTH_KEY", FAKE_BGP_AUTH_KEY),
+        ("FAKE_OSPF_AUTH_KEY", FAKE_OSPF_AUTH_KEY),
+        ("FAKE_RADIUS_KEK", FAKE_RADIUS_KEK),
+        ("FAKE_RADIUS_MACK", FAKE_RADIUS_MACK),
+        ("FAKE_WEP_KEY", FAKE_WEP_KEY),
     ];
 
     /// A fixture marker present on every response this client returns, so a
@@ -4786,28 +4789,34 @@ mod tests {
         }
     }
 
-    /// Panics naming the tool and leaked secret, rather than a bare
-    /// `assert!`, so a failure here points straight at which tool and which
-    /// fixture value leaked without needing to re-run under a debugger.
+    /// Panics naming the tool and leaked secret's constant, rather than a
+    /// bare `assert!`, so a failure here points straight at which tool and
+    /// which fixture value leaked without needing to re-run under a
+    /// debugger. Prints the constant's *name*, not its value or the
+    /// surrounding result, so the failure message itself never echoes the
+    /// secret into the test log (CodeQL `rust/cleartext-logging`).
     fn assert_no_secret_leak(tool: &str, result: &CallToolResult) {
         let rendered = format!("{result:?}");
-        for secret in FIXTURE_SECRETS {
+        for (name, secret) in FIXTURE_SECRETS {
             assert!(
                 !rendered.contains(secret),
-                "{tool} leaked fixture secret {secret}: {rendered}"
+                "{tool} leaked fixture secret {name}"
             );
         }
     }
 
     /// Tools whose result legitimately carries no device data under this
-    /// sweep's fixture and single self-approving caller, so neither a
-    /// success assertion nor a fixture-marker assertion applies to them:
-    /// `get_mist_operation_schema`/`search_mist_operations` answer from
-    /// catalog metadata, not a device response; `list_mist_orgs` answers from
-    /// the server's local configured-org allowlist; `approve_mist_change_set`
-    /// is correctly refused because the sweep's single caller is also the
-    /// plan's owner; `apply_mist_change_set` is correctly refused in turn
-    /// because approval never happened.
+    /// sweep's fixture and single self-approving caller, so a fixture-marker
+    /// assertion does not apply to them: `get_mist_operation_schema`/
+    /// `search_mist_operations` answer from catalog metadata, not a device
+    /// response; `list_mist_orgs` answers from the server's local
+    /// configured-org allowlist; `approve_mist_change_set` is correctly
+    /// refused because the sweep's single caller is also the plan's owner
+    /// (self-approval); `apply_mist_change_set` runs in lab mode, where the
+    /// plan was already approved on creation, so it succeeds -- but its
+    /// response carries only ids/state, no device data, so it is still
+    /// exempt from the fixture-marker check. Its success is asserted
+    /// separately, below.
     const NO_DEVICE_DATA_TOOLS: &[&str] = &[
         "get_mist_operation_schema",
         "search_mist_operations",
@@ -5170,13 +5179,32 @@ mod tests {
             }))
             .expect("args")
         );
-        sweep!(
-            apply_mist_change_set,
-            serde_json::from_value::<ApplyChangeSetArgs>(serde_json::json!({
-                "change_set_id": change_set_id, "object": "network", "object_id": FIXTURE_NETWORK_ID
-            }))
-            .expect("args")
-        );
+        {
+            covered.insert("apply_mist_change_set");
+            let result = handler
+                .apply_mist_change_set(
+                    Parameters(
+                        serde_json::from_value::<ApplyChangeSetArgs>(serde_json::json!({
+                            "change_set_id": change_set_id, "object": "network",
+                            "object_id": FIXTURE_NETWORK_ID
+                        }))
+                        .expect("args"),
+                    ),
+                    ext.clone(),
+                )
+                .await
+                .expect("apply_mist_change_set transport error");
+            assert_no_secret_leak("apply_mist_change_set", &result);
+            // Lab mode approved the plan on creation, so apply must succeed
+            // here, not be refused -- the stale `NO_DEVICE_DATA_TOOLS` comment
+            // previously claimed apply was "correctly refused", which was
+            // never true under this sweep's lab-mode handler.
+            assert_eq!(
+                result.is_error,
+                Some(false),
+                "apply_mist_change_set must succeed in lab mode: {result:?}"
+            );
+        }
 
         let expected: std::collections::BTreeSet<&str> = KNOWN_TOOLS.iter().copied().collect();
         assert_eq!(

@@ -238,9 +238,17 @@ async fn plan_refuses_a_patch_containing_the_redaction_placeholder() {
     )
     .await;
 
+    // `gatewaytemplate` is a privileged object: its read requires an
+    // authenticated caller context, which this stdio harness never supplies.
+    // That means `refused.is_err()` alone is true for the wrong reason even
+    // with the redaction check removed -- the downstream privileged-read
+    // refusal would still fire. Asserting the specific error text is what
+    // proves the redaction check, not the privileged-read gate, is what
+    // refused this patch.
+    let message = refused.expect_err("the redaction placeholder must be refused");
     assert!(
-        refused.is_err(),
-        "the redaction placeholder must be refused"
+        message.contains("redaction placeholder"),
+        "expected the redaction-placeholder refusal, got: {message}"
     );
     assert!(
         recorder.requests.lock().expect("recorder").is_empty(),
