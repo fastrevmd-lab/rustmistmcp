@@ -39,6 +39,9 @@ visible rather than looking like those versions never existed.
   waives the approval gate for every caller that reaches the listener, so it
   is refused fast at startup unless `--host` resolves to loopback
   (`127.0.0.0/8` or `::1`).
+- **Container images now publish to `ghcr.io/mechubsec/rustmistmcp`** —
+  the repo moved to the mechubsec organization, and images are renamed to
+  match. Older tags were copied from the previous name.
 
 ### Fixed
 
