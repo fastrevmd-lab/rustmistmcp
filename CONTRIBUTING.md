@@ -15,7 +15,7 @@ This is a Cargo workspace (`resolver = "2"`) with two members:
 - `crates/rustmistmcp-core` — the Mist operation catalog, authorization/scope models, schema validation, and the catalog-bound `MistClient` contract
 - `crates/rustmistmcp` — the binary: CLI, MCP server (tool surface, transports), and the packaging entry point (`--bin rustmistmcp`)
 
-Generic auth, transport, audit, and change-control primitives live upstream in [`mecmcp`](https://github.com/fastrevmd-lab/mecmcp), pinned by tag in the workspace `Cargo.toml`. If you find yourself writing generic (non-Mist-specific) auth or transport code here, it probably belongs there instead — see the "Relationship to `mecmcp`" section of the README.
+Generic auth, transport, audit, and change-control primitives live upstream in [`mecmcp`](https://github.com/mechubsec/mecmcp), pinned by tag in the workspace `Cargo.toml`. If you find yourself writing generic (non-Mist-specific) auth or transport code here, it probably belongs there instead — see the "Relationship to `mecmcp`" section of the README.
 
 ## Build and test
 
@@ -44,7 +44,7 @@ cargo audit
 cargo deny check
 ```
 
-`deny.toml` pins the allowed license set and the only permitted git dependency source (`fastrevmd-lab/mecmcp`); a new dependency from anywhere else, or under a license not already on the allow list, will fail this check and needs to be justified in the PR.
+`deny.toml` pins the allowed license set and the only permitted git dependency source (`mechubsec/mecmcp`); a new dependency from anywhere else, or under a license not already on the allow list, will fail this check and needs to be justified in the PR.
 
 ### If you touch packaging, scripts, or the systemd unit
 

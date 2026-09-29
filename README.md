@@ -21,9 +21,9 @@
 gateways, WLANs, clients, SLE, and Marvis — to MCP clients as a bounded,
 auditable tool surface.
 
-Where [`rustjunosmcp`](https://github.com/fastrevmd-lab/rustjunosmcp) talks
+Where [`rustjunosmcp`](https://github.com/mechubsec/rustjunosmcp) talks
 NETCONF to individual SRX devices and
-[`rustpanosmcp`](https://github.com/fastrevmd-lab/rustpanosmcp) talks XML-API to
+[`rustpanosmcp`](https://github.com/mechubsec/rustpanosmcp) talks XML-API to
 individual PAN-OS firewalls, this server talks to a **multi-tenant cloud control
 plane**. One org-scoped call can reach every site and every access point in an
 estate, so scoping, bounded responses, and change control are not garnish here;
@@ -41,7 +41,7 @@ whole point of doing it again.
 
 ## Relationship to `mecmcp`
 
-[`mecmcp`](https://github.com/fastrevmd-lab/mecmcp) is the vendor-neutral Rust
+[`mecmcp`](https://github.com/mechubsec/mecmcp) is the vendor-neutral Rust
 foundation shared by the mechub MCP server family. This repository is a
 **consumer** of that foundation, not a fork of it:
 
@@ -344,7 +344,7 @@ targets SRX/SSR gateways and their overlay connectivity. See `KNOWN_TOOLS` in
 ## Audit forwarding to the event store
 
 The audit trail does not stay on this host. This server follows the family
-standard — [AUDIT-FORWARDING-STANDARD.md](https://github.com/fastrevmd-lab/mecmcp/blob/main/docs/AUDIT-FORWARDING-STANDARD.md).
+standard — [AUDIT-FORWARDING-STANDARD.md](https://github.com/mechubsec/mecmcp/blob/main/docs/AUDIT-FORWARDING-STANDARD.md).
 
 An audit record that only exists on the machine that produced it is not an audit
 trail: it is a log file on a box whose operator is the party the record is about.
@@ -364,7 +364,7 @@ server never truncates it.
 
 Records are written directly into SSDF's `ssdf.audit` as **hash-chained** rows,
 per SSDF's merged evidence contract, so that deleting or editing a row is
-detectable. Tracked in [mecmcp#292](https://github.com/fastrevmd-lab/mecmcp/issues/292).
+detectable. Tracked in [mecmcp#292](https://github.com/mechubsec/mecmcp/issues/292).
 
 A cheaper syslog path was designed and rejected: it works, but the records are
 unchained, and every other link here is tamper-evident by construction — plan
