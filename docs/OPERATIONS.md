@@ -143,11 +143,12 @@ server's loopback listener, so destroying the guest genuinely does end it.
 
 ## Repository security workflow prerequisite
 
-The security and release workflows run the pinned, SHA-256-verified gitleaks CLI
-(8.30.1) directly rather than `gitleaks/gitleaks-action`, which needs a paid
-`GITLEAKS_LICENSE` on organization-owned repositories. No secret is required.
-Pull requests and pushes scan only their new commits; scheduled and manual runs
-scan full history.
+The security and release workflows call the shared `mechubsec/.github` gitleaks workflow,
+pinned by commit SHA. It runs the pinned, SHA-256-verified gitleaks CLI rather
+than `gitleaks/gitleaks-action`, which needs a paid `GITLEAKS_LICENSE` on
+organization-owned repositories. No secret is required. Pull requests and
+pushes scan only their new commits; scheduled and manual runs scan full
+history. The check is reported as `secrets / gitleaks`.
 
 ## Logs and upgrades
 
