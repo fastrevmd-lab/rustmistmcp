@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 //! Responses captured from a real Mist tenant must validate.
 //!
-//! Both fixtures here are real bodies from `api.ac2.mist.com` (org `M_Lab`),
+//! Both fixtures here are real bodies from `api.ac2.mist.com` (org `Example Org`),
 //! reduced to the shape that failed and scrubbed of anything identifying. Both
 //! were rejected by v0.1.0 with `JSON body violates declared response schema`,
 //! and in both cases the response was correct and the pinned spec was narrower
@@ -23,6 +23,7 @@ fn response(operation_id: &str, body: &str) -> MistResponse {
         status: 200,
         body: MistResponseBody::Json(serde_json::from_str(body).unwrap()),
         cursor: None,
+        page: None,
     }
 }
 

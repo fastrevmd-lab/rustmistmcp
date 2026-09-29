@@ -51,6 +51,7 @@ impl MistClient for ScriptedClient {
             status: 200,
             body: MistResponseBody::Json(body),
             cursor: None,
+            page: None,
         })
     }
 }
@@ -262,12 +263,16 @@ async fn the_planner_cannot_approve_its_own_change_set() {
     .await
     .expect("plan");
     let id = planned["change_set_id"].as_str().expect("id").to_owned();
+    let plan_digest = planned["plan_digest"].as_str().expect("digest").to_owned();
 
     // Same principal — the stdio transport has one caller identity — must be refused.
     let refused = call(
         handler.clone(),
         "approve_mist_change_set",
-        serde_json::json!({"change_set_id": id, "object": "network", "object_id": NETWORK_ID}),
+        serde_json::json!({
+            "change_set_id": id, "plan_digest": plan_digest,
+            "object": "network", "object_id": NETWORK_ID
+        }),
     )
     .await;
     assert!(

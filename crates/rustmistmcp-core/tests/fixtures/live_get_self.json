@@ -3,8 +3,8 @@
   "privileges": [
     {
       "scope": "org",
-      "org_id": "81f100cf-7e3c-4411-94e3-544cd45e46d6",
-      "name": "M_Lab",
+      "org_id": "6ccc648f-8e74-417e-9f7b-1165582985f7",
+      "name": "Example Org",
       "role": "write",
       "views": [
         "org_admin"

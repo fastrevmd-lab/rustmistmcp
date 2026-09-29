@@ -9,7 +9,7 @@ workspace, pre-release packaging, and — since `mecmcp#90` closed — a real
 outbound `HttpMistClient` wired into the production path.
 
 **It has reached a live tenant.** A lab deployment runs as LXC **952** on
-**pve2** (hostname still `rustmistmcp-610`, `192.168.1.212`), and on 2026-08-10
+**pve2** (hostname still `rustmistmcp-610`, `192.0.2.212`), and on 2026-08-10
 `get_mist_self`, `get_mist_org`, and `list_mist_sites` each returned real data
 from `api.ac2.mist.com` in under 400 ms. That closed issue #11.
 
@@ -94,7 +94,11 @@ here:
 
 - Mutating tools are reachable **only** through `mecmcp-changeset`'s
   plan → digest → approve → apply → verify lifecycle. Never a direct write.
-- Read-only tools land first and stay the majority of the surface.
+- Read-only tools land first and stay the majority of the surface, but the
+  server is not read-only: batch-1 WAN edge mutations exist behind
+  `mecmcp-changeset`'s plan → approve → apply lifecycle (see
+  `docs/THREAT_MODEL.md`). Do not describe this server as read-only in code,
+  docs, or MCP client-facing instructions once a mutating tool is registered.
 - Bearer tokens carry explicit tool, **org**, and **site** scopes. Org-level
   reach is the default failure mode of this API; scoping is what contains it.
 - Responses are bounded and paginated. An org-wide client or event query returns

@@ -1,4 +1,4 @@
-//! Curated read-only Mist MCP handler.
+//! Curated Mist MCP handler: read tools plus change-set-gated WAN edge mutations.
 
 mod change_set;
 mod similarity;
@@ -52,6 +52,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "get_mist_wan_edge_stats",
     "invoke_mist_privileged_read",
     "invoke_mist_read",
+    "list_mist_alarm_definitions",
     "list_mist_applications",
     "list_mist_orgs",
     "list_mist_rogues",
@@ -174,10 +175,12 @@ pub struct MistHandler {
     ///
     /// Held here rather than reached through the coordinator, because mecmcp
     /// emits the four records from its *lifecycle* APIs -- `create_change_set`,
-    /// `approve_change_set`, `commit_operation` -- and this server drives the
-    /// coordinator through `insert_change_set` / `update_change_set` instead.
-    /// Attaching a recorder to the coordinator alone produces nothing at all
-    /// here, so the emission points are ours to place.
+    /// `approve_change_set`, `commit_operation` -- and this server only drives
+    /// `approve_mist_change_set` through the coordinator's `approve_change_set`
+    /// (MEC-408); planning and apply still go through `insert_change_set` /
+    /// `update_change_set` directly. Attaching a recorder to the coordinator
+    /// alone produces nothing at those call sites, so the emission points are
+    /// ours to place.
     evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
     /// Whether lab mode is enabled (auto-waive on creation).
     lab_mode: bool,
@@ -395,6 +398,33 @@ impl MistHandler {
             coordinator: load_coordinator(state_path, lab_mode, None)?,
             evidence: None,
             lab_mode,
+            tool_router: Self::mist_tool_router(),
+        })
+    }
+
+    /// Same as [`Self::with_client_options`], but with an evidence recorder
+    /// attached to both the coordinator and the handler, matching how
+    /// `from_config_with_lab_mode` wires production. Test-only: lets a test
+    /// inspect the evidence chain a tool call produces.
+    #[cfg(test)]
+    fn with_client_and_evidence(
+        endpoint: &str,
+        allowed_orgs: Vec<String>,
+        sites: BTreeMap<String, String>,
+        client: Arc<dyn MistClient>,
+        evidence: Arc<mecmcp_audit::recorder::EvidenceRecorder>,
+    ) -> Result<Self, MistServerError> {
+        let origin =
+            validate_mist_endpoint(endpoint).map_err(|_| MistServerError::InvalidEndpoint)?;
+        Ok(Self {
+            origin,
+            allowed_orgs: allowed_orgs.into(),
+            sites: Arc::new(sites),
+            catalog: Arc::new(Catalog::embedded()?),
+            client,
+            coordinator: load_coordinator(None, false, Some(evidence.clone()))?,
+            evidence: Some(evidence),
+            lab_mode: false,
             tool_router: Self::mist_tool_router(),
         })
     }
@@ -812,56 +842,6 @@ impl MistHandler {
         )
         .await
     }
-
-    fn operation_visible(
-        &self,
-        caller: Option<&CallerCtx<MistGrant>>,
-        operation: &MistOperation,
-    ) -> bool {
-        let dispatcher = match operation.capability {
-            MistCapability::OrdinaryRead => "invoke_mist_read",
-            MistCapability::PrivilegedRead => "invoke_mist_privileged_read",
-            _ => return false,
-        };
-        if operation.target_selectors.contains(&TargetSelector::Msp) {
-            return false;
-        }
-        let Some(caller) = caller else {
-            return operation.capability == MistCapability::OrdinaryRead;
-        };
-        if !caller.tools.allows_tool(dispatcher, RESTRICTED_TOOLS) {
-            return false;
-        }
-        let grant = caller.grant.as_ref();
-        if operation.capability == MistCapability::PrivilegedRead && grant.is_none() {
-            return false;
-        }
-        if grant.is_some_and(|grant| {
-            !grant.allows_operation(&operation.operation_id)
-                || !grant.actions.contains(&operation.capability)
-        }) {
-            return false;
-        }
-        operation
-            .target_selectors
-            .iter()
-            .all(|selector| match selector {
-                TargetSelector::None => true,
-                TargetSelector::Org => self.allowed_orgs.iter().any(|org_id| {
-                    let target = MistTarget::org(org_id).expect("validated organization");
-                    caller.devices.allows(&target.subject())
-                        && grant.is_none_or(|grant| grant.allows_target(&target))
-                }),
-                TargetSelector::Site => self.sites.iter().any(|(site_id, org_id)| {
-                    self.allowed_orgs.iter().any(|allowed| allowed == org_id)
-                        && MistTarget::site(site_id).is_ok_and(|target| {
-                            caller.devices.allows(&target.subject())
-                                && grant.is_none_or(|grant| grant.allows_target(&target))
-                        })
-                }),
-                TargetSelector::Msp => false,
-            })
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -898,6 +878,8 @@ struct ReadEnvelope {
     content_type: &'static str,
     data: serde_json::Value,
     next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page: Option<rustmistmcp_core::MistPageInfo>,
     truncated: bool,
 }
 
@@ -930,6 +912,7 @@ impl ReadEnvelope {
         let next_cursor = response
             .cursor
             .and_then(|cursor| serde_json::to_vec(&cursor).ok().map(hex::encode));
+        let page = response.page.filter(|page| !page.is_empty());
         Self {
             operation_id: response.operation_id,
             target: target.map(MistTarget::subject),
@@ -937,6 +920,7 @@ impl ReadEnvelope {
             content_type,
             data,
             next_cursor,
+            page,
             truncated: false,
         }
     }
@@ -1272,6 +1256,11 @@ read_args!(GetChangeSetArgs {
 read_args!(ApproveChangeSetArgs {
     /// Change-set identifier (64 hex characters).
     change_set_id: String,
+    /// The plan digest the approver was shown (from `plan_mist_change` or
+    /// `get_mist_change_set`). mecmcp's `ChangesetCoordinator::approve_change_set`
+    /// refuses the approval unless this matches the stored digest exactly, so an
+    /// approver who echoes the wrong digest -- or none -- cannot approve.
+    plan_digest: String,
     /// Which configuration object type. Not sent to Mist.
     #[serde(skip_serializing)]
     object: WanObjectArg,
@@ -1333,7 +1322,13 @@ read_args!(EventSearchArgs {
     #[serde(rename = "type")] r#type: Option<String>,
 });
 read_args!(AlarmSearchArgs {
-    site_id: String, ack_admin_name: Option<String>, acked: Option<bool>,
+    /// Organization UUID. Mutually exclusive with `site_id`.
+    org_id: Option<String>,
+    /// Site UUID. Mutually exclusive with `org_id`.
+    site_id: Option<String>,
+    /// Records or count distribution. Not sent to Mist.
+    #[serde(default, skip_serializing)] mode: StatsModeArg,
+    ack_admin_name: Option<String>, acked: Option<bool>,
     duration: Option<String>, end: Option<String>, group: Option<String>,
     #[schemars(range(min = 1, max = 100))] limit: Option<u32>,
     search_after: Option<String>, severity: Option<String>, sort: Option<String>,
@@ -2073,18 +2068,52 @@ impl MistHandler {
             )
             .await)
     }
-    #[tool(name = "search_mist_alarms", description = "Search site alarms.")]
+    #[tool(
+        name = "search_mist_alarms",
+        description = "Search organization or site alarms, or count them."
+    )]
     async fn search_mist_alarms(
         &self,
         Parameters(args): Parameters<AlarmSearchArgs>,
         extensions: rmcp::model::Extensions,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = match wan::resolve_scope(args.org_id.as_deref(), args.site_id.as_deref()) {
+            Ok(scope) => scope,
+            Err(_) => {
+                return Ok(tool_result::<ReadEnvelope, _>(
+                    Err(MistCallError::AmbiguousScope),
+                    ResultFormat::PrettyJson,
+                    RESULT_LIMITS,
+                ));
+            }
+        };
+        let resolved = wan::alarms(scope, args.mode.into());
         Ok(self
             .dispatch_named(
                 "search_mist_alarms",
-                "searchSiteAlarms",
+                resolved.operation_id,
                 args,
-                &["site_id"],
+                resolved.path_names,
+                MistCapability::OrdinaryRead,
+                &extensions,
+            )
+            .await)
+    }
+    #[tool(
+        name = "list_mist_alarm_definitions",
+        description = "List the constant Mist alarm definition catalog."
+    )]
+    async fn list_mist_alarm_definitions(
+        &self,
+        Parameters(args): Parameters<EmptyArgs>,
+        extensions: rmcp::model::Extensions,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(self
+            .dispatch_named(
+                "list_mist_alarm_definitions",
+                "listAlarmDefinitions",
+                args,
+                &[],
                 MistCapability::OrdinaryRead,
                 &extensions,
             )
@@ -2238,7 +2267,13 @@ impl MistHandler {
             .catalog
             .operations
             .iter()
-            .filter(|operation| self.operation_visible(caller, operation))
+            .filter(|operation| {
+                matches!(
+                    operation.capability,
+                    MistCapability::OrdinaryRead | MistCapability::PrivilegedRead
+                )
+            })
+            .filter(|operation| !operation.target_selectors.contains(&TargetSelector::Msp))
             .filter(|operation| capability.is_none_or(|value| operation.capability == value))
             .filter(|operation| {
                 target.is_none_or(|value| operation.target_selectors.contains(&value))
@@ -2686,6 +2721,12 @@ impl MistHandler {
             Some(ctx) => ctx.token_name.clone(),
             None => "stdio".to_owned(),
         };
+        // Truthful, not permissive: a stdio caller carries no verified token
+        // entry, so its actor type is unknown rather than assumed human. mecmcp's
+        // `approve_change_set` refuses anything but `Human` (mecmcp#390, the
+        // house rule that a human approves), which is exactly the outcome an
+        // unattributed caller should get.
+        let approver_actor_type = change_set::actor_type(caller);
         let mut audit = audit_scope(
             caller,
             "approve_mist_change_set",
@@ -2696,14 +2737,36 @@ impl MistHandler {
         let object: wan::WanObject = args.object.into();
         let device = change_set::object_key(object, args.object_id.as_deref());
 
-        let mut record = match self
+        // Routed through mecmcp's own lifecycle API rather than a self-managed
+        // `change_set` fetch + mutate + `update_change_set` write. The
+        // coordinator enforces, in order: the digest format is well-formed, the
+        // change set exists for this device, the approver is distinct from the
+        // owner, the approver is a verified human principal, the change set is
+        // still `Planned`, the approval window has not expired, and the
+        // `plan_digest` the caller echoed back matches the stored digest exactly
+        // -- a change set cannot be committed by an approver who never saw (or
+        // misquoted) the plan.
+        let output = match self
             .coordinator
-            .change_set(&args.change_set_id, &device)
+            .approve_change_set(
+                args.change_set_id.clone(),
+                device,
+                approver.clone(),
+                args.plan_digest.clone(),
+                approver_actor_type,
+            )
             .await
         {
-            Ok(record) => record,
+            Ok(output) => output,
             Err(error) => {
-                audit.fail(error.to_string());
+                // `field() == "change_set_id"` covers both "not found" and the
+                // self-approval refusal; only the latter is a deny rather than a
+                // plain failure, so match the message the coordinator uses for it.
+                if error.field() == "change_set_id" && error.message().contains("own plan") {
+                    audit.deny("self-approval");
+                } else {
+                    audit.fail(error.to_string());
+                }
                 return Ok(tool_result::<serde_json::Value, _>(
                     Err::<serde_json::Value, _>(error.to_string()),
                     ResultFormat::PrettyJson,
@@ -2712,88 +2775,13 @@ impl MistHandler {
             }
         };
 
-        // CRITICAL: Check self-approval BEFORE any state mutation.
-        if record.owner == approver {
-            audit.deny("self-approval");
-            return Ok(tool_result::<serde_json::Value, _>(
-                Err::<serde_json::Value, _>(
-                    "the planning principal cannot approve their own change set",
-                ),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ));
-        }
-
-        if record.state != mecmcp_changeset::ChangeSetState::Planned {
-            audit.fail(format!(
-                "change set is {}, not planned",
-                record.state.as_str()
-            ));
-            return Ok(tool_result::<serde_json::Value, _>(
-                Err::<serde_json::Value, _>(format!(
-                    "change set is {}, not planned",
-                    record.state.as_str()
-                )),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ));
-        }
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| {
-                audit.fail(format!("time error: {error}"));
-                rmcp::ErrorData::invalid_params(format!("time error: {error}"), None)
-            })?
-            .as_secs();
-
-        // v5 binds the stored preview digest into the approval, so the
-        // approval vouches for the exact preview the approver was shown rather
-        // than only for the plan. This server does store a preview -- see
-        // `change_set::stage` -- so v4, which has no preview field at all,
-        // would sign away that guarantee.
-        let approval_digest = mecmcp_changeset::digest::compute_approval_digest_v5(
-            &record.id,
-            &record.digest,
-            record
-                .preview
-                .as_ref()
-                .map(|preview| preview.digest.as_str()),
-            &record.owner,
-            &approver,
-            now,
-        );
-
-        record.approval = Some(mecmcp_changeset::ApprovalRecord {
-            approver: Some(approver.clone()),
-            approved_at_unix: now,
-            digest: approval_digest,
-            digest_version: 5,
-            waived: None,
-        });
-        record.approver = Some(approver.clone());
-        record.state = mecmcp_changeset::ChangeSetState::Approved;
-        let approved_device = record.device.clone();
-        let approved_id = record.id.clone();
-
-        if let Err(error) = self.coordinator.update_change_set(record).await {
-            audit.fail(error.to_string());
-            return Ok(tool_result::<serde_json::Value, _>(
-                Err::<serde_json::Value, _>(error.to_string()),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ));
-        }
-
-        // A second person decided. Recorded after the state write, so the trail
-        // cannot claim an approval the coordinator failed to persist.
-        if let Some(recorder) = &self.evidence {
-            let _ = &approved_device;
-            recorder.approval(&approved_id, &approved_id, &approver, "approved");
-        }
+        // The coordinator itself already recorded the `Approval` evidence entry
+        // (mecmcp `ChangesetCoordinator::approve_change_set`, after its state
+        // write) since it now owns the lifecycle transition. Recording it again
+        // here would double the approval entry in the hash-chained evidence log.
 
         let response = serde_json::json!({
-            "change_set_id": args.change_set_id,
+            "change_set_id": output.change_set_id,
             "state": "approved",
             "expires_in_seconds": self.coordinator.approval_ttl().as_secs(),
         });
@@ -3425,8 +3413,12 @@ impl ServerHandler for MistHandler {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "Read-only HPE Juniper Mist MCP server. Use named workflows first; \
-                 catalog dispatchers accept operation IDs, never methods or URLs.",
+                "HPE Juniper Mist MCP server. Read tools dominate the surface; batch-1 \
+                 WAN edge mutations exist only behind the plan_mist_change -> \
+                 approve_mist_change_set -> apply_mist_change_set lifecycle, and \
+                 approval must come from a principal other than the planner. Use \
+                 named workflows first; catalog dispatchers accept operation IDs, \
+                 never methods or URLs.",
             )
     }
 
@@ -3559,6 +3551,7 @@ mod tests {
                 status: 200,
                 body: MistResponseBody::Json(serde_json::json!({"name": "authorized"})),
                 cursor: None,
+                page: None,
             })
         }
     }
@@ -3602,6 +3595,32 @@ mod tests {
             provider_tier: None,
             on_behalf_of: None,
             actor_type: ActorType::Human,
+            client_name: None,
+            model_id: None,
+            session_id: None,
+        }
+    }
+
+    /// A caller with a given token name and actor type, and no grant. Used by
+    /// the change-set write tools (`plan_mist_change`, `approve_mist_change_set`),
+    /// which key their owner/approver distinctness and human-actor checks off
+    /// `token_name`/`actor_type` rather than a `MistGrant`.
+    fn caller_named(token_name: &str, actor_type: ActorType) -> CallerCtx<MistGrant> {
+        CallerCtx {
+            request_id: uuid::Uuid::new_v4(),
+            token_name: token_name.to_owned(),
+            devices: ScopeSet::Allowlist(vec![
+                "org/11111111-1111-1111-1111-111111111111".to_owned(),
+            ]),
+            tools: ScopeSet::Allowlist(vec![
+                "plan_mist_change".to_owned(),
+                "approve_mist_change_set".to_owned(),
+            ]),
+            grant: None,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type,
             client_name: None,
             model_id: None,
             session_id: None,
@@ -3715,6 +3734,42 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn page_limit_headers_are_surfaced_to_the_tool_caller() {
+        let handler = MistHandler::with_client(
+            "https://api.mist.com/",
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
+            Arc::new(FixedResponseClient {
+                response: rustmistmcp_core::MistResponse {
+                    operation_id: "listOrgSites".to_owned(),
+                    status: 200,
+                    body: MistResponseBody::Json(serde_json::json!([{"name": "site-a"}])),
+                    cursor: None,
+                    page: Some(rustmistmcp_core::MistPageInfo {
+                        page: Some(1),
+                        limit: Some(1),
+                        total: Some(2),
+                    }),
+                },
+            }),
+        )
+        .expect("handler");
+        let result = handler
+            .dispatch_catalogued_read(org_read("listOrgSites"), &rmcp::model::Extensions::new())
+            .await;
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let text = result.content[0]
+            .as_text()
+            .expect("text content")
+            .text
+            .clone();
+        let body: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(body["page"]["page"], 1);
+        assert_eq!(body["page"]["limit"], 1);
+        assert_eq!(body["page"]["total"], 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn cursor_shape_bounds_are_enforced_before_client_dispatch() {
         let recorder = Arc::new(RecordingClient::default());
         let handler = MistHandler::with_client(
@@ -3764,7 +3819,7 @@ mod tests {
             "listOrgSites".to_owned(),
             &Url::parse("https://api.mist.com/").expect("origin"),
             rustmistmcp_core::PaginationMode::PageLimit,
-            "next".to_owned(),
+            "2".to_owned(),
         )
         .expect("cursor")
         .with_request_context(
@@ -3900,18 +3955,21 @@ mod tests {
                 status: 200,
                 body: MistResponseBody::Json(serde_json::json!({"name": "wrong operation"})),
                 cursor: None,
+                page: None,
             },
             rustmistmcp_core::MistResponse {
                 operation_id: "getOrg".to_owned(),
                 status: 403,
                 body: MistResponseBody::Json(serde_json::json!({"detail": "forbidden"})),
                 cursor: None,
+                page: None,
             },
             rustmistmcp_core::MistResponse {
                 operation_id: "getOrg".to_owned(),
                 status: 429,
                 body: MistResponseBody::Json(serde_json::json!({"detail": "slow down"})),
                 cursor: None,
+                page: None,
             },
         ];
         for response in cases {
@@ -3950,6 +4008,7 @@ mod tests {
                     status: 200,
                     body: MistResponseBody::Json(serde_json::Value::Array(sites)),
                     cursor: None,
+                    page: None,
                 },
             }),
         )
@@ -4001,96 +4060,26 @@ mod tests {
         }
     }
 
-    #[test]
-    fn metadata_visibility_requires_an_invocable_configured_target_intersection() {
-        let org_id = "11111111-1111-1111-1111-111111111111";
-        let site_id = "22222222-2222-2222-2222-222222222222";
+    /// `search_mist_operations` is pure catalog introspection: describing an
+    /// operation and being allowed to invoke it are different privileges. A
+    /// caller scoped only to the search tool itself (no `invoke_mist_read` or
+    /// `invoke_mist_privileged_read`, no [`MistGrant`]) must still see every
+    /// catalogued operation matching the query, mirroring the same fix
+    /// already applied to `get_mist_operation_schema`.
+    #[tokio::test]
+    async fn search_mist_operations_does_not_require_execution_scope() {
         let handler = MistHandler::blocked(
             "https://api.mist.com/",
-            vec![org_id.to_owned()],
-            BTreeMap::from([(site_id.to_owned(), org_id.to_owned())]),
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
         )
         .expect("handler");
-        let get_org = handler.catalog.operation("getOrg").expect("getOrg");
-        let get_site = handler
-            .catalog
-            .operation("getSiteInfo")
-            .expect("getSiteInfo");
-        let get_self = handler.catalog.operation("getSelf").expect("getSelf");
-
-        let grantless_org = CallerCtx {
+        let introspection_only = CallerCtx {
             request_id: uuid::Uuid::new_v4(),
-            token_name: "grantless-org".to_owned(),
-            devices: ScopeSet::Allowlist(vec![format!("org/{org_id}")]),
-            tools: ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]),
-            grant: None::<MistGrant>,
-            provider: None,
-            provider_tier: None,
-            on_behalf_of: None,
-            actor_type: ActorType::Human,
-            client_name: None,
-            model_id: None,
-            session_id: None,
-        };
-        assert!(
-            handler.operation_visible(Some(&grantless_org), get_org),
-            "grantless scoped ordinary read must be discoverable when executable"
-        );
-        assert!(
-            !handler.operation_visible(Some(&grantless_org), get_site),
-            "configured inventory still intersects caller target scope"
-        );
-        let grantless_site = CallerCtx {
-            request_id: uuid::Uuid::new_v4(),
-            token_name: "grantless-site".to_owned(),
-            devices: ScopeSet::Allowlist(vec![format!("site/{site_id}")]),
-            tools: ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]),
-            grant: None::<MistGrant>,
-            provider: None,
-            provider_tier: None,
-            on_behalf_of: None,
-            actor_type: ActorType::Human,
-            client_name: None,
-            model_id: None,
-            session_id: None,
-        };
-        assert!(handler.operation_visible(Some(&grantless_site), get_site));
-        let missing_dispatcher_scope = CallerCtx {
+            token_name: "introspection-only".to_owned(),
+            devices: ScopeSet::Allowlist(Vec::new()),
             tools: ScopeSet::Allowlist(vec!["search_mist_operations".to_owned()]),
-            ..grantless_org.clone()
-        };
-        assert!(!handler.operation_visible(Some(&missing_dispatcher_scope), get_org));
-        let grantless_privileged = CallerCtx {
-            tools: ScopeSet::Allowlist(vec!["invoke_mist_privileged_read".to_owned()]),
-            ..grantless_org.clone()
-        };
-        assert!(
-            !handler.operation_visible(Some(&grantless_privileged), get_self),
-            "privileged metadata remains hidden without an exact grant"
-        );
-        let privileged_exact = CallerCtx {
-            grant: Some(MistGrant {
-                allowed_operations: vec!["getSelf".to_owned()],
-                actions: vec![MistCapability::PrivilegedRead],
-                subjects: vec![MistTarget::org(org_id).expect("target")],
-            }),
-            ..grantless_privileged
-        };
-        assert!(
-            handler.operation_visible(Some(&privileged_exact), get_self),
-            "privileged metadata is visible only with exact tool and grant authority"
-        );
-
-        let ordinary_wildcard = CallerCtx {
-            request_id: uuid::Uuid::new_v4(),
-            token_name: "ordinary".to_owned(),
-            devices: ScopeSet::Wildcard,
-            tools: ScopeSet::Wildcard,
-            grant: Some(MistGrant {
-                allowed_operations: vec!["getOrg".to_owned(), "getSelf".to_owned()],
-                actions: vec![MistCapability::OrdinaryRead, MistCapability::PrivilegedRead],
-                subjects: vec![MistTarget::org(org_id).expect("target")],
-            }),
+            grant: None::<MistGrant>,
             provider: None,
             provider_tier: None,
             on_behalf_of: None,
@@ -4099,23 +4088,99 @@ mod tests {
             model_id: None,
             session_id: None,
         };
-        assert!(handler.operation_visible(Some(&ordinary_wildcard), get_org));
-        assert!(
-            !handler.operation_visible(Some(&ordinary_wildcard), get_self),
-            "wildcard tool scope must not expose the restricted dispatcher"
-        );
 
-        let out_of_scope = CallerCtx {
-            devices: ScopeSet::Allowlist(vec![
-                "org/44444444-4444-4444-4444-444444444444".to_owned(),
-            ]),
-            tools: ScopeSet::Allowlist(vec!["invoke_mist_read".to_owned()]),
-            ..ordinary_wildcard
-        };
+        let result = handler
+            .search_mist_operations(
+                Parameters(SearchOperationsArgs {
+                    query: "getself".to_owned(),
+                    capability: Some(SearchCapability::PrivilegedRead),
+                    target: None,
+                    limit: None,
+                }),
+                extensions(introspection_only),
+            )
+            .await
+            .expect("call succeeds");
+
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let text = result.content[0]
+            .as_text()
+            .expect("text content")
+            .text
+            .clone();
+        let matches: Vec<serde_json::Value> = serde_json::from_str(&text).expect("valid JSON");
         assert!(
-            !handler.operation_visible(Some(&out_of_scope), get_org),
-            "grant subjects without caller.devices intersection are not invocable"
+            matches
+                .iter()
+                .any(|operation| operation["operation_id"] == "getSelf"),
+            "a token with no invoke_mist_privileged_read scope and no grant must still \
+             discover the privileged getSelf operation by search: {matches:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn search_mist_operations_only_returns_invocable_reads() {
+        let handler = MistHandler::blocked(
+            "https://api.mist.com/",
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
+        )
+        .expect("handler");
+        let introspection_only = CallerCtx {
+            request_id: uuid::Uuid::new_v4(),
+            token_name: "introspection-only".to_owned(),
+            devices: ScopeSet::Allowlist(Vec::new()),
+            tools: ScopeSet::Allowlist(vec!["search_mist_operations".to_owned()]),
+            grant: None::<MistGrant>,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: ActorType::Human,
+            client_name: None,
+            model_id: None,
+            session_id: None,
+        };
+
+        let result = handler
+            .search_mist_operations(
+                Parameters(SearchOperationsArgs {
+                    query: "org".to_owned(),
+                    capability: None,
+                    target: None,
+                    limit: Some(50),
+                }),
+                extensions(introspection_only),
+            )
+            .await
+            .expect("call succeeds");
+
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let text = result.content[0]
+            .as_text()
+            .expect("text content")
+            .text
+            .clone();
+        let matches: Vec<serde_json::Value> = serde_json::from_str(&text).expect("valid JSON");
+        assert!(
+            !matches.is_empty(),
+            "search must surface invocable read operations, not just an empty list"
+        );
+        for operation in &matches {
+            let capability = operation["capability"]
+                .as_str()
+                .expect("capability is a string");
+            assert!(
+                capability == "ordinary_read" || capability == "privileged_read",
+                "search must not surface non-read operations that invoke_mist_read/invoke_mist_privileged_read cannot dispatch: {operation:?}"
+            );
+            let targets = operation["target_selectors"]
+                .as_array()
+                .expect("target_selectors is an array");
+            assert!(
+                !targets.iter().any(|target| target == "msp"),
+                "search must not surface MSP-targeted operations that dispatch_named rejects: {operation:?}"
+            );
+        }
     }
 
     #[test]
@@ -4240,6 +4305,95 @@ mod tests {
             !output.contains("tool=audit_race_noise"),
             "noisy thread emissions must not leak into this thread's capture; \
              output: {output}"
+        );
+    }
+
+    /// Percy's MEC-425 review of PR#124: mecmcp's `ChangesetCoordinator::
+    /// approve_change_set` (v0.24.1) already emits an `Approval` evidence
+    /// record after its state write. `approve_mist_change_set` used to emit
+    /// its own, on top of that, so every approved change set carried two
+    /// `Approval` entries in the hash-chained evidence log -- the one fact
+    /// two-person control exists to prove. This fails against the pre-fix
+    /// handler (count == 2) and passes once the handler's own
+    /// `recorder.approval(...)` call is removed.
+    #[tokio::test]
+    async fn approving_a_change_set_records_exactly_one_approval_evidence_entry() {
+        let evidence = Arc::new(mecmcp_audit::recorder::EvidenceRecorder::new(
+            mecmcp_audit::recorder::RecorderConfig {
+                server_id: "rustmistmcp-test".to_owned(),
+                run_id: "approval-dedup".to_owned(),
+                resume_from: None,
+                records_per_segment: 64,
+            },
+        ));
+        let handler = MistHandler::with_client_and_evidence(
+            "https://api.mist.com/",
+            vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            BTreeMap::new(),
+            Arc::new(RecordingClient::default()),
+            evidence.clone(),
+        )
+        .expect("handler");
+
+        let planned = handler
+            .plan_mist_change(
+                Parameters(PlanChangeArgs {
+                    object: WanObjectArg::Network,
+                    verb: WriteVerbArg::Create,
+                    org_id: "11111111-1111-1111-1111-111111111111".to_owned(),
+                    object_id: None,
+                    patch: serde_json::json!({"name": "branch"}),
+                }),
+                extensions(caller_named("owner", ActorType::Human)),
+            )
+            .await
+            .expect("plan call");
+        assert_ne!(planned.is_error, Some(true), "{planned:?}");
+        let planned_text = planned.content[0]
+            .as_text()
+            .expect("plan text content")
+            .text
+            .clone();
+        let planned_json: serde_json::Value =
+            serde_json::from_str(&planned_text).expect("plan JSON");
+        let change_set_id = planned_json["change_set_id"]
+            .as_str()
+            .expect("change_set_id")
+            .to_owned();
+        let plan_digest = planned_json["plan_digest"]
+            .as_str()
+            .expect("plan_digest")
+            .to_owned();
+
+        let approved = handler
+            .approve_mist_change_set(
+                Parameters(ApproveChangeSetArgs {
+                    change_set_id: change_set_id.clone(),
+                    plan_digest,
+                    object: WanObjectArg::Network,
+                    object_id: None,
+                }),
+                extensions(caller_named("human-approver", ActorType::Human)),
+            )
+            .await
+            .expect("approve call");
+        assert_ne!(approved.is_error, Some(true), "{approved:?}");
+
+        let segment = evidence.close_current().expect("closed segment");
+        let approval_count = segment
+            .records()
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record,
+                    mecmcp_audit::evidence::EvidenceRecord::Approval(approval)
+                        if approval.changeset_id == change_set_id
+                )
+            })
+            .count();
+        assert_eq!(
+            approval_count, 1,
+            "exactly one Approval evidence record must exist per change set, got {approval_count}"
         );
     }
 }

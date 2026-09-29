@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::catalog::{Catalog, MistOperation};
-use crate::{MistCursor, MistError};
+use crate::{MistCursor, MistError, MistPageInfo};
 
 const MAX_OPERATION_ID_BYTES: usize = 256;
 const MAX_PATH_VALUES: usize = 8;
@@ -57,6 +57,9 @@ pub struct MistResponse {
     /// An optional opaque continuation supplied by that client.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<MistCursor>,
+    /// Parsed `X-Page-*` pagination headers, when the client supplied any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<MistPageInfo>,
 }
 
 /// A response representation supplied by an injected client.

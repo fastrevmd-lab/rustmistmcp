@@ -107,6 +107,22 @@ impl MistClient for RecordingClient {
                 "total": 0,
                 "results": []
             }),
+            "searchOrgAlarms" | "searchSiteAlarms" => serde_json::json!({
+                "start": 0,
+                "end": 0,
+                "limit": 10,
+                "total": 0,
+                "results": []
+            }),
+            "countOrgAlarms" | "countSiteAlarms" => serde_json::json!({
+                "distinct": "type",
+                "start": 0,
+                "end": 0,
+                "limit": 10,
+                "total": 0,
+                "results": []
+            }),
+            "listAlarmDefinitions" => serde_json::json!([]),
             "searchSiteServicePathEvents" => serde_json::json!({
                 "start": 0,
                 "end": 0,
@@ -171,6 +187,7 @@ impl MistClient for RecordingClient {
             status: 200,
             body: MistResponseBody::Json(body),
             cursor: None,
+            page: None,
         })
     }
 }
@@ -356,6 +373,59 @@ async fn bgp_peers_resolve_scope_and_mode() {
         .await
         .is_err(),
         "missing scope must be refused"
+    );
+}
+
+#[tokio::test]
+async fn alarms_resolve_scope_and_mode() {
+    for (args, expected) in [
+        (serde_json::json!({"org_id": ORG_ID}), "searchOrgAlarms"),
+        (
+            serde_json::json!({"org_id": ORG_ID, "mode": "count"}),
+            "countOrgAlarms",
+        ),
+        (serde_json::json!({"site_id": SITE_ID}), "searchSiteAlarms"),
+        (
+            serde_json::json!({"site_id": SITE_ID, "mode": "count"}),
+            "countSiteAlarms",
+        ),
+    ] {
+        let request = record_call("search_mist_alarms", args.clone())
+            .await
+            .unwrap_or_else(|error| panic!("call {args} failed: {error}"));
+        assert_eq!(request.operation_id, expected, "for {args}");
+        assert!(
+            !request.query.contains_key("mode"),
+            "mode is a tool selector and must not reach Mist, for {args}"
+        );
+    }
+
+    assert!(
+        record_call(
+            "search_mist_alarms",
+            serde_json::json!({"org_id": ORG_ID, "site_id": SITE_ID})
+        )
+        .await
+        .is_err(),
+        "both scopes must be refused"
+    );
+    assert!(
+        record_call("search_mist_alarms", serde_json::json!({}))
+            .await
+            .is_err(),
+        "missing scope must be refused"
+    );
+}
+
+#[tokio::test]
+async fn alarm_definitions_are_scope_free() {
+    let request = record_call("list_mist_alarm_definitions", serde_json::json!({}))
+        .await
+        .expect("call");
+    assert_eq!(request.operation_id, "listAlarmDefinitions");
+    assert!(
+        request.path.is_empty(),
+        "the const catalog takes no path parameters"
     );
 }
 
