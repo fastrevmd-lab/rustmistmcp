@@ -23,8 +23,8 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use rustmistmcp_core::{
-    BlockedMistClient, Catalog, MAX_ENCODED_CURSOR_BYTES, MistClient, MistError, MistGrant,
-    MistRequest, MistResponseBody, MistTarget,
+    BlockedMistClient, BudgetStatus, CallPriority, Catalog, MAX_ENCODED_CURSOR_BYTES, MistClient,
+    MistError, MistGrant, MistRequest, MistResponseBody, MistTarget,
     catalog::{MistCapability, MistOperation, TargetSelector},
     validate_mist_endpoint,
 };
@@ -152,6 +152,30 @@ pub enum MistServerError {
     ChangeSetState(String),
 }
 
+/// Validate a candidate site map against the bounds the handler enforces:
+/// every site ID and its recorded org ID must be canonical UUIDs, the org
+/// must be in the configured allowlist, and the map must not exceed the
+/// tracked-site ceiling.
+///
+/// Shared by both constructors and by [`MistHandler::replace_sites`], so a
+/// discovery refresh can never install a map the constructor itself would
+/// have rejected.
+fn validate_sites(
+    sites: &BTreeMap<String, String>,
+    allowed_orgs: &[String],
+) -> Result<(), MistServerError> {
+    if sites.len() > 4096
+        || sites.iter().any(|(site_id, org_id)| {
+            MistTarget::site(site_id).is_err()
+                || MistTarget::org(org_id).is_err()
+                || !allowed_orgs.iter().any(|allowed| allowed == org_id)
+        })
+    {
+        return Err(MistServerError::InvalidOrganization);
+    }
+    Ok(())
+}
+
 /// Mist MCP handler with catalogued reads and change-set-gated writes.
 ///
 /// Serves read-only Mist tools and mutating tools gated through the
@@ -163,8 +187,13 @@ pub struct MistHandler {
     origin: Url,
     #[allow(dead_code)]
     allowed_orgs: Arc<[String]>,
-    /// Immutable site inventory discovered during startup, keyed by site UUID.
-    sites: Arc<BTreeMap<String, String>>,
+    /// Site inventory discovered at startup and refreshed periodically by
+    /// `crate::site_discovery`, keyed by site UUID.
+    ///
+    /// `RwLock` rather than an atomic-swap crate: a refresh happens roughly
+    /// once every few minutes, every read is synchronous and never held
+    /// across an `.await`, and this avoids a new dependency for that.
+    sites: Arc<std::sync::RwLock<BTreeMap<String, String>>>,
     #[allow(dead_code)]
     catalog: Arc<Catalog>,
     client: Arc<dyn MistClient>,
@@ -246,6 +275,58 @@ impl MistHandler {
         &self.client
     }
 
+    /// The catalog this handler validates requests and responses against.
+    ///
+    /// Exposed so startup and periodic site discovery (`crate::site_discovery`)
+    /// can validate and issue `listOrgSites` requests through the same
+    /// catalog the handler dispatches with, rather than loading a second copy.
+    #[must_use]
+    pub fn catalog(&self) -> &Arc<Catalog> {
+        &self.catalog
+    }
+
+    /// The validated Mist API origin this handler was constructed against.
+    #[must_use]
+    pub fn origin(&self) -> &Url {
+        &self.origin
+    }
+
+    /// The configured organization allowlist.
+    #[must_use]
+    pub fn allowed_orgs(&self) -> &Arc<[String]> {
+        &self.allowed_orgs
+    }
+
+    /// Atomically replace the discovered site map.
+    ///
+    /// Used by the periodic site-discovery refresh (`crate::site_discovery`)
+    /// so newly added or removed sites are picked up without a restart.
+    /// Re-validated exactly as the constructors validate their initial
+    /// `sites` argument, so a discovered map naming an org outside the
+    /// allowlist, or a malformed ID, never reaches request dispatch.
+    ///
+    /// # Errors
+    /// Returns an error, leaving the previous map in place, when `sites`
+    /// fails the bounds the constructors enforce.
+    pub fn replace_sites(&self, sites: BTreeMap<String, String>) -> Result<(), MistServerError> {
+        validate_sites(&sites, &self.allowed_orgs)?;
+        *self.sites.write().expect("mist site map lock poisoned") = sites;
+        Ok(())
+    }
+
+    /// Snapshot the current site map.
+    ///
+    /// Used by `crate::site_discovery`'s refresh loop to carry forward the
+    /// sites of an org whose discovery pass failed or was truncated this
+    /// round, so a transient error never wipes out sites already known; also
+    /// used by tests to observe that a background refresh landed.
+    pub(crate) fn sites_snapshot(&self) -> BTreeMap<String, String> {
+        self.sites
+            .read()
+            .expect("mist site map lock poisoned")
+            .clone()
+    }
+
     /// Construct a production handler with real HTTPS client.
     ///
     /// Loads the credential from the config's credential_file and constructs
@@ -319,19 +400,11 @@ impl MistHandler {
         {
             return Err(MistServerError::InvalidOrganization);
         }
-        if sites.len() > 4096
-            || sites.iter().any(|(site_id, org_id)| {
-                MistTarget::site(site_id).is_err()
-                    || MistTarget::org(org_id).is_err()
-                    || !allowed_orgs.iter().any(|allowed| allowed == org_id)
-            })
-        {
-            return Err(MistServerError::InvalidOrganization);
-        }
+        validate_sites(&sites, allowed_orgs)?;
         Ok(Self {
             origin,
             allowed_orgs: allowed_orgs.clone().into(),
-            sites: Arc::new(sites),
+            sites: Arc::new(std::sync::RwLock::new(sites)),
             catalog,
             client: Arc::new(http_client),
             coordinator,
@@ -380,19 +453,11 @@ impl MistHandler {
         {
             return Err(MistServerError::InvalidOrganization);
         }
-        if sites.len() > 4096
-            || sites.iter().any(|(site_id, org_id)| {
-                MistTarget::site(site_id).is_err()
-                    || MistTarget::org(org_id).is_err()
-                    || !allowed_orgs.iter().any(|allowed| allowed == org_id)
-            })
-        {
-            return Err(MistServerError::InvalidOrganization);
-        }
+        validate_sites(&sites, &allowed_orgs)?;
         Ok(Self {
             origin,
             allowed_orgs: allowed_orgs.into(),
-            sites: Arc::new(sites),
+            sites: Arc::new(std::sync::RwLock::new(sites)),
             catalog: Arc::new(Catalog::embedded()?),
             client,
             coordinator: load_coordinator(state_path, lab_mode, None)?,
@@ -419,7 +484,7 @@ impl MistHandler {
         Ok(Self {
             origin,
             allowed_orgs: allowed_orgs.into(),
-            sites: Arc::new(sites),
+            sites: Arc::new(std::sync::RwLock::new(sites)),
             catalog: Arc::new(Catalog::embedded()?),
             client,
             coordinator: load_coordinator(None, false, Some(evidence.clone()))?,
@@ -567,7 +632,12 @@ impl MistHandler {
                     None
                 }
             } else if target.to_string().starts_with("site/") {
-                match self.sites.get(target.id()) {
+                match self
+                    .sites
+                    .read()
+                    .expect("mist site map lock poisoned")
+                    .get(target.id())
+                {
                     None => Some(format!(
                         "site {} is not known (requires org_id for site queries, or the site's parent org in the allowlist)",
                         target.id()
@@ -625,7 +695,8 @@ impl MistHandler {
         let expected_operation_id = request.operation_id.clone();
         let request_path = request.path.clone();
         let request_query = request.query.clone();
-        let response = match self.client.execute(request).await {
+        let priority = call_priority_for(caller);
+        let response = match self.client.execute_as(request, priority).await {
             Ok(response) => response,
             Err(error) => {
                 audit.fail(&error);
@@ -636,6 +707,7 @@ impl MistHandler {
                 );
             }
         };
+        let budget_remaining = self.client.budget_status();
         if response.operation_id != expected_operation_id {
             let error = MistError::InvalidResponse {
                 operation_id: expected_operation_id,
@@ -688,7 +760,7 @@ impl MistHandler {
                     }
                 };
         }
-        let envelope = ReadEnvelope::from_response(response, target.as_ref());
+        let envelope = ReadEnvelope::from_response(response, target.as_ref(), budget_remaining);
         audited_tool_result(&mut audit, Ok::<_, MistCallError>(envelope))
     }
 
@@ -881,6 +953,10 @@ struct ReadEnvelope {
     #[serde(skip_serializing_if = "Option::is_none")]
     page: Option<rustmistmcp_core::MistPageInfo>,
     truncated: bool,
+    /// This token's hourly Mist call budget headroom after this call, when
+    /// the injected client tracks one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_remaining: Option<BudgetStatus>,
 }
 
 #[derive(Serialize)]
@@ -899,6 +975,7 @@ impl ReadEnvelope {
     fn from_response(
         response: rustmistmcp_core::MistResponse,
         target: Option<&MistTarget>,
+        budget_remaining: Option<BudgetStatus>,
     ) -> Self {
         let (content_type, data) = match response.body {
             MistResponseBody::Json(value) => ("application/json", value),
@@ -922,7 +999,24 @@ impl ReadEnvelope {
             next_cursor,
             page,
             truncated: false,
+            budget_remaining,
         }
+    }
+}
+
+/// Map a caller to the Mist hourly call budget pool it may draw from.
+///
+/// Only a token the server has verified declares `ActorType::Human` may draw
+/// on the reserve: an absent caller, an `Agent` actor, or an untagged legacy
+/// token (`ActorType::Unknown`) all get [`CallPriority::Standard`], since
+/// granting the reserve on anything less than a verified human claim would
+/// let an ordinary agent call starve the reserve it exists to protect.
+fn call_priority_for(caller: Option<&CallerCtx<MistGrant>>) -> CallPriority {
+    match caller {
+        Some(caller) if caller.actor_type == mecmcp_auth::ActorType::Human => {
+            CallPriority::Reserved
+        }
+        _ => CallPriority::Standard,
     }
 }
 
@@ -3188,7 +3282,10 @@ impl MistHandler {
             cursor: None,
         };
 
-        let write_result = self.client.execute(write_request).await;
+        let write_result = self
+            .client
+            .execute_as(write_request, call_priority_for(caller))
+            .await;
         let write_response = match write_result {
             Ok(response) => response,
             Err(error) => {

@@ -341,6 +341,8 @@ gitleaks_ignored_findings=(
     '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/mist-openapi.json:generic-api-key:1'
     '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/mist-openapi.json:jwt:1'
     '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/mist-openapi.json:private-key:1'
+    '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/catalog.json:pem-private-key:1'
+    '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/mist-openapi.json:pem-private-key:1'
 )
 if [[ -f .gitleaksignore ]]; then
     for finding in "${gitleaks_ignored_findings[@]}"; do

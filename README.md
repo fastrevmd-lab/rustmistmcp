@@ -129,6 +129,24 @@ What is *not* done, and must not be described as done:
 A handler constructed without a credential uses `BlockedMistClient`, which
 performs no I/O; `LIVE_MIST_BLOCKER` is the message it refuses with.
 
+### Site discovery
+
+Site-scoped tools refuse any site the handler does not already know (see
+"The API"). At startup, the server calls `listOrgSites` for every allowlisted
+org to populate that map before it begins serving. `--site-refresh-interval-secs`
+(default `300`) controls a background task that repeats this walk on an
+interval, so a site added or removed on the Mist side is picked up without a
+restart; `0` disables the background task and discovers once at startup only.
+
+This refresh is idle polling against the operator-configured Mist origin —
+`listOrgSites` requests every `site-refresh-interval-secs`, independent of
+tool traffic, over the same catalog-validated `MistClient` every other read
+uses. It bypasses the per-tool audit trail, since it is a read that updates
+internal server state rather than a client-initiated call. A request failure
+or hitting the tracked-site ceiling for one org during a refresh keeps that
+org's previously known sites rather than dropping them; it does not affect
+other orgs' sites.
+
 Shared `TokenSecret`, cancellation, and changeset primitives are reused, not
 rebuilt. Mist header names, catalog policy, request/response schemas, terminal
 states, retry classification, and deployment remain in this repository.
