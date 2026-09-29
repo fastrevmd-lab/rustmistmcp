@@ -20,7 +20,9 @@ pub use client::{
 };
 pub use config::{ConfigError, MistConfig, validate_mist_endpoint};
 pub use grant::MistGrant;
-pub use pagination::{MAX_ENCODED_CURSOR_BYTES, MistCursor, MistCursorRequestContext};
+pub use pagination::{
+    MAX_ENCODED_CURSOR_BYTES, MistCursor, MistCursorRequestContext, MistPageInfo,
+};
 pub use rate_limit::{BudgetExhausted, BudgetStatus, CallPriority, RateLimitBudget};
 pub use request::{MistRequest, MistResponse, MistResponseBody};
 pub use target::{MistTarget, MistTargetError};

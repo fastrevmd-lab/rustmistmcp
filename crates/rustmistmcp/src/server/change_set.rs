@@ -6,8 +6,30 @@
 
 use crate::server::wan::WanObject;
 use mecmcp_changeset::{ChangeSetRecord, ChangeSetState, CoordinatorError, digest};
+use rustmistmcp_core::MistGrant;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+
+/// Map a caller's server-verified `mecmcp_auth::ActorType` to the
+/// `mecmcp_audit::ActorType` mecmcp's `approve_change_set` requires.
+///
+/// `None` -- no authenticated caller context, i.e. the stdio transport --
+/// maps to `Unknown` rather than `Human`. Inventing `Human` for an
+/// unattributed caller would let stdio silently satisfy the human-approver
+/// gate; `Unknown` is the honest fact, and `approve_change_set` refuses it
+/// exactly like it refuses `Agent`.
+pub(crate) fn actor_type(
+    caller: Option<&mecmcp_auth::CallerCtx<MistGrant>>,
+) -> mecmcp_audit::ActorType {
+    match caller {
+        Some(ctx) => match ctx.actor_type {
+            mecmcp_auth::ActorType::Human => mecmcp_audit::ActorType::Human,
+            mecmcp_auth::ActorType::Agent => mecmcp_audit::ActorType::Agent,
+            mecmcp_auth::ActorType::Unknown => mecmcp_audit::ActorType::Unknown,
+        },
+        None => mecmcp_audit::ActorType::Unknown,
+    }
+}
 
 /// Format an object as a change-set `device` key.
 ///

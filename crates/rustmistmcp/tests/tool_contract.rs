@@ -38,6 +38,7 @@ async fn registry_contains_only_the_approved_read_tools() {
         "get_mist_wan_edge_stats",
         "invoke_mist_privileged_read",
         "invoke_mist_read",
+        "list_mist_alarm_definitions",
         "list_mist_applications",
         "list_mist_orgs",
         "list_mist_rogues",
@@ -223,8 +224,12 @@ impl MistClient for PagingClient {
                 request.operation_id,
                 &url::Url::parse("https://api.mist.com/").expect("origin"),
                 mode,
-                "next-page".to_owned(),
+                match mode {
+                    PaginationMode::PageLimit => "2".to_owned(),
+                    _ => "next-page".to_owned(),
+                },
             )?),
+            page: None,
         })
     }
 }
@@ -254,6 +259,7 @@ impl MistClient for RecordingClient {
             status: 200,
             body: MistResponseBody::Json(serde_json::json!({"name": "Example Org"})),
             cursor: None,
+            page: None,
         })
     }
 }
@@ -386,6 +392,26 @@ async fn every_remote_named_workflow_resolves_to_its_one_approved_operation() {
             "search_mist_alarms",
             serde_json::json!({"site_id": site, "acked": false, "limit": 25}),
             "searchSiteAlarms",
+        ),
+        (
+            "search_mist_alarms",
+            serde_json::json!({"org_id": ORG_ID, "limit": 25}),
+            "searchOrgAlarms",
+        ),
+        (
+            "search_mist_alarms",
+            serde_json::json!({"site_id": site, "mode": "count"}),
+            "countSiteAlarms",
+        ),
+        (
+            "search_mist_alarms",
+            serde_json::json!({"org_id": ORG_ID, "mode": "count"}),
+            "countOrgAlarms",
+        ),
+        (
+            "list_mist_alarm_definitions",
+            serde_json::json!({}),
+            "listAlarmDefinitions",
         ),
         (
             "search_mist_audit_logs",
@@ -842,4 +868,34 @@ async fn invalid_targets_parameters_limits_and_msp_selectors_never_reach_the_cli
 
     client.cancel().await.expect("client shutdown");
     server_task.abort();
+}
+
+#[test]
+fn server_instructions_do_not_claim_read_only() {
+    use rmcp::ServerHandler;
+
+    let handler =
+        MistHandler::blocked("https://api.mist.com/", vec![ORG_ID.to_owned()], site_map())
+            .expect("valid blocked handler");
+    let instructions = handler
+        .get_info()
+        .instructions
+        .expect("server instructions present");
+    // #120: the instructions called the server read-only after the WAN edge
+    // change-set write tools had been registered.
+    assert!(
+        !instructions.to_ascii_lowercase().contains("read-only"),
+        "instructions must not describe a server with mutating tools as read-only: {instructions}"
+    );
+    for tool in [
+        "plan_mist_change",
+        "approve_mist_change_set",
+        "apply_mist_change_set",
+    ] {
+        assert!(KNOWN_TOOLS.contains(&tool));
+        assert!(
+            instructions.contains(tool),
+            "instructions must name the {tool} lifecycle step"
+        );
+    }
 }

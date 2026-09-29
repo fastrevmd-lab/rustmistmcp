@@ -128,6 +128,28 @@ pub(crate) fn bgp_peers(scope: WanScope, mode: StatsMode) -> Resolved {
     }
 }
 
+/// Resolve alarm search/count for a scope and mode.
+pub(crate) fn alarms(scope: WanScope, mode: StatsMode) -> Resolved {
+    match (scope, mode) {
+        (WanScope::Org, StatsMode::Records) => Resolved {
+            operation_id: "searchOrgAlarms",
+            path_names: &["org_id"],
+        },
+        (WanScope::Org, StatsMode::Count) => Resolved {
+            operation_id: "countOrgAlarms",
+            path_names: &["org_id"],
+        },
+        (WanScope::Site, StatsMode::Records) => Resolved {
+            operation_id: "searchSiteAlarms",
+            path_names: &["site_id"],
+        },
+        (WanScope::Site, StatsMode::Count) => Resolved {
+            operation_id: "countSiteAlarms",
+            path_names: &["site_id"],
+        },
+    }
+}
+
 /// Resolve service path events for a mode.
 pub(crate) fn service_path_events(mode: StatsMode) -> Resolved {
     match mode {
@@ -379,6 +401,38 @@ mod tests {
             Resolved {
                 operation_id: "countOrgPeerPathStats",
                 path_names: &["org_id"]
+            }
+        );
+    }
+
+    #[test]
+    fn alarms_resolve_all_four_combinations() {
+        assert_eq!(
+            alarms(WanScope::Org, StatsMode::Records),
+            Resolved {
+                operation_id: "searchOrgAlarms",
+                path_names: &["org_id"]
+            }
+        );
+        assert_eq!(
+            alarms(WanScope::Org, StatsMode::Count),
+            Resolved {
+                operation_id: "countOrgAlarms",
+                path_names: &["org_id"]
+            }
+        );
+        assert_eq!(
+            alarms(WanScope::Site, StatsMode::Records),
+            Resolved {
+                operation_id: "searchSiteAlarms",
+                path_names: &["site_id"]
+            }
+        );
+        assert_eq!(
+            alarms(WanScope::Site, StatsMode::Count),
+            Resolved {
+                operation_id: "countSiteAlarms",
+                path_names: &["site_id"]
             }
         );
     }
