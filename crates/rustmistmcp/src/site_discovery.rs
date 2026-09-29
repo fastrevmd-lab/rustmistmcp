@@ -309,6 +309,7 @@ mod tests {
                 status: 200,
                 body: MistResponseBody::Json(serde_json::Value::Array(sites)),
                 cursor: None,
+                page: None,
             })
         }
     }

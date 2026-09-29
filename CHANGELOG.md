@@ -10,6 +10,44 @@ visible rather than looking like those versions never existed.
 
 ## [Unreleased]
 
+### Added
+
+- **Threat model and token-role guidance docs** (#120). `docs/THREAT_MODEL.md`
+  documents trust boundaries, security principals, and the blast radius of a
+  compromised MCP token, compromised Mist API token, or compromised agent
+  against a real Mist org, plus mitigations in place vs. planned.
+  `docs/TOKEN_ROLE_GUIDANCE.md` recommends a dedicated, least-privilege Mist
+  organization API token over a personal or super-admin token.
+
+### Changed
+
+- **Re-pinned the `mecmcp-*` crates from `v0.23.0` to `v0.24.1`** (MEC-408,
+  closes #116). Brings in mecmcp#383 (the human-approver gate:
+  `ChangesetCoordinator::approve_change_set` now takes an
+  `approver_actor_type: mecmcp_audit::ActorType` and refuses anything but
+  `Human`) and mecmcp#395 (`LimitsConfig::default()` now rate-limits by
+  default). `mecmcp-transport`'s `test_harness`/`test_client` moved behind a
+  `test-util` feature (mecmcp#387); this server's dev-dependency now enables
+  it.
+- **`approve_mist_change_set` now routes through mecmcp's
+  `ChangesetCoordinator::approve_change_set`** instead of writing approval
+  state itself. A change set cannot commit until a human-actor-type approver
+  echoes back the exact `plan_digest`; an agent or unattributed (stdio)
+  caller is refused, and a mismatched digest is refused. `approve_mist_change_set`
+  gained a required `plan_digest` argument for this.
+- **`--lab-mode` now refuses to start on a non-loopback listener.** Lab mode
+  waives the approval gate for every caller that reaches the listener, so it
+  is refused fast at startup unless `--host` resolves to loopback
+  (`127.0.0.0/8` or `::1`).
+
+### Fixed
+
+- **Stale "read-only" server instructions and dev-guidance wording** (#120).
+  The MCP `get_info` instructions string and `CLAUDE.md`'s cloud-control-plane
+  guidance called this server read-only after the batch-1 WAN edge
+  change-set write lifecycle had already landed. Both now describe the
+  plan → approve → apply mutation path.
+
 ## [0.3.2] - 2026-09-24
 
 ### Added

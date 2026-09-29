@@ -34,6 +34,11 @@ pub struct MistCli {
     /// with `waived: { reason: "lab-mode" }`, so it stays distinguishable from one
     /// a second person actually reviewed.
     ///
+    /// Refused at startup unless the listener binds loopback -- but a loopback
+    /// bind reachable through a reverse proxy or an SSH/port forward is still
+    /// reachable by remote callers, and this check cannot see that. Keeping
+    /// this server unreachable from outside the host is the operator's job.
+    ///
     /// Spelled identically on every mecmcp server.
     #[arg(long = "lab-mode")]
     pub lab_mode: bool,

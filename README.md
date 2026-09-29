@@ -222,6 +222,15 @@ See [`docs/HOW-TO-SETUP-DOCKER.md`](docs/HOW-TO-SETUP-DOCKER.md) for step-by-ste
 
 See [`docs/HOW-TO-SETUP-LXC.md`](docs/HOW-TO-SETUP-LXC.md) for a step-by-step build guide.
 
+### Security review documents
+
+- [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) — trust boundaries, security
+  principals, blast radius of a compromised token or agent against a real
+  Mist org, and mitigations in place vs. planned.
+- [`docs/TOKEN_ROLE_GUIDANCE.md`](docs/TOKEN_ROLE_GUIDANCE.md) — why the
+  outbound Mist API token should be a dedicated, least-privilege organization
+  token rather than a personal or super-admin token.
+
 Deploy only in a dedicated **Debian 13 unprivileged LXC with `nesting=1`**.
 `nesting=1` is required for the target systemd version to report healthy mounts.
 The guest cannot prove the host-side unprivileged and nesting settings. Verify
