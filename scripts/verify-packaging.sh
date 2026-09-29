@@ -328,9 +328,10 @@ require_contains .github/workflows/ci.yml 'rustup toolchain install 1.89.0 --pro
 require_contains .github/workflows/ci.yml 'scripts/smoke-oci.sh'
 require_contains .github/workflows/ci.yml 'RUSTMISTMCP_BINARY=target/release/rustmistmcp scripts/verify-packaging.sh'
 require_contains .github/workflows/release.yml 'RUSTMISTMCP_BINARY=target/release/rustmistmcp scripts/verify-packaging.sh'
-require_contains .github/workflows/security.yml 'GITLEAKS_VERSION: 8.30.1'
-require_contains .github/workflows/security.yml 'GITLEAKS_LINUX_X64_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
-require_contains .github/workflows/security.yml 'sha256sum --check --strict'
+# The secret scan is the shared mechubsec workflow, pinned by commit SHA; the
+# gitleaks version and checksum are pinned there.
+require_contains .github/workflows/security.yml 'uses: mechubsec/.github/.github/workflows/gitleaks.yml@fb1a159c596bf2c57b9f6f1ff99f546463a6a84a'
+require_absent .github/workflows/security.yml 'gitleaks/gitleaks-action|GITLEAKS_LICENSE'
 require_contains .github/workflows/security.yml 'pull-requests: read'
 gitleaks_ignored_findings=(
     '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/catalog.json:azure-ad-client-secret:1'
@@ -358,7 +359,9 @@ fi
 require_regex .github/workflows/release.yml 'actions/upload-artifact@[0-9a-f]{40}'
 require_regex .github/workflows/release.yml 'actions/attest-build-provenance@[0-9a-f]{40}'
 require_regex .github/workflows/release.yml '^permissions: \{\}$'
-require_count .github/workflows/release.yml 'contents: read' 3
+# 4 = the verify, image and archive jobs + the shared gitleaks caller job, which
+# must grant contents: read itself because the workflow top level is permissions: {}.
+require_count .github/workflows/release.yml 'contents: read' 4
 require_count .github/workflows/release.yml 'packages: write' 1
 require_count .github/workflows/release.yml 'id-token: write' 1
 require_count .github/workflows/release.yml 'attestations: write' 1
@@ -368,8 +371,9 @@ require_contains .github/workflows/release.yml 'cargo audit'
 require_contains .github/workflows/release.yml 'cargo deny check'
 require_contains .github/workflows/release.yml 'scripts/verify-reproducible-build.sh'
 require_contains .github/workflows/release.yml 'npm exec --yes --package=yaml@2.8.1 yaml -- valid "$file"'
-require_contains .github/workflows/release.yml 'GITLEAKS_VERSION: 8.30.1'
-require_contains .github/workflows/release.yml 'sha256sum --check --strict'
+require_contains .github/workflows/release.yml 'uses: mechubsec/.github/.github/workflows/gitleaks.yml@fb1a159c596bf2c57b9f6f1ff99f546463a6a84a'
+require_contains .github/workflows/release.yml 'needs: secrets'
+require_absent .github/workflows/release.yml 'gitleaks/gitleaks-action|GITLEAKS_LICENSE'
 require_contains .github/dependabot.yml 'package-ecosystem: "github-actions"'
 require_contains .github/dependabot.yml 'package-ecosystem: "docker"'
 require_contains deny.toml '"MIT-0"'
@@ -393,7 +397,7 @@ require_contains docs/OPERATIONS.md 'sudo install -o rustmistmcp -g rustmistmcp 
 require_contains docs/OPERATIONS.md '/etc/rustmistmcp/mist-api-token'
 require_contains docs/OPERATIONS.md '/var/lib/rustmistmcp/tokens.json'
 require_contains docs/OPERATIONS.md '/etc/rustmistmcp/audit-hmac.key'
-require_contains docs/OPERATIONS.md 'pinned, SHA-256-verified gitleaks CLI'
+require_contains docs/OPERATIONS.md 'shared `mechubsec/.github` gitleaks workflow'
 require_contains README.md '`/etc/rustmistmcp/mist.json` | `root:rustmistmcp`, `0640`'
 require_contains README.md '`/etc/rustmistmcp/mist-api-token` | `rustmistmcp:rustmistmcp`, `0600`'
 require_contains README.md '`/var/lib/rustmistmcp/tokens.json` | `rustmistmcp:rustmistmcp`, `0600`'
