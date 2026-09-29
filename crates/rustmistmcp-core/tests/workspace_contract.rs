@@ -24,7 +24,7 @@ fn workspace_metadata_lints_and_shared_revision_are_locked() {
         "edition = \"2024\"",
         "rust-version = \"1.89\"",
         "license = \"MIT\"",
-        "repository = \"https://github.com/fastrevmd-lab/rustmistmcp\"",
+        "repository = \"https://github.com/mechubsec/rustmistmcp\"",
         "authors = [\"fastrevmd-lab\"]",
         "missing_docs = \"warn\"",
         "unsafe_code = \"forbid\"",
@@ -102,7 +102,7 @@ fn assert_workspace_mecmcp_dependencies_are_pinned(manifest: &str) {
             .unwrap_or_else(|| panic!("{crate_name} must use an inline dependency table"));
         assert_eq!(
             dependency.get("git").and_then(toml::Value::as_str),
-            Some("https://github.com/fastrevmd-lab/mecmcp"),
+            Some("https://github.com/mechubsec/mecmcp"),
             "{crate_name} must use the approved mecmcp Git source"
         );
         // Tag, not rev, since the family standardised on tags at v0.9.1 — but a

@@ -63,7 +63,7 @@ their source without the key), not tamper-evidence: records can still be
 deleted, reordered, or replaced undetected because nothing signs or hash-chains
 whole records.
 
-This is tracked in [issue #78](https://github.com/fastrevmd-lab/rustmistmcp/issues/78).
+This is tracked in [issue #78](https://github.com/mechubsec/rustmistmcp/issues/78).
 Until it is fixed, **every example in this document passes the audit flags
 explicitly**. Copy them. A reader who omits them loses the audit pseudonymity
 this server is built to provide.

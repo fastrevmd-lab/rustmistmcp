@@ -16,7 +16,7 @@ LABEL org.opencontainers.image.title="rustmistmcp" \
       org.opencontainers.image.version="$VERSION" \
       org.opencontainers.image.revision="$REVISION" \
       org.opencontainers.image.created="$CREATED" \
-      org.opencontainers.image.source="https://github.com/fastrevmd-lab/rustmistmcp" \
+      org.opencontainers.image.source="https://github.com/mechubsec/rustmistmcp" \
       org.opencontainers.image.licenses="MIT"
 COPY --from=builder /workspace/target/release/rustmistmcp /usr/local/bin/rustmistmcp
 USER 65532:65532
