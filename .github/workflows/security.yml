@@ -7,6 +7,12 @@ on:
   schedule:
     - cron: '31 7 * * 1'
 
+concurrency:
+  # Cancel superseded runs on pull requests (each push / branch update restarts CI);
+  # runs on the default branch always finish.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
   pull-requests: read
