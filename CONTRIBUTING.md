@@ -1,6 +1,6 @@
 # Contributing to rustmistmcp
 
-Thanks for considering a contribution. rustmistmcp is an async Rust Model Context Protocol (MCP) server for the HPE Juniper Mist cloud — part of the [mechub](https://github.com/fastrevmd-lab) family of open-source, self-hosted network-security automation tooling. See [README.md](README.md) for what the server does, and `docs/OPERATIONS.md` / `docs/PACKAGING_ACCEPTANCE.md` for how it is packaged and operated.
+Thanks for considering a contribution. rustmistmcp is an async Rust Model Context Protocol (MCP) server for the HPE Juniper Mist cloud — part of the [mechub](https://github.com/mechubsec) family of open-source, self-hosted network-security automation tooling. See [README.md](README.md) for what the server does, and `docs/OPERATIONS.md` / `docs/PACKAGING_ACCEPTANCE.md` for how it is packaged and operated.
 
 ## Before you start
 
