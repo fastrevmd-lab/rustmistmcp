@@ -201,8 +201,9 @@ pub fn build_http_router(
 /// Install the shared Unix SIGHUP hook for token snapshots only.
 ///
 /// A failed parse retains the last verified snapshot. Mist configuration,
-/// credentials, clients, listener addresses, TLS, and audit sinks are
-/// immutable for the process lifetime and require restart.
+/// credentials, clients, listener addresses, and TLS are immutable for the
+/// process lifetime and require restart. The audit sink is reopened
+/// independently on the same signal — see [`install_audit_reopen_handler`].
 ///
 /// # Errors
 ///
@@ -213,6 +214,33 @@ pub fn install_token_reload_handler(store: Arc<TokenStoreFile<MistGrant>>) -> st
         Err(error) => {
             tracing::error!(%error, "token reload failed; retaining previous snapshot");
         }
+    })
+}
+
+/// Install the shared Unix SIGHUP hook that reopens the audit file sink.
+///
+/// Independent of [`install_token_reload_handler`] and installed whenever a
+/// file sink is configured, regardless of transport or whether a token store
+/// is present: stdio mode and `--allow-no-auth` still audit to a file and
+/// still need rotation to work, and leaving this ungated meant SIGHUP's
+/// default disposition (terminate) killed those deployments the moment
+/// logrotate signalled them.
+///
+/// A failed reopen is `warn`-logged and the previous (now-unlinked) file
+/// descriptor keeps working; it must never crash the server or block the
+/// token-store reload above.
+///
+/// # Errors
+///
+/// Returns an error if the platform signal handler cannot be installed.
+pub fn install_audit_reopen_handler(sink: mecmcp_audit::AuditFileSink) -> std::io::Result<()> {
+    mecmcp_runtime::signals::install_hup_handler(move || match sink.reopen() {
+        Ok(()) => tracing::info!(path = %sink.path().display(), "audit log reopened"),
+        Err(error) => tracing::warn!(
+            %error,
+            path = %sink.path().display(),
+            "audit log reopen failed; keeping previous sink"
+        ),
     })
 }
 

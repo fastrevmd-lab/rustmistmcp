@@ -1,6 +1,6 @@
 [Unit]
 Description=rustmistmcp MCP server
-Documentation=https://github.com/fastrevmd-lab/rustmistmcp
+Documentation=https://github.com/mechubsec/rustmistmcp
 Wants=network-online.target
 After=network-online.target
 ConditionPathExists=/etc/rustmistmcp/mist.json

@@ -7,6 +7,12 @@ on:
   schedule:
     - cron: '31 7 * * 1'
 
+concurrency:
+  # Cancel superseded runs on pull requests (each push / branch update restarts CI);
+  # runs on the default branch always finish.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
   pull-requests: read
@@ -16,7 +22,7 @@ jobs:
   # licence needed). PRs and pushes scan their own commits; the weekly
   # schedule scans full history.
   secrets:
-    uses: mechubsec/.github/.github/workflows/gitleaks.yml@fb1a159c596bf2c57b9f6f1ff99f546463a6a84a
+    uses: mechubsec/.github/.github/workflows/gitleaks.yml@1f46f69afab3cc1c77efa196747bc3a5e45a3755
 
   secrets-and-supply-chain:
     runs-on: ubuntu-24.04

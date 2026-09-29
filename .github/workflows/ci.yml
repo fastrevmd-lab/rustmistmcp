@@ -7,6 +7,12 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+concurrency:
+  # Cancel superseded runs on pull requests (each push / branch update restarts CI);
+  # runs on the default branch always finish.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -50,7 +56,7 @@ jobs:
           for file in .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/security.yml .github/dependabot.yml packaging/container/compose.example.yaml; do
             npm exec --yes --package=yaml@2.8.1 yaml -- valid "$file"
           done
-          RUSTMISTMCP_IMAGE=ghcr.io/fastrevmd-lab/rustmistmcp@sha256:0000000000000000000000000000000000000000000000000000000000000000 docker compose -f packaging/container/compose.example.yaml config
+          RUSTMISTMCP_IMAGE=ghcr.io/mechubsec/rustmistmcp@sha256:0000000000000000000000000000000000000000000000000000000000000000 docker compose -f packaging/container/compose.example.yaml config
       - name: Verify deterministic release archive
         run: scripts/verify-reproducible-build.sh
       - name: Verify, extract, hash, and execute archive

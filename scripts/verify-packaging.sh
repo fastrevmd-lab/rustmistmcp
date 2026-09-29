@@ -330,7 +330,7 @@ require_contains .github/workflows/ci.yml 'RUSTMISTMCP_BINARY=target/release/rus
 require_contains .github/workflows/release.yml 'RUSTMISTMCP_BINARY=target/release/rustmistmcp scripts/verify-packaging.sh'
 # The secret scan is the shared mechubsec workflow, pinned by commit SHA; the
 # gitleaks version and checksum are pinned there.
-require_contains .github/workflows/security.yml 'uses: mechubsec/.github/.github/workflows/gitleaks.yml@fb1a159c596bf2c57b9f6f1ff99f546463a6a84a'
+require_contains .github/workflows/security.yml 'uses: mechubsec/.github/.github/workflows/gitleaks.yml@1f46f69afab3cc1c77efa196747bc3a5e45a3755'
 require_absent .github/workflows/security.yml 'gitleaks/gitleaks-action|GITLEAKS_LICENSE'
 require_contains .github/workflows/security.yml 'pull-requests: read'
 gitleaks_ignored_findings=(
@@ -371,7 +371,7 @@ require_contains .github/workflows/release.yml 'cargo audit'
 require_contains .github/workflows/release.yml 'cargo deny check'
 require_contains .github/workflows/release.yml 'scripts/verify-reproducible-build.sh'
 require_contains .github/workflows/release.yml 'npm exec --yes --package=yaml@2.8.1 yaml -- valid "$file"'
-require_contains .github/workflows/release.yml 'uses: mechubsec/.github/.github/workflows/gitleaks.yml@fb1a159c596bf2c57b9f6f1ff99f546463a6a84a'
+require_contains .github/workflows/release.yml 'uses: mechubsec/.github/.github/workflows/gitleaks.yml@1f46f69afab3cc1c77efa196747bc3a5e45a3755'
 require_contains .github/workflows/release.yml 'needs: secrets'
 require_absent .github/workflows/release.yml 'gitleaks/gitleaks-action|GITLEAKS_LICENSE'
 require_contains .github/dependabot.yml 'package-ecosystem: "github-actions"'
