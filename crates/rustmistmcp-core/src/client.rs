@@ -7,6 +7,7 @@ use tokio::sync::Semaphore;
 use url::Url;
 
 use crate::catalog::PaginationMode;
+use crate::rate_limit::{BudgetStatus, CallPriority, RateLimitBudget};
 use crate::{Catalog, MistCursor, MistPageInfo, MistRequest, MistResponse, MistResponseBody};
 
 /// An injected, asynchronous dispatcher for already-validated Mist requests.
@@ -15,8 +16,29 @@ use crate::{Catalog, MistCursor, MistPageInfo, MistRequest, MistResponse, MistRe
 /// network requests, load credentials, or retry operations at this boundary.
 #[async_trait]
 pub trait MistClient: Send + Sync {
-    /// Execute one catalog-bound request.
-    async fn execute(&self, request: MistRequest) -> Result<MistResponse, MistError>;
+    /// Execute one catalog-bound request, as [`CallPriority::Standard`].
+    async fn execute(&self, request: MistRequest) -> Result<MistResponse, MistError> {
+        self.execute_as(request, CallPriority::Standard).await
+    }
+
+    /// Execute one catalog-bound request under an explicit budget priority.
+    ///
+    /// Callers should pass [`CallPriority::Reserved`] only for a call a
+    /// server has verified is human-initiated (`mecmcp_auth::ActorType::Human`).
+    /// The default implementation ignores `priority` and delegates to
+    /// [`MistClient::execute`], for clients that do not track a budget.
+    async fn execute_as(
+        &self,
+        request: MistRequest,
+        _priority: CallPriority,
+    ) -> Result<MistResponse, MistError> {
+        self.execute(request).await
+    }
+
+    /// This token's current hourly call budget headroom, if this client tracks one.
+    fn budget_status(&self) -> Option<BudgetStatus> {
+        None
+    }
 
     /// Whether this transport refuses everything without touching the network.
     ///
@@ -88,6 +110,22 @@ pub enum MistError {
     /// A supplied client mapped a Mist service failure.
     #[error("Mist API request failed: {0}")]
     Service(String),
+    /// This token's local hourly call budget is exhausted for the request's priority.
+    ///
+    /// Raised before any network call is made, so it never consumes a real
+    /// Mist API call. Distinct from [`MistError::RateLimited`], which reflects
+    /// Mist's own HTTP 429 response.
+    #[error(
+        "Mist hourly call budget exhausted: used {used}/{hourly_limit} ({human_reserve} reserved for human operators)"
+    )]
+    BudgetExhausted {
+        /// Calls already counted against this hourly window.
+        used: u32,
+        /// The configured hourly call ceiling for this token.
+        hourly_limit: u32,
+        /// The portion of `hourly_limit` reserved for human operators.
+        human_reserve: u32,
+    },
 }
 
 /// Production HTTPS Mist client over mecmcp-http.
@@ -98,6 +136,9 @@ pub struct HttpMistClient {
     credential: Arc<OutboundSecret>,
     catalog: Arc<Catalog>,
     concurrency: Arc<Semaphore>,
+    budget: Arc<RateLimitBudget>,
+    max_429_retries: u8,
+    max_retry_wait: std::time::Duration,
 }
 
 impl std::fmt::Debug for HttpMistClient {
@@ -155,6 +196,12 @@ impl HttpMistClient {
             credential: Arc::new(OutboundSecret::new_unchecked(credential)),
             catalog,
             concurrency: Arc::new(Semaphore::new(config.max_concurrency)),
+            budget: Arc::new(RateLimitBudget::new(
+                config.hourly_call_budget,
+                config.human_reserve,
+            )),
+            max_429_retries: config.max_429_retries,
+            max_retry_wait: config.max_retry_wait,
         })
     }
 
@@ -175,15 +222,27 @@ impl HttpMistClient {
         catalog: Arc<Catalog>,
         max_response_bytes: usize,
     ) -> Self {
-        Self::from_test_parts_with_roots(base_url, credential, catalog, max_response_bytes, vec![])
+        Self::from_test_parts_with_config(
+            base_url,
+            credential,
+            catalog,
+            HttpMistClientConfig {
+                connect_timeout: std::time::Duration::from_secs(1),
+                request_timeout: std::time::Duration::from_secs(2),
+                max_response_bytes,
+                max_concurrency: 2,
+                ..HttpMistClientConfig::default()
+            },
+            vec![],
+        )
     }
 
     /// As [`Self::from_test_parts`], additionally trusting `extra_root_certificates`.
     ///
-    /// `mecmcp-http` refuses any outbound scheme but `https` (there is no
-    /// plaintext escape hatch), so a mock server that proves real wire
-    /// behavior needs a certificate the client is told to trust rather than a
-    /// plain HTTP listener. Each certificate is PEM-encoded.
+    /// `mecmcp-http` refuses any outbound scheme but `https`, so a mock server
+    /// that proves real wire behavior needs a certificate the client is told to
+    /// trust. Each certificate is PEM-encoded. Thin wrapper over
+    /// [`Self::from_test_parts_with_config`].
     #[cfg(any(test, feature = "test-util"))]
     pub fn from_test_parts_with_roots(
         base_url: Url,
@@ -192,13 +251,33 @@ impl HttpMistClient {
         max_response_bytes: usize,
         extra_root_certificates: Vec<String>,
     ) -> Self {
-        let config = HttpMistClientConfig {
-            connect_timeout: std::time::Duration::from_secs(1),
-            request_timeout: std::time::Duration::from_secs(2),
-            max_response_bytes,
-            max_concurrency: 2,
-        };
+        Self::from_test_parts_with_config(
+            base_url,
+            credential,
+            catalog,
+            HttpMistClientConfig {
+                connect_timeout: std::time::Duration::from_secs(1),
+                request_timeout: std::time::Duration::from_secs(2),
+                max_response_bytes,
+                max_concurrency: 2,
+                ..HttpMistClientConfig::default()
+            },
+            extra_root_certificates,
+        )
+    }
 
+    /// As [`HttpMistClient::from_test_parts`], but with full control over
+    /// [`HttpMistClientConfig`] and any extra trusted root certificates --
+    /// needed by tests that exercise the budget tracker or the bounded
+    /// 429-retry loop against a self-signed TLS mock.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn from_test_parts_with_config(
+        base_url: Url,
+        credential: String,
+        catalog: Arc<Catalog>,
+        config: HttpMistClientConfig,
+        trusted_root_pem: Vec<String>,
+    ) -> Self {
         let http_config = mecmcp_http::HttpClientConfig {
             connect_timeout: config.connect_timeout,
             request_timeout: config.request_timeout,
@@ -208,7 +287,7 @@ impl HttpMistClient {
             pool_max_idle_per_host: config.max_concurrency,
             user_agent: "rustmistmcp-test".to_owned(),
             max_response_bytes: config.max_response_bytes,
-            extra_root_certificates,
+            extra_root_certificates: trusted_root_pem,
         };
 
         let http = mecmcp_http::HttpClient::new(http_config).expect("test client");
@@ -219,6 +298,12 @@ impl HttpMistClient {
             credential: Arc::new(OutboundSecret::new_unchecked(credential)),
             catalog,
             concurrency: Arc::new(Semaphore::new(config.max_concurrency)),
+            budget: Arc::new(RateLimitBudget::new(
+                config.hourly_call_budget,
+                config.human_reserve,
+            )),
+            max_429_retries: config.max_429_retries,
+            max_retry_wait: config.max_retry_wait,
         }
     }
 
@@ -392,8 +477,25 @@ impl HttpMistClient {
 
 #[async_trait]
 impl MistClient for HttpMistClient {
-    async fn execute(&self, request: MistRequest) -> Result<MistResponse, MistError> {
+    async fn execute_as(
+        &self,
+        request: MistRequest,
+        priority: CallPriority,
+    ) -> Result<MistResponse, MistError> {
         let _permit = self.concurrency.acquire().await.expect("semaphore");
+
+        // Charged once per logical call: bounded 429 retries below reuse this
+        // reservation rather than drawing the budget down further, since they
+        // are this crate's own backoff for one Mist-side request, not
+        // independent calls a caller asked for.
+        self.budget.try_acquire(priority).map_err(|_| {
+            let status = self.budget.status();
+            MistError::BudgetExhausted {
+                used: status.used,
+                hourly_limit: status.hourly_limit,
+                human_reserve: status.human_reserve,
+            }
+        })?;
 
         let url = self.build_url(
             &request.operation_id,
@@ -421,57 +523,68 @@ impl MistClient for HttpMistClient {
             }
         };
 
-        let mut http_request = mecmcp_http::HttpRequest::new(method, url.as_str())
-            .map_err(|_| MistError::Service("failed to build HTTP request".to_owned()))?;
-
-        // Add Authorization header with Mist's Token scheme
         let auth_secret =
             OutboundSecret::new_unchecked(format!("Token {}", self.credential.expose()));
-        http_request = http_request
-            .secret_header("Authorization", &auth_secret)
-            .map_err(|_| MistError::Service("failed to set auth header".to_owned()))?;
+        let body_bytes =
+            match &request.json {
+                Some(json_body) => Some(serde_json::to_vec(json_body).map_err(|_| {
+                    MistError::Service("failed to serialize request body".to_owned())
+                })?),
+                None => None,
+            };
 
-        // Add JSON body if present
-        if let Some(json_body) = &request.json {
-            let body_bytes = serde_json::to_vec(json_body)
-                .map_err(|_| MistError::Service("failed to serialize request body".to_owned()))?;
-            http_request = http_request.body(body_bytes);
-        }
+        let mut retries_used: u8 = 0;
+        let http_response = loop {
+            let mut http_request = mecmcp_http::HttpRequest::new(method, url.as_str())
+                .map_err(|_| MistError::Service("failed to build HTTP request".to_owned()))?;
+            http_request = http_request
+                .secret_header("Authorization", &auth_secret)
+                .map_err(|_| MistError::Service("failed to set auth header".to_owned()))?;
+            if let Some(body_bytes) = &body_bytes {
+                http_request = http_request.body(body_bytes.clone());
+            }
 
-        // Execute the request
-        let http_response = self
-            .http
-            .send(http_request)
-            .await
-            .map_err(|error| MistError::Service(format!("HTTP request failed: {error}")))?;
+            let response = self
+                .http
+                .send(http_request)
+                .await
+                .map_err(|error| MistError::Service(format!("HTTP request failed: {error}")))?;
+
+            if response.status() != 429 {
+                break response;
+            }
+
+            let header_retry_after = response
+                .header_str("Retry-After")
+                .and_then(|value| value.parse::<u64>().ok());
+
+            if retries_used >= self.max_429_retries {
+                return Err(MistError::RateLimited {
+                    retry_after_secs: header_retry_after,
+                });
+            }
+
+            let backoff = std::time::Duration::from_millis(200 * 2u64.pow(u32::from(retries_used)));
+            let wait = header_retry_after
+                .map(std::time::Duration::from_secs)
+                .unwrap_or(backoff)
+                .min(self.max_retry_wait);
+            retries_used += 1;
+            tokio::time::sleep(wait).await;
+        };
 
         let status = http_response.status();
 
-        // Check for rate limiting
-        if status == 429 {
-            let retry_after = http_response
-                .header_str("Retry-After")
-                .and_then(|s| s.parse::<u64>().ok());
-            return Err(MistError::RateLimited {
-                retry_after_secs: retry_after,
-            });
-        }
-
-        // Get response body
         let body_bytes = http_response.body().to_vec();
         let body = if body_bytes.is_empty() {
             MistResponseBody::Empty
         } else {
-            // Try to parse as JSON
             match serde_json::from_slice(&body_bytes) {
                 Ok(json) => MistResponseBody::Json(json),
-                Err(_) => {
-                    // Try as UTF-8 text
-                    match String::from_utf8(body_bytes.clone()) {
-                        Ok(text) => MistResponseBody::Text(text),
-                        Err(_) => MistResponseBody::Binary(body_bytes),
-                    }
-                }
+                Err(_) => match String::from_utf8(body_bytes.clone()) {
+                    Ok(text) => MistResponseBody::Text(text),
+                    Err(_) => MistResponseBody::Binary(body_bytes),
+                },
             }
         };
 
@@ -486,6 +599,10 @@ impl MistClient for HttpMistClient {
             page,
         })
     }
+
+    fn budget_status(&self) -> Option<BudgetStatus> {
+        Some(self.budget.status())
+    }
 }
 
 /// Configuration for the HTTP Mist client.
@@ -499,6 +616,24 @@ pub struct HttpMistClientConfig {
     pub max_response_bytes: usize,
     /// Maximum concurrent requests.
     pub max_concurrency: usize,
+    /// This token's hourly Mist API call ceiling.
+    ///
+    /// Mist's documented default is 5,000 calls/hour per token.
+    pub hourly_call_budget: u32,
+    /// The portion of `hourly_call_budget` reserved for
+    /// [`CallPriority::Reserved`] (human-initiated) calls.
+    pub human_reserve: u32,
+    /// Additional attempts made after Mist returns HTTP 429, before giving up.
+    ///
+    /// `0` means the first 429 response is returned to the caller without
+    /// retrying; retries never run unbounded.
+    pub max_429_retries: u8,
+    /// Ceiling on how long a single 429 retry waits, whether that wait comes
+    /// from a `Retry-After` header or the built-in backoff.
+    ///
+    /// Bounds a hostile or misconfigured `Retry-After` value from stalling a
+    /// caller indefinitely.
+    pub max_retry_wait: std::time::Duration,
 }
 
 impl Default for HttpMistClientConfig {
@@ -508,6 +643,10 @@ impl Default for HttpMistClientConfig {
             request_timeout: std::time::Duration::from_secs(30),
             max_response_bytes: 10 * 1024 * 1024,
             max_concurrency: 8,
+            hourly_call_budget: 5_000,
+            human_reserve: 250,
+            max_429_retries: 2,
+            max_retry_wait: std::time::Duration::from_secs(30),
         }
     }
 }
@@ -809,6 +948,276 @@ mod tests {
                 .derive_next_cursor("listOrgSites", &body, Some(&max_page))
                 .is_none(),
             "current_page + 1 must not wrap past u64::MAX"
+        );
+    }
+
+    fn org_request() -> MistRequest {
+        MistRequest {
+            operation_id: "getOrg".to_owned(),
+            path: BTreeMap::from([("org_id".to_owned(), ORG_ID.to_owned())]),
+            query: BTreeMap::new(),
+            json: None,
+            cursor: None,
+        }
+    }
+
+    fn ensure_crypto_provider() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
+    /// Generate a self-signed `localhost` certificate and a matching rustls
+    /// server config, mirroring the pattern mecmcp-http's own tests use to
+    /// exercise `HttpRequest::new`'s https-only enforcement.
+    fn tls_material() -> (String, rustls::ServerConfig) {
+        ensure_crypto_provider();
+        let key_pair = rcgen::KeyPair::generate().expect("key pair");
+        let params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]).expect("params");
+        let cert = params.self_signed(&key_pair).expect("self-signed cert");
+
+        let cert_pem = cert.pem();
+        let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(key_pair.serialize_der()).into();
+
+        let mut server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.der().clone()], key_der)
+            .expect("server config");
+        server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+
+        (cert_pem, server_config)
+    }
+
+    async fn read_request_head<S>(stream: &mut S)
+    where
+        S: tokio::io::AsyncRead + Unpin,
+    {
+        use tokio::io::AsyncReadExt;
+        let mut seen = Vec::new();
+        let mut byte = [0u8; 1];
+        while stream.read_exact(&mut byte).await.is_ok() {
+            seen.push(byte[0]);
+            if seen.ends_with(b"\r\n\r\n") {
+                return;
+            }
+        }
+    }
+
+    /// Serve one canned raw HTTP/1.1 response per accepted TLS connection, in
+    /// order. Each canned response declares `Connection: close`, so the
+    /// client opens a fresh connection per retry -- which is also why
+    /// `responses` must be consumed in call order, not concurrently.
+    async fn bind_local() -> (tokio::net::TcpListener, u16) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock TLS server");
+        let port = listener.local_addr().expect("addr").port();
+        (listener, port)
+    }
+
+    fn serve_https(
+        listener: tokio::net::TcpListener,
+        server_config: rustls::ServerConfig,
+        responses: Vec<String>,
+    ) {
+        use tokio::io::AsyncWriteExt;
+
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+        tokio::spawn(async move {
+            for response in responses {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(mut tls) = acceptor.accept(stream).await else {
+                    return;
+                };
+                read_request_head(&mut tls).await;
+                let _ = tls.write_all(response.as_bytes()).await;
+                let _ = tls.flush().await;
+            }
+        });
+    }
+
+    fn ok_org_response() -> String {
+        let body = serde_json::json!({"id": ORG_ID, "name": "Test Org"}).to_string();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    fn rate_limited_response(retry_after_secs: u64) -> String {
+        format!(
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: {retry_after_secs}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+    }
+
+    #[tokio::test]
+    async fn standard_priority_is_denied_while_reserved_headroom_stays_available() {
+        let (cert_pem, server_config) = tls_material();
+        let (listener, port) = bind_local().await;
+        // One connection: only the Reserved call below should ever reach the
+        // network, since Standard's non-reserved pool is zero.
+        serve_https(listener, server_config, vec![ok_org_response()]);
+
+        let client = HttpMistClient::from_test_parts_with_config(
+            Url::parse(&format!("https://localhost:{port}")).expect("url"),
+            TEST_TOKEN.to_owned(),
+            test_catalog(),
+            HttpMistClientConfig {
+                hourly_call_budget: 1,
+                human_reserve: 1,
+                ..HttpMistClientConfig::default()
+            },
+            vec![cert_pem],
+        );
+
+        // Standard's cap (hourly_call_budget - human_reserve) is 0: denied
+        // before any network attempt, and the mock server sees no connection
+        // for it.
+        let denied = client
+            .execute_as(org_request(), CallPriority::Standard)
+            .await;
+        assert_eq!(
+            denied,
+            Err(MistError::BudgetExhausted {
+                used: 0,
+                hourly_limit: 1,
+                human_reserve: 1,
+            })
+        );
+
+        // Reserved may still draw on the full hourly budget.
+        let reserved = client
+            .execute_as(org_request(), CallPriority::Reserved)
+            .await;
+        assert!(reserved.is_ok(), "reserved headroom must stay available");
+
+        // The whole hourly budget, reserve included, is now spent.
+        let fully_denied = client
+            .execute_as(org_request(), CallPriority::Reserved)
+            .await;
+        assert_eq!(
+            fully_denied,
+            Err(MistError::BudgetExhausted {
+                used: 1,
+                hourly_limit: 1,
+                human_reserve: 1,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_output_can_report_remaining_budget() {
+        let (cert_pem, server_config) = tls_material();
+        let (listener, port) = bind_local().await;
+        serve_https(listener, server_config, vec![ok_org_response()]);
+
+        let client = HttpMistClient::from_test_parts_with_config(
+            Url::parse(&format!("https://localhost:{port}")).expect("url"),
+            TEST_TOKEN.to_owned(),
+            test_catalog(),
+            HttpMistClientConfig {
+                hourly_call_budget: 5_000,
+                human_reserve: 250,
+                ..HttpMistClientConfig::default()
+            },
+            vec![cert_pem],
+        );
+
+        let before = client.budget_status().expect("http client tracks budget");
+        assert_eq!(before.used, 0);
+        assert_eq!(before.remaining_standard, 5_000 - 250);
+        assert_eq!(before.remaining_reserved, 5_000);
+
+        client.execute(org_request()).await.expect("call succeeds");
+
+        let after = client.budget_status().expect("http client tracks budget");
+        assert_eq!(after.used, 1);
+        assert_eq!(after.remaining_standard, 5_000 - 250 - 1);
+        assert_eq!(after.remaining_reserved, 5_000 - 1);
+    }
+
+    #[tokio::test]
+    async fn retries_honour_retry_after_and_then_succeed() {
+        // Fails the first 2 attempts with Retry-After: 0, succeeds on the
+        // 3rd -- exactly what max_429_retries: 2 allows.
+        let (cert_pem, server_config) = tls_material();
+        let (listener, port) = bind_local().await;
+        serve_https(
+            listener,
+            server_config,
+            vec![
+                rate_limited_response(0),
+                rate_limited_response(0),
+                ok_org_response(),
+            ],
+        );
+
+        let client = HttpMistClient::from_test_parts_with_config(
+            Url::parse(&format!("https://localhost:{port}")).expect("url"),
+            TEST_TOKEN.to_owned(),
+            test_catalog(),
+            HttpMistClientConfig {
+                max_429_retries: 2,
+                max_retry_wait: std::time::Duration::from_millis(200),
+                ..HttpMistClientConfig::default()
+            },
+            vec![cert_pem],
+        );
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.execute(org_request()),
+        )
+        .await
+        .expect("bounded retries complete promptly")
+        .expect("succeeds after honouring Retry-After twice");
+        assert_eq!(response.status, 200);
+    }
+
+    #[tokio::test]
+    async fn retries_give_up_after_the_bounded_attempt_count() {
+        // The mock never stops returning 429; the client must give up after
+        // max_429_retries rather than retrying forever.
+        let (cert_pem, server_config) = tls_material();
+        let (listener, port) = bind_local().await;
+        serve_https(
+            listener,
+            server_config,
+            vec![
+                rate_limited_response(0),
+                rate_limited_response(0),
+                rate_limited_response(0),
+            ],
+        );
+
+        let client = HttpMistClient::from_test_parts_with_config(
+            Url::parse(&format!("https://localhost:{port}")).expect("url"),
+            TEST_TOKEN.to_owned(),
+            test_catalog(),
+            HttpMistClientConfig {
+                max_429_retries: 2,
+                max_retry_wait: std::time::Duration::from_millis(200),
+                ..HttpMistClientConfig::default()
+            },
+            vec![cert_pem],
+        );
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.execute(org_request()),
+        )
+        .await
+        .expect("bounded retries must not hang the caller");
+
+        assert_eq!(
+            result,
+            Err(MistError::RateLimited {
+                retry_after_secs: Some(0),
+            })
         );
     }
 }

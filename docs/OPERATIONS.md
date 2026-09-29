@@ -143,10 +143,12 @@ server's loopback listener, so destroying the guest genuinely does end it.
 
 ## Repository security workflow prerequisite
 
-The organization-owned repository requires an encrypted `GITLEAKS_LICENSE`
-secret for `gitleaks/gitleaks-action` v3. Configure it at repository or
-organization scope before requiring the security workflow. GitHub supplies
-`GITHUB_TOKEN`; the workflow passes both values explicitly to the pinned action.
+The security and release workflows call the shared `mechubsec/.github` gitleaks workflow,
+pinned by commit SHA. It runs the pinned, SHA-256-verified gitleaks CLI rather
+than `gitleaks/gitleaks-action`, which needs a paid `GITLEAKS_LICENSE` on
+organization-owned repositories. No secret is required. Pull requests and
+pushes scan only their new commits; scheduled and manual runs scan full
+history. The check is reported as `secrets / gitleaks`.
 
 ## Logs and upgrades
 

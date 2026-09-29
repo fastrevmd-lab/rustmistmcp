@@ -8,7 +8,16 @@ on:
 permissions: {}
 
 jobs:
+  # Secret scan: the shared mechubsec workflow. Grants read access itself
+  # because this workflow's top level is permissions: {} and a called
+  # workflow cannot exceed what its caller job allows.
+  secrets:
+    permissions:
+      contents: read
+    uses: mechubsec/.github/.github/workflows/gitleaks.yml@fb1a159c596bf2c57b9f6f1ff99f546463a6a84a
+
   verify:
+    needs: secrets
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -17,10 +26,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
       - name: Validate release tag against Cargo version
         run: scripts/verify-release-tag.sh "$GITHUB_REF_NAME"
       - name: Verify clean checkout

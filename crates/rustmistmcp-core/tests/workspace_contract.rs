@@ -14,6 +14,13 @@ const MECMCP_TAG: &str = "v0.24.1";
 /// Lockfile text, for verifying the tag resolved to `MECMCP_REVISION`.
 const LOCKFILE: &str = include_str!("../../../Cargo.lock");
 
+/// `mecmcp-redact` landed on `mecmcp`'s `main` branch after `MECMCP_TAG` was
+/// cut and has not shipped in a tagged release yet, so it is the one shared
+/// crate pinned by exact commit instead of by tag (see the comment beside its
+/// `[workspace.dependencies]` entry). Swap this to `MECMCP_TAG`'s generic
+/// check, and drop this exception, once a tag exists that includes it.
+const MECMCP_REDACT_REVISION: &str = "2e157e0f09894e2a5309408523c0911425eebd20";
+
 #[test]
 fn workspace_metadata_lints_and_shared_revision_are_locked() {
     for expected in [
@@ -105,6 +112,24 @@ fn assert_workspace_mecmcp_dependencies_are_pinned(manifest: &str) {
             Some("https://github.com/mechubsec/mecmcp"),
             "{crate_name} must use the approved mecmcp Git source"
         );
+
+        // `mecmcp-redact` is the one exception: see `MECMCP_REDACT_REVISION`.
+        // It is pinned by exact commit, not tag, and is not resolved through
+        // `MECMCP_TAG` at all, so it is checked on its own and skips the
+        // tag/lockfile assertions below.
+        if crate_name == "mecmcp-redact" {
+            assert_eq!(
+                dependency.get("rev").and_then(toml::Value::as_str),
+                Some(MECMCP_REDACT_REVISION),
+                "{crate_name} must pin the exact documented commit"
+            );
+            assert!(
+                dependency.get("tag").is_none(),
+                "{crate_name} is not tagged yet and must not claim a tag"
+            );
+            continue;
+        }
+
         // Tag, not rev, since the family standardised on tags at v0.9.1 — but a
         // tag can be moved, and the original rev pin existed precisely so
         // extension TypeIds could not diverge. The immutability guarantee is

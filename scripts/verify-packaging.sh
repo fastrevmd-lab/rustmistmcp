@@ -328,11 +328,11 @@ require_contains .github/workflows/ci.yml 'rustup toolchain install 1.89.0 --pro
 require_contains .github/workflows/ci.yml 'scripts/smoke-oci.sh'
 require_contains .github/workflows/ci.yml 'RUSTMISTMCP_BINARY=target/release/rustmistmcp scripts/verify-packaging.sh'
 require_contains .github/workflows/release.yml 'RUSTMISTMCP_BINARY=target/release/rustmistmcp scripts/verify-packaging.sh'
-require_contains .github/workflows/security.yml 'gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e'
+# The secret scan is the shared mechubsec workflow, pinned by commit SHA; the
+# gitleaks version and checksum are pinned there.
+require_contains .github/workflows/security.yml 'uses: mechubsec/.github/.github/workflows/gitleaks.yml@fb1a159c596bf2c57b9f6f1ff99f546463a6a84a'
+require_absent .github/workflows/security.yml 'gitleaks/gitleaks-action|GITLEAKS_LICENSE'
 require_contains .github/workflows/security.yml 'pull-requests: read'
-require_contains .github/workflows/security.yml 'GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}'
-require_contains .github/workflows/security.yml 'GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}'
-require_contains .github/workflows/security.yml 'GITLEAKS_ENABLE_COMMENTS: false'
 gitleaks_ignored_findings=(
     '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/catalog.json:azure-ad-client-secret:1'
     '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/catalog.json:generic-api-key:1'
@@ -342,6 +342,8 @@ gitleaks_ignored_findings=(
     '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/mist-openapi.json:generic-api-key:1'
     '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/mist-openapi.json:jwt:1'
     '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/mist-openapi.json:private-key:1'
+    '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/catalog.json:pem-private-key:1'
+    '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/mist-openapi.json:pem-private-key:1'
 )
 if [[ -f .gitleaksignore ]]; then
     for finding in "${gitleaks_ignored_findings[@]}"; do
@@ -357,7 +359,9 @@ fi
 require_regex .github/workflows/release.yml 'actions/upload-artifact@[0-9a-f]{40}'
 require_regex .github/workflows/release.yml 'actions/attest-build-provenance@[0-9a-f]{40}'
 require_regex .github/workflows/release.yml '^permissions: \{\}$'
-require_count .github/workflows/release.yml 'contents: read' 3
+# 4 = the verify, image and archive jobs + the shared gitleaks caller job, which
+# must grant contents: read itself because the workflow top level is permissions: {}.
+require_count .github/workflows/release.yml 'contents: read' 4
 require_count .github/workflows/release.yml 'packages: write' 1
 require_count .github/workflows/release.yml 'id-token: write' 1
 require_count .github/workflows/release.yml 'attestations: write' 1
@@ -367,8 +371,9 @@ require_contains .github/workflows/release.yml 'cargo audit'
 require_contains .github/workflows/release.yml 'cargo deny check'
 require_contains .github/workflows/release.yml 'scripts/verify-reproducible-build.sh'
 require_contains .github/workflows/release.yml 'npm exec --yes --package=yaml@2.8.1 yaml -- valid "$file"'
-require_contains .github/workflows/release.yml 'gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e'
-require_contains .github/workflows/release.yml 'GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}'
+require_contains .github/workflows/release.yml 'uses: mechubsec/.github/.github/workflows/gitleaks.yml@fb1a159c596bf2c57b9f6f1ff99f546463a6a84a'
+require_contains .github/workflows/release.yml 'needs: secrets'
+require_absent .github/workflows/release.yml 'gitleaks/gitleaks-action|GITLEAKS_LICENSE'
 require_contains .github/dependabot.yml 'package-ecosystem: "github-actions"'
 require_contains .github/dependabot.yml 'package-ecosystem: "docker"'
 require_contains deny.toml '"MIT-0"'
@@ -392,7 +397,7 @@ require_contains docs/OPERATIONS.md 'sudo install -o rustmistmcp -g rustmistmcp 
 require_contains docs/OPERATIONS.md '/etc/rustmistmcp/mist-api-token'
 require_contains docs/OPERATIONS.md '/var/lib/rustmistmcp/tokens.json'
 require_contains docs/OPERATIONS.md '/etc/rustmistmcp/audit-hmac.key'
-require_contains docs/OPERATIONS.md 'organization-owned repository requires an encrypted `GITLEAKS_LICENSE`'
+require_contains docs/OPERATIONS.md 'shared `mechubsec/.github` gitleaks workflow'
 require_contains README.md '`/etc/rustmistmcp/mist.json` | `root:rustmistmcp`, `0640`'
 require_contains README.md '`/etc/rustmistmcp/mist-api-token` | `rustmistmcp:rustmistmcp`, `0600`'
 require_contains README.md '`/var/lib/rustmistmcp/tokens.json` | `rustmistmcp:rustmistmcp`, `0600`'
