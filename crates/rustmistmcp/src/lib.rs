@@ -2,6 +2,7 @@
 
 mod http_transport;
 mod server;
+pub mod site_discovery;
 
 pub use http_transport::{
     AuthConfig, LIVE_MIST_BLOCKER, MistScopePreflight, build_http_router,
