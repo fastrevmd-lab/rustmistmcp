@@ -1,0 +1,533 @@
+//! Startup and periodic discovery of the org → site map.
+//!
+//! `MistHandler` refuses every site-scoped tool call for a site it does not
+//! already know (see `MistHandler::replace_sites`), so whoever constructs it
+//! must supply a populated map. This walks `listOrgSites` for each
+//! allowlisted org to build that map, and offers a background loop to keep
+//! it current so newly added or removed sites are picked up without a
+//! restart.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
+
+use rustmistmcp_core::{Catalog, MistClient, MistError, MistRequest, MistResponseBody, MistTarget};
+use url::Url;
+
+use crate::MistHandler;
+
+const LIST_ORG_SITES_OPERATION: &str = "listOrgSites";
+const PAGE_LIMIT: u64 = 100;
+
+/// Bounds the number of pages fetched for a single org in a single pass.
+///
+/// Mist declares no ceiling on page count; this stops a misbehaving or
+/// malicious API from making discovery loop forever. At `PAGE_LIMIT` sites
+/// per page this is generous headroom over the 4096-site total the handler
+/// tracks (see [`MAX_TOTAL_SITES`]).
+const MAX_PAGES_PER_ORG: u64 = 64;
+
+/// Matches the ceiling `MistHandler` enforces on the assembled site map.
+/// Discovery stops inserting once the cap is hit (see [`discover_org_sites`])
+/// so the map handed to [`MistHandler::replace_sites`] never exceeds it and
+/// is never rejected outright for being oversized.
+const MAX_TOTAL_SITES: usize = 4096;
+
+/// Failure discovering one organization's sites.
+#[derive(Debug, thiserror::Error)]
+enum OrgDiscoveryError {
+    /// Building or dispatching the `listOrgSites` request failed.
+    #[error(transparent)]
+    Mist(#[from] MistError),
+    /// Mist returned a non-2xx status for `listOrgSites`.
+    #[error("listOrgSites returned HTTP {0}")]
+    Status(u16),
+    /// The validated response body was not the declared JSON array.
+    #[error("listOrgSites response was not a JSON array")]
+    NotAnArray,
+}
+
+impl OrgDiscoveryError {
+    /// A short, response-content-free description for logging.
+    ///
+    /// `MistError::InvalidResponse`'s reason can quote fragments of the
+    /// response body (a site name, an address). That's fine surfaced once at
+    /// the point of failure, but the refresh loop logs on every failed pass,
+    /// so this avoids repeatedly writing response content to local logs.
+    fn variant_name(&self) -> &'static str {
+        match self {
+            Self::Mist(MistError::InvalidResponse { .. }) => "invalid listOrgSites response",
+            Self::Mist(_) => "listOrgSites request failed",
+            Self::Status(_) => "listOrgSites returned a non-2xx status",
+            Self::NotAnArray => "listOrgSites response was not a JSON array",
+        }
+    }
+}
+
+/// Whether a single organization's `listOrgSites` pass captured every page.
+enum OrgOutcome {
+    /// Every page was fetched; the org's entries in the returned map are the
+    /// complete set.
+    Complete,
+    /// The global [`MAX_TOTAL_SITES`] cap was hit partway through this org's
+    /// pages. Its entries in the returned map are a partial set, not the
+    /// complete list, and must not be treated as "this org now has only
+    /// these sites".
+    Truncated,
+}
+
+/// Result of one discovery pass across all allowlisted orgs.
+pub struct SiteDiscovery {
+    /// Sites discovered this pass. For an org in `incomplete_orgs` this is a
+    /// partial or empty set for that org, never the complete list.
+    pub sites: BTreeMap<String, String>,
+    /// Orgs whose pass failed outright (request error, malformed response)
+    /// or was truncated by the total-site cap. Callers that already hold a
+    /// previous map should keep that org's previous entries rather than
+    /// trusting `sites` for it, so a transient error or a large tenant never
+    /// wipes out sites already known.
+    pub incomplete_orgs: BTreeSet<String>,
+}
+
+/// Discover every site in each allowlisted org.
+///
+/// Best-effort per organization: a request failure, rate limit, malformed
+/// response, or hitting [`MAX_TOTAL_SITES`] partway through an org is logged
+/// and that org is recorded in [`SiteDiscovery::incomplete_orgs`] rather than
+/// aborting the whole pass, so one flaky or oversized tenant does not blank
+/// out sites already known for the rest.
+pub async fn discover_sites(
+    client: &dyn MistClient,
+    catalog: &Catalog,
+    origin: &Url,
+    allowed_orgs: &[String],
+) -> SiteDiscovery {
+    let mut sites = BTreeMap::new();
+    let mut incomplete_orgs = BTreeSet::new();
+    for org_id in allowed_orgs {
+        match discover_org_sites(client, catalog, origin, org_id, &mut sites).await {
+            Ok(OrgOutcome::Complete) => {}
+            Ok(OrgOutcome::Truncated) => {
+                incomplete_orgs.insert(org_id.clone());
+                tracing::error!(
+                    org_id = %org_id,
+                    limit = MAX_TOTAL_SITES,
+                    "site discovery hit the total tracked-site cap while listing this \
+                     organization; its remaining sites stay unknown until the next refresh"
+                );
+            }
+            Err(error) => {
+                incomplete_orgs.insert(org_id.clone());
+                tracing::error!(
+                    org_id = %org_id,
+                    error = %error.variant_name(),
+                    "site discovery failed for organization; its sites remain unknown until the next refresh"
+                );
+            }
+        }
+    }
+    SiteDiscovery {
+        sites,
+        incomplete_orgs,
+    }
+}
+
+/// Merge a discovery pass into a previous map for a periodic refresh.
+///
+/// An org that fully succeeded this pass uses its freshly discovered
+/// entries. An org in `discovered.incomplete_orgs` keeps its entries from
+/// `previous` instead: a failed request or a truncated pass never replaces a
+/// complete set with a partial or empty one.
+fn merge_refresh(
+    discovered: SiteDiscovery,
+    previous: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let SiteDiscovery {
+        mut sites,
+        incomplete_orgs,
+    } = discovered;
+    if !incomplete_orgs.is_empty() {
+        sites.retain(|_, org_id| !incomplete_orgs.contains(org_id));
+        for (site_id, org_id) in previous {
+            if incomplete_orgs.contains(org_id) {
+                sites.insert(site_id.clone(), org_id.clone());
+            }
+        }
+    }
+    sites
+}
+
+async fn discover_org_sites(
+    client: &dyn MistClient,
+    catalog: &Catalog,
+    origin: &Url,
+    org_id: &str,
+    sites: &mut BTreeMap<String, String>,
+) -> Result<OrgOutcome, OrgDiscoveryError> {
+    for page in 1..=MAX_PAGES_PER_ORG {
+        let request = MistRequest {
+            operation_id: LIST_ORG_SITES_OPERATION.to_owned(),
+            path: BTreeMap::from([("org_id".to_owned(), org_id.to_owned())]),
+            query: BTreeMap::from([
+                ("limit".to_owned(), serde_json::json!(PAGE_LIMIT)),
+                ("page".to_owned(), serde_json::json!(page)),
+            ]),
+            json: None,
+            cursor: None,
+        };
+        let request = request.validate(catalog, origin)?;
+        let response = client.execute(request).await?;
+        if response.operation_id != LIST_ORG_SITES_OPERATION {
+            return Err(MistError::InvalidResponse {
+                operation_id: LIST_ORG_SITES_OPERATION.to_owned(),
+                reason: "response operation does not match request operation".to_owned(),
+            }
+            .into());
+        }
+        let response = response.validate(catalog, origin)?;
+        if !(200..300).contains(&response.status) {
+            return Err(OrgDiscoveryError::Status(response.status));
+        }
+        let MistResponseBody::Json(serde_json::Value::Array(page_sites)) = &response.body else {
+            return Err(OrgDiscoveryError::NotAnArray);
+        };
+        let page_len = page_sites.len();
+        for site in page_sites {
+            let Some(site_id) = site.get("id").and_then(serde_json::Value::as_str) else {
+                tracing::warn!(
+                    org_id = %org_id,
+                    "listOrgSites entry has no string id; skipping"
+                );
+                continue;
+            };
+            if MistTarget::site(site_id).is_err() {
+                tracing::warn!(
+                    org_id = %org_id,
+                    "listOrgSites entry has a non-canonical id; skipping"
+                );
+                continue;
+            }
+            if sites.len() >= MAX_TOTAL_SITES && !sites.contains_key(site_id) {
+                return Ok(OrgOutcome::Truncated);
+            }
+            sites.insert(site_id.to_owned(), org_id.to_owned());
+        }
+        if (page_len as u64) < PAGE_LIMIT {
+            break;
+        }
+    }
+    Ok(OrgOutcome::Complete)
+}
+
+/// Spawn a background task that re-discovers the site map on `interval` and
+/// swaps it into `handler`.
+///
+/// An org whose pass fails or is truncated this round keeps its previous
+/// entries (see [`merge_refresh`]) rather than losing them until the next
+/// successful pass, so a single flaky or oversized org cannot empty out
+/// sites this server already knew. A merged map that still fails
+/// [`MistHandler::replace_sites`]'s validation (for example a response
+/// naming an org outside the allowlist) is logged and dropped; the previous
+/// map stays in force rather than the refresh tearing down what already
+/// worked.
+///
+/// Returns the task's join handle so a caller can abort it on shutdown
+/// instead of leaving it running past the point anything observes it.
+pub fn spawn_refresh_loop(handler: MistHandler, interval: Duration) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        // The first tick fires immediately; startup already discovered once.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let previous = handler.sites_snapshot();
+            let discovered = discover_sites(
+                handler.client().as_ref(),
+                handler.catalog(),
+                handler.origin(),
+                handler.allowed_orgs(),
+            )
+            .await;
+            let incomplete_orgs = discovered.incomplete_orgs.len();
+            let sites = merge_refresh(discovered, &previous);
+            let count = sites.len();
+            match handler.replace_sites(sites) {
+                Ok(()) => {
+                    tracing::info!(sites = count, incomplete_orgs, "refreshed Mist site map");
+                }
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        "discovered site map failed validation; keeping the previous map"
+                    );
+                }
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use rustmistmcp_core::{Catalog, MistResponse};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn site_json(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "name": "test-site",
+            "country_code": "US",
+            "timezone": "UTC",
+            "created_time": 0,
+        })
+    }
+
+    /// Serves `pages` (already split as Mist would return them) for one org,
+    /// keyed by `(org_id, page)`; anything else is a test bug.
+    struct PagedClient {
+        pages: BTreeMap<(String, u64), Vec<serde_json::Value>>,
+        calls: AtomicUsize,
+        fail_org: Option<String>,
+    }
+
+    #[async_trait]
+    impl MistClient for PagedClient {
+        async fn execute(&self, request: MistRequest) -> Result<MistResponse, MistError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let org_id = request.path.get("org_id").cloned().unwrap_or_default();
+            if self.fail_org.as_deref() == Some(org_id.as_str()) {
+                return Err(MistError::Service("simulated failure".to_owned()));
+            }
+            let page = request
+                .query
+                .get("page")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(1);
+            let sites = self.pages.get(&(org_id, page)).cloned().unwrap_or_default();
+            Ok(MistResponse {
+                operation_id: LIST_ORG_SITES_OPERATION.to_owned(),
+                status: 200,
+                body: MistResponseBody::Json(serde_json::Value::Array(sites)),
+                cursor: None,
+                page: None,
+            })
+        }
+    }
+
+    fn origin() -> Url {
+        Url::parse("https://api.mist.com/").expect("origin")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_org_list_discovers_nothing() {
+        let catalog = Catalog::embedded().expect("catalog");
+        let client = PagedClient {
+            pages: BTreeMap::new(),
+            calls: AtomicUsize::new(0),
+            fail_org: None,
+        };
+        let discovered = discover_sites(&client, &catalog, &origin(), &[]).await;
+        assert!(discovered.sites.is_empty());
+        assert!(discovered.incomplete_orgs.is_empty());
+        assert_eq!(client.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn org_with_zero_sites_contributes_nothing() {
+        let catalog = Catalog::embedded().expect("catalog");
+        let org_id = "11111111-1111-1111-1111-111111111111".to_owned();
+        let client = PagedClient {
+            pages: BTreeMap::from([((org_id.clone(), 1), vec![])]),
+            calls: AtomicUsize::new(0),
+            fail_org: None,
+        };
+        let discovered = discover_sites(&client, &catalog, &origin(), &[org_id]).await;
+        assert!(discovered.sites.is_empty());
+        assert!(discovered.incomplete_orgs.is_empty());
+        assert_eq!(client.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn org_with_many_sites_pages_through_all_of_them() {
+        let catalog = Catalog::embedded().expect("catalog");
+        let org_id = "11111111-1111-1111-1111-111111111111".to_owned();
+        let full_page: Vec<_> = (0..PAGE_LIMIT)
+            .map(|i| site_json(&format!("22222222-2222-2222-2222-{i:012}")))
+            .collect();
+        let last_page = vec![site_json("33333333-3333-3333-3333-333333333333")];
+        let client = PagedClient {
+            pages: BTreeMap::from([
+                ((org_id.clone(), 1), full_page),
+                ((org_id.clone(), 2), last_page),
+            ]),
+            calls: AtomicUsize::new(0),
+            fail_org: None,
+        };
+        let discovered =
+            discover_sites(&client, &catalog, &origin(), std::slice::from_ref(&org_id)).await;
+        assert_eq!(discovered.sites.len(), PAGE_LIMIT as usize + 1);
+        assert!(discovered.sites.values().all(|org| org == &org_id));
+        assert!(discovered.incomplete_orgs.is_empty());
+        assert_eq!(client.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn one_failing_org_does_not_block_the_others() {
+        let catalog = Catalog::embedded().expect("catalog");
+        let good_org = "11111111-1111-1111-1111-111111111111".to_owned();
+        let bad_org = "44444444-4444-4444-4444-444444444444".to_owned();
+        let site_id = "22222222-2222-2222-2222-222222222222";
+        let client = PagedClient {
+            pages: BTreeMap::from([((good_org.clone(), 1), vec![site_json(site_id)])]),
+            calls: AtomicUsize::new(0),
+            fail_org: Some(bad_org.clone()),
+        };
+        let discovered = discover_sites(
+            &client,
+            &catalog,
+            &origin(),
+            &[bad_org.clone(), good_org.clone()],
+        )
+        .await;
+        assert_eq!(discovered.sites.get(site_id), Some(&good_org));
+        assert_eq!(discovered.sites.len(), 1);
+        assert_eq!(discovered.incomplete_orgs, BTreeSet::from([bad_org]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_refresh_pass_picks_up_a_newly_added_site() {
+        let catalog = Catalog::embedded().expect("catalog");
+        let org_id = "11111111-1111-1111-1111-111111111111".to_owned();
+        let existing = "22222222-2222-2222-2222-222222222222";
+        let added = "33333333-3333-3333-3333-333333333333";
+
+        let before = PagedClient {
+            pages: BTreeMap::from([((org_id.clone(), 1), vec![site_json(existing)])]),
+            calls: AtomicUsize::new(0),
+            fail_org: None,
+        };
+        let first =
+            discover_sites(&before, &catalog, &origin(), std::slice::from_ref(&org_id)).await;
+        assert_eq!(first.sites.len(), 1);
+        assert!(first.sites.contains_key(existing));
+
+        let after = PagedClient {
+            pages: BTreeMap::from([(
+                (org_id.clone(), 1),
+                vec![site_json(existing), site_json(added)],
+            )]),
+            calls: AtomicUsize::new(0),
+            fail_org: None,
+        };
+        let second =
+            discover_sites(&after, &catalog, &origin(), std::slice::from_ref(&org_id)).await;
+        assert_eq!(second.sites.len(), 2);
+        assert!(second.sites.contains_key(existing));
+        assert!(second.sites.contains_key(added));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn merge_refresh_keeps_previous_entries_for_a_failed_org() {
+        let catalog = Catalog::embedded().expect("catalog");
+        let good_org = "11111111-1111-1111-1111-111111111111".to_owned();
+        let bad_org = "44444444-4444-4444-4444-444444444444".to_owned();
+        let stable_site = "22222222-2222-2222-2222-222222222222";
+        let flaky_site = "55555555-5555-5555-5555-555555555555";
+
+        let previous = BTreeMap::from([
+            (stable_site.to_owned(), good_org.clone()),
+            (flaky_site.to_owned(), bad_org.clone()),
+        ]);
+
+        let client = PagedClient {
+            pages: BTreeMap::from([((good_org.clone(), 1), vec![site_json(stable_site)])]),
+            calls: AtomicUsize::new(0),
+            fail_org: Some(bad_org.clone()),
+        };
+        let discovered = discover_sites(
+            &client,
+            &catalog,
+            &origin(),
+            &[bad_org.clone(), good_org.clone()],
+        )
+        .await;
+        assert_eq!(
+            discovered.incomplete_orgs,
+            BTreeSet::from([bad_org.clone()])
+        );
+
+        let merged = merge_refresh(discovered, &previous);
+
+        assert_eq!(merged.get(stable_site), Some(&good_org));
+        assert_eq!(
+            merged.get(flaky_site),
+            Some(&bad_org),
+            "a failed org's previously known sites must survive a failed refresh pass"
+        );
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn discovery_truncates_instead_of_exceeding_the_total_site_cap() {
+        let catalog = Catalog::embedded().expect("catalog");
+        let org_id = "11111111-1111-1111-1111-111111111111".to_owned();
+
+        let mut pages = BTreeMap::new();
+        // 42 full pages of 100 sites each covers the 4096 cap with room to
+        // spare, so discovery must stop mid-org rather than requesting more.
+        for page in 1..=42u64 {
+            let page_sites: Vec<_> = (0..PAGE_LIMIT)
+                .map(|i| {
+                    let global = (page - 1) * PAGE_LIMIT + i;
+                    site_json(&format!("22222222-2222-2222-2222-{global:012x}"))
+                })
+                .collect();
+            pages.insert((org_id.clone(), page), page_sites);
+        }
+        let client = PagedClient {
+            pages,
+            calls: AtomicUsize::new(0),
+            fail_org: None,
+        };
+
+        let discovered =
+            discover_sites(&client, &catalog, &origin(), std::slice::from_ref(&org_id)).await;
+
+        assert_eq!(discovered.sites.len(), MAX_TOTAL_SITES);
+        assert_eq!(discovered.incomplete_orgs, BTreeSet::from([org_id]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_loop_swaps_the_handler_site_map() {
+        let org_id = "11111111-1111-1111-1111-111111111111".to_owned();
+        let site_id = "22222222-2222-2222-2222-222222222222";
+        let client = std::sync::Arc::new(PagedClient {
+            pages: BTreeMap::from([((org_id.clone(), 1), vec![site_json(site_id)])]),
+            calls: AtomicUsize::new(0),
+            fail_org: None,
+        });
+        let handler = MistHandler::with_client(
+            "https://api.mist.com/",
+            vec![org_id.clone()],
+            BTreeMap::new(),
+            client,
+        )
+        .expect("handler");
+
+        let task = spawn_refresh_loop(handler.clone(), Duration::from_millis(5));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if handler.sites_snapshot().contains_key(site_id) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "refresh loop did not populate the site map in time"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        task.abort();
+
+        assert_eq!(handler.sites_snapshot().get(site_id), Some(&org_id));
+    }
+}
