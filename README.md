@@ -202,7 +202,7 @@ sudo chown -R 65532:65532 packaging/container/state
 chmod 0600 packaging/container/runtime/mist-api-token \
   packaging/container/runtime/tokens.json \
   packaging/container/runtime/audit-hmac.key
-RUSTMISTMCP_IMAGE='ghcr.io/fastrevmd-lab/rustmistmcp@sha256:<verified-64-hex-digest>' \
+RUSTMISTMCP_IMAGE='ghcr.io/mechubsec/rustmistmcp@sha256:<verified-64-hex-digest>' \
   docker compose -f packaging/container/compose.example.yaml up
 ```
 
