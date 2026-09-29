@@ -199,6 +199,7 @@ pub const GATED_EXECUTE_OPERATIONS: &[&str] = &[
     "startSiteAutoMapAssignment",
     "startSiteDeviceZigbeeEventTrail",
     "startSiteDeviceZigbeePacketTrail",
+    "startSiteFlowCapture",
     "startSiteMapAutoGeofence",
     "startSiteMapAutoZone",
     "startSiteMapsAutoGeofence",

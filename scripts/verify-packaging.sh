@@ -344,6 +344,17 @@ gitleaks_ignored_findings=(
     '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/mist-openapi.json:private-key:1'
     '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/catalog.json:pem-private-key:1'
     '590c24ac8fce739487f3d2aed2c3b23ec1265f8f:docs/mist-api/mist-openapi.json:pem-private-key:1'
+    # 2609.1.0 refresh (#127): upstream example values in the byte-identical vendored spec.
+    'e5fcd8cd5b2f74d507b2160dcca41d2c78b6f5a0:docs/mist-api/catalog.json:azure-ad-client-secret:1'
+    'e5fcd8cd5b2f74d507b2160dcca41d2c78b6f5a0:docs/mist-api/catalog.json:generic-api-key:1'
+    'e5fcd8cd5b2f74d507b2160dcca41d2c78b6f5a0:docs/mist-api/catalog.json:jwt:1'
+    'e5fcd8cd5b2f74d507b2160dcca41d2c78b6f5a0:docs/mist-api/catalog.json:private-key:1'
+    'e5fcd8cd5b2f74d507b2160dcca41d2c78b6f5a0:docs/mist-api/catalog.json:pem-private-key:1'
+    'e5fcd8cd5b2f74d507b2160dcca41d2c78b6f5a0:docs/mist-api/mist-openapi.json:azure-ad-client-secret:1'
+    'e5fcd8cd5b2f74d507b2160dcca41d2c78b6f5a0:docs/mist-api/mist-openapi.json:generic-api-key:1'
+    'e5fcd8cd5b2f74d507b2160dcca41d2c78b6f5a0:docs/mist-api/mist-openapi.json:jwt:1'
+    'e5fcd8cd5b2f74d507b2160dcca41d2c78b6f5a0:docs/mist-api/mist-openapi.json:private-key:1'
+    'e5fcd8cd5b2f74d507b2160dcca41d2c78b6f5a0:docs/mist-api/mist-openapi.json:pem-private-key:1'
 )
 if [[ -f .gitleaksignore ]]; then
     for finding in "${gitleaks_ignored_findings[@]}"; do
