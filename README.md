@@ -310,6 +310,12 @@ Next, in order:
   credentials into logs.
 - **No secrets in the repo.** Mist API tokens live in operator-managed files
   outside version control. v1 does not accept OAuth client secrets.
+- **Device secrets redacted before the model sees them.** WLAN PSKs, RADIUS/SNMP
+  shared secrets, and API keys/tokens returned by Mist are stripped via
+  `mecmcp-redact` at every model-facing read, change-set preview, and plan
+  response. This is a denylist match on known credential-shaped fields, not a
+  cryptographic guarantee -- it is best-effort against shapes the denylist
+  does not yet cover, not a safe place to store secrets in a freeform field.
 
 ## WAN edge tools
 
@@ -322,14 +328,14 @@ targets SRX/SSR gateways and their overlay connectivity. See `KNOWN_TOOLS` in
 |---|---|
 | `apply_mist_change_set` | Apply an approved change set to Mist. Verifies approval, checks for drift, issues the mutation, and verifies the result. |
 | `approve_mist_change_set` | Grant second-principal approval to a planned change set. The approver must be distinct from the owner. |
-| `get_mist_change_set` | Inspect a staged change set, returning its state, owner, before/after, and approval status. |
+| `get_mist_change_set` | Inspect a staged change set, returning its state, owner, before/after, and approval status. Secret-bearing fields in `before`/`after` (PSKs, shared secrets, API keys/tokens) are redacted; structural fields and non-secret metadata are preserved. |
 | `get_mist_sle_impact` | Get gateways, applications, or the summary impacted by one site SLE metric. |
-| `get_mist_wan_config` | Get one WAN edge configuration object by ID. |
+| `get_mist_wan_config` | Get one WAN edge configuration object by ID. Secret-bearing fields (gateway-template tunnel PSKs, shared secrets, API keys/tokens) are redacted; structural fields and non-secret metadata are preserved. |
 | `get_mist_wan_edge_stats` | Get WAN edge gateway metrics for a site, or insight metrics for one gateway. |
 | `list_mist_applications` | List applications seen at a site, count them, or list the gateway application catalog. |
-| `list_mist_wan_config` | List WAN edge configuration objects: networks, services, service policies, gateway templates, or device profiles. |
+| `list_mist_wan_config` | List WAN edge configuration objects: networks, services, service policies, gateway templates, or device profiles. Secret-bearing fields (gateway-template tunnel PSKs, shared secrets, API keys/tokens) are redacted; structural fields and non-secret metadata are preserved. |
 | `list_mist_wan_edges` | List WAN edge gateways (SRX/SSR) in an organization or site. |
-| `plan_mist_change` | Stage a change set for a WAN edge configuration object (network, service, service policy, gateway template, or device profile). Returns a digest-bound plan ready for approval. Arrays replace wholesale; null deletes a field. |
+| `plan_mist_change` | Stage a change set for a WAN edge configuration object (network, service, service policy, gateway template, or device profile). Returns a digest-bound plan ready for approval. Arrays replace wholesale; null deletes a field. Secret-bearing fields in the returned `before`/`after` are redacted (the plan/apply lifecycle itself operates on unredacted values). |
 | `search_mist_bgp_peers` | Search WAN edge BGP peer stats in an organization or site, or count them. |
 | `search_mist_peer_paths` | Search SD-WAN overlay peer path stats, or count them by a distinct field. |
 | `search_mist_service_path_events` | Search WAN edge service path events for a site, or count them. |
