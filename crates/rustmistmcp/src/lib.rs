@@ -6,6 +6,6 @@ pub mod site_discovery;
 
 pub use http_transport::{
     AuthConfig, LIVE_MIST_BLOCKER, MistScopePreflight, build_http_router,
-    install_token_reload_handler, serve_http,
+    install_audit_reopen_handler, install_token_reload_handler, serve_http,
 };
 pub use server::{KNOWN_TOOLS, MistHandler, MistServerError, RESTRICTED_TOOLS};

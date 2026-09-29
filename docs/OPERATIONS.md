@@ -84,6 +84,44 @@ defect should be deployed.
 `request_id`s, so the two halves of one request cannot be correlated. That
 degrades analysis; it does not make any single record false.
 
+### Audit log rotation
+
+When `--audit-log-file` is set, the server keeps the `AuditFileSink` handle
+`mecmcp_audit::init_tracing` returns and reopens it by path on `SIGHUP`,
+independently of the token-store reload the same signal also triggers: this
+runs whenever a file sink is configured, whatever the transport and whether
+`--tokens-file` is set, so stdio mode and `--allow-no-auth` deployments still
+get lossless rotation. A failed reopen (bad path, permissions) is
+`warn`-logged and the previous file descriptor keeps working; it never stops
+the server or blocks the token-store reload.
+
+A ready-to-install fragment ships at
+[`packaging/logrotate/rustmistmcp-audit`](../packaging/logrotate/rustmistmcp-audit).
+Install it as `/etc/logrotate.d/rustmistmcp-audit` (root:root, mode 0644):
+
+```
+/var/lib/rustmistmcp/audit.jsonl {
+    daily
+    rotate 14
+    maxsize 100M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    su rustmistmcp rustmistmcp
+    postrotate
+        systemctl kill -s HUP rustmistmcp.service >/dev/null 2>&1 || true
+    endscript
+}
+```
+
+**Rename + reopen, not `copytruncate`.** `postrotate` renames the file and
+signals the process; every write after that lands in a fresh inode at the
+same path. Nothing written before the rename is truncated and nothing
+written after it is lost — `copytruncate` copies the file and then truncates
+it in place, which drops whatever is written in the gap between those two
+steps.
+
 ### The lab token deliberately runs on one authorization layer
 
 The `acceptance` token on LXC 952 pairs a wildcard shared scope with an

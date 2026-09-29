@@ -1,0 +1,31 @@
+# logrotate fragment for the rustmistmcp JSON audit sink.
+#
+# Install as /etc/logrotate.d/rustmistmcp-audit (root:root, mode 0644).
+# Enable the sink by passing --audit-log-file. The path below matches the
+# packaged systemd unit, which runs as rustmistmcp:rustmistmcp with
+# StateDirectory=rustmistmcp (/var/lib/rustmistmcp writable under
+# ProtectSystem=strict). Adjust paths/retention to your policy.
+#
+# Rename + reopen, not copytruncate:
+#   The server keeps the AuditFileSink handle mecmcp_audit::init_tracing
+#   returns and reopens it by path on SIGHUP, independently of the token
+#   store reload the same signal also triggers. logrotate renames the file
+#   below, sends SIGHUP through `postrotate`, and every write after that
+#   point goes to a fresh inode at the same path. Nothing written before the
+#   rename is truncated and nothing written after it is lost — unlike
+#   copytruncate, which drops whatever lands between its copy and its
+#   truncate.
+
+/var/lib/rustmistmcp/audit.jsonl {
+    daily
+    rotate 14
+    maxsize 100M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    su rustmistmcp rustmistmcp
+    postrotate
+        systemctl kill -s HUP rustmistmcp.service >/dev/null 2>&1 || true
+    endscript
+}

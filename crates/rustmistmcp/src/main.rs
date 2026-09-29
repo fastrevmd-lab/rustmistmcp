@@ -7,7 +7,10 @@ use clap::Parser as _;
 use cli::{Command, MistCli, Transport};
 use mecmcp_auth::TokenStoreFile;
 use rmcp::ServiceExt as _;
-use rustmistmcp::{AuthConfig, KNOWN_TOOLS, MistHandler, install_token_reload_handler, serve_http};
+use rustmistmcp::{
+    AuthConfig, KNOWN_TOOLS, MistHandler, install_audit_reopen_handler,
+    install_token_reload_handler, serve_http,
+};
 use rustmistmcp_core::{MistConfig, MistGrant};
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
@@ -18,7 +21,7 @@ async fn main() -> Result<()> {
     // Validate the flattened shared CLI
     mecmcp_runtime::cli_validate::validate(&args.shared)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    init_audit(&args)?;
+    let audit_sink = init_audit(&args)?;
 
     if let Some(Command::Token { action }) = args.shared.command {
         // Management is deliberately local: it validates against the fixed
@@ -31,6 +34,15 @@ async fn main() -> Result<()> {
             None, // No grant for basic token operations
         )
         .map_err(|error| anyhow::anyhow!("{error}"));
+    }
+
+    // Reopen the audit log on SIGHUP (unix only; a no-op install elsewhere),
+    // independent of the token store or transport: stdio mode and
+    // --allow-no-auth still audit to a file and still need rotation to work,
+    // and SIGHUP's default disposition otherwise terminates those
+    // deployments outright the moment logrotate signals them.
+    if let Some(sink) = audit_sink.clone() {
+        install_audit_reopen_handler(sink).context("installing audit log reopen handler")?;
     }
 
     // Lab mode removes two-person control, so say so where an operator will
@@ -229,7 +241,7 @@ async fn main() -> Result<()> {
     served
 }
 
-fn init_audit(args: &MistCli) -> Result<()> {
+fn init_audit(args: &MistCli) -> Result<Option<mecmcp_audit::AuditFileSink>> {
     let redaction = if args.shared.audit_redact.trim().is_empty() {
         None
     } else {
@@ -241,7 +253,7 @@ fn init_audit(args: &MistCli) -> Result<()> {
             .map_err(|error| anyhow::anyhow!("invalid --audit-redact: {error}"))?,
         )
     };
-    mecmcp_audit::init_tracing(&mecmcp_audit::AuditConfig {
+    let sink = mecmcp_audit::init_tracing(&mecmcp_audit::AuditConfig {
         format: mecmcp_audit::AuditFormat::parse(&args.shared.audit_format),
         audit_log_file: args.shared.audit_log_file.clone(),
         redaction,
@@ -249,7 +261,7 @@ fn init_audit(args: &MistCli) -> Result<()> {
     })
     .context("initializing audit tracing")?;
     mecmcp_audit::install_duration_metric_name("rustmistmcp_tool_duration_seconds");
-    Ok(())
+    Ok(sink)
 }
 
 async fn serve_stdio(handler: MistHandler) -> Result<()> {
