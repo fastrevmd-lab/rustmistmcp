@@ -105,6 +105,9 @@ async fn main() -> Result<()> {
         Err(error) => anyhow::bail!("SSDF evidence configuration: {error}"),
     };
 
+    let approval_digest_key =
+        load_approval_digest_key(args.shared.approval_digest_key_file.as_deref())?;
+
     let handler = MistHandler::from_config_with_lab_mode(
         &config,
         BTreeMap::new(),
@@ -113,6 +116,7 @@ async fn main() -> Result<()> {
         evidence
             .as_ref()
             .map(mecmcp_audit::EvidenceService::recorder),
+        approval_digest_key,
     )
     .context("constructing Mist handler with HTTP client")?;
     tracing::info!(
@@ -254,6 +258,17 @@ fn init_audit(args: &MistCli) -> Result<Option<mecmcp_audit::AuditFileSink>> {
             .map_err(|error| anyhow::anyhow!("invalid --audit-redact: {error}"))?,
         )
     };
+    // This binary does not build mecmcp-audit's `otel` feature, so exporting
+    // is not possible; `--otel-endpoint`'s own `--help` text says startup
+    // fails rather than silently dropping the export, and `init_tracing`
+    // hardcoding `otel: None` below would otherwise do exactly that (Percy's
+    // MEC-1217 review of #145, finding 2).
+    if args.shared.otel_endpoint.is_some() {
+        anyhow::bail!(
+            "--otel-endpoint requires a build of rustmistmcp with mecmcp-audit's `otel` feature, \
+             which this binary does not enable"
+        );
+    }
     let sink = mecmcp_audit::init_tracing(&mecmcp_audit::AuditConfig {
         format: mecmcp_audit::AuditFormat::parse(&args.shared.audit_format),
         audit_log_file: args.shared.audit_log_file.clone(),
@@ -264,6 +279,24 @@ fn init_audit(args: &MistCli) -> Result<Option<mecmcp_audit::AuditFileSink>> {
     .context("initializing audit tracing")?;
     mecmcp_audit::install_duration_metric_name("rustmistmcp_tool_duration_seconds");
     Ok(sink)
+}
+
+/// Load `--approval-digest-key-file`, if set.
+///
+/// `None` keeps the change-set coordinator on the unkeyed v5 approval digest
+/// (today's default). Propagating the error on a bad path rather than
+/// swallowing it matters here: a deployment that set this flag believes the
+/// digest is keyed, and starting up anyway with no key (silently falling
+/// back to unkeyed) would make that belief false (Percy's MEC-1217 review of
+/// #145, finding 1).
+fn load_approval_digest_key(
+    path: Option<&std::path::Path>,
+) -> Result<Option<mecmcp_changeset::ApprovalDigestKey>> {
+    path.map(|path| {
+        mecmcp_changeset::ApprovalDigestKey::load_from_file(path)
+            .with_context(|| format!("loading --approval-digest-key-file {}", path.display()))
+    })
+    .transpose()
 }
 
 async fn serve_stdio(handler: MistHandler) -> Result<()> {
@@ -465,6 +498,7 @@ fn load_listener_tls(args: &MistCli) -> Result<Option<Arc<rustls::ServerConfig>>
 mod tests {
     use super::*;
     use mecmcp_runtime::cli::Transport;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     /// Verify that the (None, false) case — neither --tokens-file nor
@@ -681,5 +715,118 @@ mod tests {
         let address: SocketAddr = "0.0.0.0:8080".parse().unwrap();
         refuse_lab_mode_off_loopback(false, &address)
             .expect("without --lab-mode, any bind address is this check's no-op");
+    }
+
+    /// No `--approval-digest-key-file` keeps the coordinator unkeyed, same as
+    /// today.
+    #[test]
+    fn no_approval_digest_key_file_is_fine() {
+        assert!(
+            load_approval_digest_key(None)
+                .expect("no path is not an error")
+                .is_none()
+        );
+    }
+
+    /// A valid key file is loaded, not silently dropped (Percy's MEC-1217
+    /// review of #145, finding 1: `--approval-digest-key-file` used to be
+    /// accepted by clap and then never read anywhere).
+    #[test]
+    fn a_valid_approval_digest_key_file_is_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key");
+        std::fs::write(&path, b"a-sufficiently-long-test-key-value").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let key = load_approval_digest_key(Some(&path))
+            .expect("a valid key file must load")
+            .expect("Some(path) must produce Some(key)");
+        assert_eq!(&*key, b"a-sufficiently-long-test-key-value");
+    }
+
+    /// A key file that fails `mecmcp-changeset`'s checks (here: too short)
+    /// must fail startup, not fall back to running unkeyed. Silently ignoring
+    /// an invalid key is exactly the fail-open behaviour Percy flagged.
+    #[test]
+    fn a_too_short_approval_digest_key_file_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key");
+        std::fs::write(&path, b"short").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let error = load_approval_digest_key(Some(&path))
+            .expect_err("a too-short key file must be refused, not silently skipped");
+        assert!(
+            error.to_string().contains("approval-digest-key-file"),
+            "{error}"
+        );
+    }
+
+    /// A missing key file must fail startup rather than silently starting
+    /// unkeyed -- the operator asked for a keyed digest and typo'd the path.
+    #[test]
+    fn a_missing_approval_digest_key_file_fails_closed() {
+        let error = load_approval_digest_key(Some(std::path::Path::new(
+            "/nonexistent/does-not-exist/key",
+        )))
+        .expect_err("a missing key file must be refused, not silently skipped");
+        assert!(
+            error.to_string().contains("approval-digest-key-file"),
+            "{error}"
+        );
+    }
+
+    /// `--otel-endpoint` must refuse startup rather than silently dropping
+    /// the export this binary cannot send (Percy's MEC-1217 review of #145,
+    /// finding 2: `init_audit` hardcoded `otel: None` no matter what the flag
+    /// said).
+    #[test]
+    fn otel_endpoint_set_refuses_to_start() {
+        let mut args = base_cli_for_otel_test();
+        args.shared.otel_endpoint = Some("http://127.0.0.1:4318".to_owned());
+
+        let error = init_audit(&args).expect_err("--otel-endpoint must be refused by this binary");
+        assert!(error.to_string().contains("--otel-endpoint"), "{error}");
+    }
+
+    /// No `--otel-endpoint` keeps today's behaviour: audit initializes with
+    /// `otel: None`.
+    #[test]
+    fn no_otel_endpoint_starts_normally() {
+        let args = base_cli_for_otel_test();
+        init_audit(&args).expect("no --otel-endpoint must not be refused");
+    }
+
+    fn base_cli_for_otel_test() -> MistCli {
+        MistCli {
+            shared: mecmcp_runtime::cli::Cli {
+                evidence: mecmcp_runtime::cli::EvidenceArgs::default(),
+                transport: Transport::StreamableHttp,
+                host: "127.0.0.1".to_owned(),
+                port: 8080,
+                tokens_file: None,
+                allow_no_auth: true,
+                allowed_host: vec![],
+                allowed_origin: vec![],
+                allow_insecure_bind: false,
+                tls_cert: None,
+                tls_key: None,
+                device_mapping: PathBuf::from("/dev/null"),
+                audit_format: String::new(),
+                audit_redact: String::new(),
+                audit_log_file: None,
+                audit_hmac_key_file: None,
+                audit_journald: false,
+                command: None,
+                otel_endpoint: None,
+                otel_service_name: "mecmcp".to_owned(),
+                approval_digest_key_file: None,
+            },
+            state_file: PathBuf::from("/dev/null/changeset-state.json"),
+            approval_timeout_secs: 3600,
+            lab_mode: false,
+            web_approver: Default::default(),
+            site_refresh_interval_secs: 0,
+        }
     }
 }

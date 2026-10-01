@@ -259,12 +259,18 @@ fn load_coordinator(
     path: Option<&std::path::Path>,
     lab_mode: bool,
     evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
+    approval_digest_key: Option<mecmcp_changeset::ApprovalDigestKey>,
 ) -> Result<Arc<mecmcp_changeset::ChangesetCoordinator>, MistServerError> {
-    let mut coordinator = mecmcp_changeset::ChangesetCoordinator::load(
+    // `load_with_key` verifies any on-disk v6 approval digest against the key
+    // and stores it on the returned coordinator for future signs; it must not
+    // also be passed to `with_approval_digest_key` afterwards, or the two
+    // copies could drift (see mecmcp_runtime::cli::Cli::approval_digest_key_file).
+    let mut coordinator = mecmcp_changeset::ChangesetCoordinator::load_with_key(
         path,
         change_set_limits(),
         std::time::Duration::from_secs(3600),
         lab_mode,
+        approval_digest_key,
     )
     .map_err(|error| MistServerError::ChangeSetState(error.to_string()))?;
     if let Some(recorder) = evidence {
@@ -360,7 +366,7 @@ impl MistHandler {
         sites: BTreeMap<String, String>,
         state_path: &std::path::Path,
     ) -> Result<Self, MistServerError> {
-        Self::from_config_with_lab_mode(config, sites, state_path, false, None)
+        Self::from_config_with_lab_mode(config, sites, state_path, false, None, None)
     }
 
     /// Construct a production handler with optional lab mode.
@@ -378,6 +384,7 @@ impl MistHandler {
         state_path: &std::path::Path,
         lab_mode: bool,
         evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
+        approval_digest_key: Option<mecmcp_changeset::ApprovalDigestKey>,
     ) -> Result<Self, MistServerError> {
         // Load credential using mecmcp-secret (enforces mode 0600)
         let credential = mecmcp_secret::load_from_file(
@@ -398,7 +405,12 @@ impl MistHandler {
 
         // Load change-set coordinator at the configured state path (the
         // `--state-file` CLI flag; production's default lives there too).
-        let coordinator = load_coordinator(Some(state_path), lab_mode, evidence.clone())?;
+        let coordinator = load_coordinator(
+            Some(state_path),
+            lab_mode,
+            evidence.clone(),
+            approval_digest_key,
+        )?;
 
         let origin = validate_mist_endpoint(&config.endpoint)
             .map_err(|_| MistServerError::InvalidEndpoint)?;
@@ -476,7 +488,7 @@ impl MistHandler {
             sites: Arc::new(std::sync::RwLock::new(sites)),
             catalog: Arc::new(Catalog::embedded()?),
             client,
-            coordinator: load_coordinator(state_path, lab_mode, None)?,
+            coordinator: load_coordinator(state_path, lab_mode, None, None)?,
             evidence: None,
             lab_mode,
             tool_router: Self::mist_tool_router(),
@@ -503,7 +515,7 @@ impl MistHandler {
             sites: Arc::new(std::sync::RwLock::new(sites)),
             catalog: Arc::new(Catalog::embedded()?),
             client,
-            coordinator: load_coordinator(None, false, Some(evidence.clone()))?,
+            coordinator: load_coordinator(None, false, Some(evidence.clone()), None)?,
             evidence: Some(evidence),
             lab_mode: false,
             tool_router: Self::mist_tool_router(),
@@ -5279,6 +5291,75 @@ mod tests {
             "every tool in KNOWN_TOOLS must be swept for fixture-secret leakage; \
              a tool present in one set but not the other means this test was not \
              updated alongside the registry"
+        );
+    }
+
+    /// `--approval-digest-key-file` must not be silently ignored (Percy's
+    /// MEC-1217 review of #145, finding 1): a coordinator built with a key via
+    /// `load_coordinator` has to actually produce the keyed v6 approval
+    /// digest, not the unkeyed v5 one a caller who thinks the flag protects
+    /// them would otherwise get.
+    #[tokio::test]
+    async fn an_approval_digest_key_passed_to_load_coordinator_produces_a_v6_digest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_path = dir.path().join("changeset-state.json");
+        let key = b"a-sufficiently-long-test-key".as_slice();
+
+        let coordinator = load_coordinator(
+            Some(&state_path),
+            false,
+            None,
+            Some(mecmcp_changeset::ApprovalDigestKey::new(key)),
+        )
+        .expect("coordinator with a configured key");
+
+        let created = coordinator
+            .create_change_set(
+                "site/device-a".to_string(),
+                vec![serde_json::json!({"action": "set", "target": "/test"})],
+                "alice".to_string(),
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+                "policy-sig".to_string(),
+            )
+            .await
+            .expect("create");
+        coordinator
+            .approve_change_set(
+                created.change_set_id.clone(),
+                "site/device-a".to_string(),
+                "bob".to_string(),
+                created.digest.clone(),
+                mecmcp_audit::ActorType::Human,
+            )
+            .await
+            .expect("approve");
+
+        let state = mecmcp_changeset::persistence::read_state_with_key(
+            &state_path,
+            change_set_limits().max_state_bytes,
+            Some(key),
+        )
+        .expect("read back with the same key");
+        let approval = state.change_sets[&created.change_set_id]
+            .approval
+            .as_ref()
+            .expect("approval");
+        assert_eq!(
+            approval.digest_version, 6,
+            "a key passed through load_coordinator must produce a v6 (keyed) digest, \
+             not the unkeyed v5 one -- otherwise --approval-digest-key-file does nothing"
+        );
+
+        drop(coordinator);
+        let unkeyed_read = mecmcp_changeset::persistence::read_state_with_key(
+            &state_path,
+            change_set_limits().max_state_bytes,
+            None,
+        );
+        assert!(
+            unkeyed_read.is_err(),
+            "a v6 digest produced through load_coordinator must not verify without the key"
         );
     }
 }
