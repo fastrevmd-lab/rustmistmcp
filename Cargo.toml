@@ -56,7 +56,7 @@ zeroize = "1"
 mecmcp-audit = { version = "0.25.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.25.0" }
 mecmcp-auth = { version = "0.25.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.25.0" }
 mecmcp-changeset = { version = "0.25.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.25.0" }
-mecmcp-http = { version = "0.25.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.25.0" }
+mecmcp-http = { version = "0.25.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.25.0", features = ["absolute-url"] }
 mecmcp-inventory = { version = "0.25.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.25.0" }
 mecmcp-job = { version = "0.25.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.25.0" }
 mecmcp-redact = { version = "0.25.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.25.0" }

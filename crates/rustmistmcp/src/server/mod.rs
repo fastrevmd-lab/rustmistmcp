@@ -10,8 +10,8 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use mecmcp_auth::CallerCtx;
 use mecmcp_server::{
-    ResultFormat, ResultLimits, audit_scope, authorize_call, caller_from_extensions,
-    filter_tools_for_scope, tool_result,
+    OutputRedaction, ResultFormat, ResultLimits, audit_scope, authorize_call,
+    caller_from_extensions, filter_tools_for_scope, tool_result,
 };
 use rmcp::{
     RoleServer, ServerHandler,
@@ -106,7 +106,12 @@ where
     E: std::fmt::Display,
 {
     let domain_error = result.as_ref().err().map(ToString::to_string);
-    let output = tool_result(result, ResultFormat::PrettyJson, RESULT_LIMITS);
+    let output = tool_result(
+        result,
+        ResultFormat::PrettyJson,
+        RESULT_LIMITS,
+        OutputRedaction::Apply,
+    );
     if output.is_error == Some(true) {
         audit.fail(domain_error.unwrap_or_else(|| {
             "successful domain result failed bounded MCP result conversion".to_owned()
@@ -563,6 +568,7 @@ impl MistHandler {
                     Err(error),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 );
             }
         };
@@ -575,6 +581,7 @@ impl MistHandler {
                     Err(error),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 );
             }
         };
@@ -600,6 +607,7 @@ impl MistHandler {
                 Err(error),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
         if caller.is_none() && operation.capability == MistCapability::PrivilegedRead {
@@ -611,6 +619,7 @@ impl MistHandler {
                 Err(error),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
         if let Err(error) = authorize_call(
@@ -624,6 +633,7 @@ impl MistHandler {
                 Err(MistCallError::Authorization(error.to_string())),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
         if let Err(error) =
@@ -634,6 +644,7 @@ impl MistHandler {
                 Err(error),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
         if let Some(target) = &target {
@@ -677,6 +688,7 @@ impl MistHandler {
                     Err(error),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 );
             }
         }
@@ -686,6 +698,7 @@ impl MistHandler {
                 Err(error),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
 
@@ -704,6 +717,7 @@ impl MistHandler {
                     Err(MistCallError::Mist(error)),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 );
             }
         };
@@ -719,6 +733,7 @@ impl MistHandler {
                     Err(MistCallError::Mist(error)),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 );
             }
         };
@@ -733,6 +748,7 @@ impl MistHandler {
                 Err(MistCallError::Mist(error)),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
         let mut response = match response.validate(&self.catalog, &self.origin) {
@@ -743,6 +759,7 @@ impl MistHandler {
                     Err(MistCallError::Mist(error)),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 );
             }
         };
@@ -763,6 +780,7 @@ impl MistHandler {
                 Err(MistCallError::Mist(error)),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
         if let Some(cursor) = response.cursor.take() {
@@ -775,6 +793,7 @@ impl MistHandler {
                             Err(MistCallError::Mist(error)),
                             ResultFormat::PrettyJson,
                             RESULT_LIMITS,
+                            OutputRedaction::Apply,
                         );
                     }
                 };
@@ -800,6 +819,7 @@ impl MistHandler {
                     Err(error),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 );
             }
         };
@@ -840,6 +860,7 @@ impl MistHandler {
                 Err(error),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
         let (path, query, cursor) = match args.cursor {
@@ -870,6 +891,7 @@ impl MistHandler {
                         Err(error),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     );
                 };
                 let Some((path, query, stored_target)) = cursor.request_context() else {
@@ -887,6 +909,7 @@ impl MistHandler {
                         Err(error),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     );
                 };
                 let path = path.clone();
@@ -912,6 +935,7 @@ impl MistHandler {
                         Err(error),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     );
                 }
                 (path, query, Some(cursor))
@@ -1732,6 +1756,7 @@ impl MistHandler {
                 Err(MistCallError::Authorization(error.to_string())),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
         let operation = self.catalog.operation(&args.operation_id);
@@ -1750,6 +1775,7 @@ impl MistHandler {
                     ))),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ))
             }
         }
@@ -1978,6 +2004,7 @@ impl MistHandler {
                 Err(MistCallError::AmbiguousScope),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
         let resolved = wan::applications(args.source.into(), args.mode.into());
@@ -2009,6 +2036,7 @@ impl MistHandler {
                 Err(MistCallError::Authorization(error.to_string())),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
         let organizations = self
@@ -2128,6 +2156,7 @@ impl MistHandler {
                     Err(MistCallError::AmbiguousScope),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -2167,6 +2196,7 @@ impl MistHandler {
                     Err(MistCallError::AmbiguousScope),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -2218,6 +2248,7 @@ impl MistHandler {
                     Err(MistCallError::AmbiguousScope),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -2289,6 +2320,7 @@ impl MistHandler {
                     Err(MistCallError::AmbiguousScope),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -2382,6 +2414,7 @@ impl MistHandler {
                 Err(MistCallError::Authorization(error.to_string())),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
         let limit = usize::from(args.limit.unwrap_or(20));
@@ -2392,6 +2425,7 @@ impl MistHandler {
                 Err(error),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
         let query = args.query.to_ascii_lowercase();
@@ -2532,6 +2566,7 @@ impl MistHandler {
                 ),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
 
@@ -2551,6 +2586,7 @@ impl MistHandler {
                 ),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
 
@@ -2568,6 +2604,7 @@ impl MistHandler {
                 )),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
 
@@ -2585,6 +2622,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>("update requires object_id"),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -2626,6 +2664,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>("read result was not text"),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -2639,6 +2678,7 @@ impl MistHandler {
                         )),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -2650,6 +2690,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>("read response missing data field"),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             }
@@ -2677,6 +2718,7 @@ impl MistHandler {
                     Err::<serde_json::Value, _>(error.to_string()),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -2712,6 +2754,7 @@ impl MistHandler {
                     Err::<serde_json::Value, _>(format!("lab mode waive failed: {error}")),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         }
@@ -2783,6 +2826,7 @@ impl MistHandler {
                     Err::<serde_json::Value, _>(error.to_string()),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -2797,6 +2841,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>(format!("failed to parse preview: {error}")),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -2947,6 +2992,7 @@ impl MistHandler {
                     Err::<serde_json::Value, _>(error.to_string()),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -3010,6 +3056,7 @@ impl MistHandler {
                     Err::<serde_json::Value, _>(error.to_string()),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -3027,6 +3074,7 @@ impl MistHandler {
                     Err::<serde_json::Value, _>(error.to_string()),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -3043,6 +3091,7 @@ impl MistHandler {
                 )),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
 
@@ -3064,6 +3113,7 @@ impl MistHandler {
                 )),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
 
@@ -3077,6 +3127,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>(format!("failed to parse preview: {error}")),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -3098,6 +3149,7 @@ impl MistHandler {
                         ),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -3108,6 +3160,7 @@ impl MistHandler {
                 Err::<serde_json::Value, _>("change set has no preview"),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         };
 
@@ -3130,6 +3183,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>("update requires object_id"),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             }
@@ -3176,6 +3230,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>("drift check result was not text"),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -3189,6 +3244,7 @@ impl MistHandler {
                         )),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -3200,6 +3256,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>("drift check response missing data field"),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -3215,6 +3272,7 @@ impl MistHandler {
                         )),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -3272,6 +3330,7 @@ impl MistHandler {
                     ),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
             true
@@ -3289,6 +3348,7 @@ impl MistHandler {
                 )),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
 
@@ -3320,6 +3380,7 @@ impl MistHandler {
                 Err::<serde_json::Value, _>(message),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
 
@@ -3351,6 +3412,7 @@ impl MistHandler {
                     Err::<serde_json::Value, _>(error.to_string()),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -3402,6 +3464,7 @@ impl MistHandler {
                     Err::<serde_json::Value, _>(format!("write failed: {error}")),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -3426,6 +3489,7 @@ impl MistHandler {
                             Err::<serde_json::Value, _>("create response missing id field"),
                             ResultFormat::PrettyJson,
                             RESULT_LIMITS,
+                            OutputRedaction::Apply,
                         ));
                     }
                 },
@@ -3443,6 +3507,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>("create response was not JSON"),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             }
@@ -3526,6 +3591,7 @@ impl MistHandler {
                 Err::<serde_json::Value, _>(format!("failed to persist final state: {error}")),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
 
