@@ -1,7 +1,6 @@
 //! Curated Mist MCP handler: read tools plus change-set-gated WAN edge mutations.
 
 mod change_set;
-mod redact;
 mod similarity;
 mod wan;
 mod wan_write;
@@ -1052,7 +1051,6 @@ impl ReadEnvelope {
         };
         if redact_output {
             mecmcp_redact::redact_json_value(&mut data);
-            redact::redact_mist_extra_fields(&mut data);
         }
         let next_cursor = response
             .cursor
@@ -2773,7 +2771,6 @@ impl MistHandler {
         // now, at the point they join a response the model will see.
         let mut redacted_after = staged.after.clone();
         mecmcp_redact::redact_json_value(&mut redacted_after);
-        redact::redact_mist_extra_fields(&mut redacted_after);
 
         let response = if before.is_null() {
             serde_json::json!({
@@ -2787,7 +2784,6 @@ impl MistHandler {
         } else {
             let mut redacted_before = staged.before.clone();
             mecmcp_redact::redact_json_value(&mut redacted_before);
-            redact::redact_mist_extra_fields(&mut redacted_before);
             serde_json::json!({
                 "change_set_id": staged.change_set_id,
                 "plan_digest": staged.plan_digest,
@@ -2867,8 +2863,6 @@ impl MistHandler {
             // this response's own copy before it reaches the model.
             mecmcp_redact::redact_json_value(&mut before_value);
             mecmcp_redact::redact_json_value(&mut after_value);
-            redact::redact_mist_extra_fields(&mut before_value);
-            redact::redact_mist_extra_fields(&mut after_value);
             (before_value, after_value)
         } else {
             (serde_json::Value::Null, serde_json::Value::Null)
