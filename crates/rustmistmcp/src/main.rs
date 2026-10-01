@@ -258,6 +258,7 @@ fn init_audit(args: &MistCli) -> Result<Option<mecmcp_audit::AuditFileSink>> {
         audit_log_file: args.shared.audit_log_file.clone(),
         redaction,
         journald: args.shared.audit_journald,
+        otel: None,
     })
     .context("initializing audit tracing")?;
     mecmcp_audit::install_duration_metric_name("rustmistmcp_tool_duration_seconds");
