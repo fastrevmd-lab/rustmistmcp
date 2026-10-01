@@ -1610,7 +1610,7 @@ dependencies = [
 [[package]]
 name = "mecmcp-redact"
 version = "0.24.1"
-source = "git+https://github.com/mechubsec/mecmcp?rev=2e157e0f09894e2a5309408523c0911425eebd20#2e157e0f09894e2a5309408523c0911425eebd20"
+source = "git+https://github.com/mechubsec/mecmcp?rev=b549d258829fc69da2d139e73094cffd1a55dee1#b549d258829fc69da2d139e73094cffd1a55dee1"
 dependencies = [
  "hmac",
  "quick-xml",

@@ -62,8 +62,10 @@ mecmcp-job = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", 
 # mecmcp-redact landed on mecmcp's main branch after v0.24.1 was tagged and
 # has not shipped in a tagged release yet, so this pins the exact commit
 # rather than a tag like every other mecmcp-* crate above. Swap this to a
-# tag once one exists that includes it.
-mecmcp-redact = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", rev = "2e157e0f09894e2a5309408523c0911425eebd20" }
+# tag once one exists that includes it. Pinned past MEC-711 (denylist
+# auth_key/auth_keys, keywrap_kek/mack, WEP keys) so this crate's own
+# Mist-specific redact.rs module can be deleted as dead code (MEC-1243).
+mecmcp-redact = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", rev = "b549d258829fc69da2d139e73094cffd1a55dee1" }
 mecmcp-runtime = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", tag = "v0.24.1" }
 mecmcp-secret = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", tag = "v0.24.1" }
 mecmcp-server = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", tag = "v0.24.1" }

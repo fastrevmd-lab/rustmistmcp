@@ -19,7 +19,7 @@ const LOCKFILE: &str = include_str!("../../../Cargo.lock");
 /// crate pinned by exact commit instead of by tag (see the comment beside its
 /// `[workspace.dependencies]` entry). Swap this to `MECMCP_TAG`'s generic
 /// check, and drop this exception, once a tag exists that includes it.
-const MECMCP_REDACT_REVISION: &str = "2e157e0f09894e2a5309408523c0911425eebd20";
+const MECMCP_REDACT_REVISION: &str = "b549d258829fc69da2d139e73094cffd1a55dee1";
 
 #[test]
 fn workspace_metadata_lints_and_shared_revision_are_locked() {
