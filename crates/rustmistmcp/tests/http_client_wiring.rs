@@ -403,7 +403,8 @@ async fn from_config_constructs_a_real_client_not_the_blocked_stub() {
         allowed_orgs: vec!["11111111-1111-1111-1111-111111111111".to_owned()],
     };
 
-    let handler = MistHandler::from_config(&config, BTreeMap::new())
+    let state_path = dir.path().join("changeset-state.json");
+    let handler = MistHandler::from_config(&config, BTreeMap::new(), &state_path)
         .expect("from_config should build a handler");
 
     assert!(

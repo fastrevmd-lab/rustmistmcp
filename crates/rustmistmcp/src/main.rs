@@ -108,6 +108,7 @@ async fn main() -> Result<()> {
     let handler = MistHandler::from_config_with_lab_mode(
         &config,
         BTreeMap::new(),
+        &args.state_file,
         args.lab_mode,
         evidence
             .as_ref()

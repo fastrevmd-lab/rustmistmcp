@@ -358,8 +358,9 @@ impl MistHandler {
     pub fn from_config(
         config: &rustmistmcp_core::MistConfig,
         sites: BTreeMap<String, String>,
+        state_path: &std::path::Path,
     ) -> Result<Self, MistServerError> {
-        Self::from_config_with_lab_mode(config, sites, false, None)
+        Self::from_config_with_lab_mode(config, sites, state_path, false, None)
     }
 
     /// Construct a production handler with optional lab mode.
@@ -374,6 +375,7 @@ impl MistHandler {
     pub fn from_config_with_lab_mode(
         config: &rustmistmcp_core::MistConfig,
         sites: BTreeMap<String, String>,
+        state_path: &std::path::Path,
         lab_mode: bool,
         evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
     ) -> Result<Self, MistServerError> {
@@ -394,14 +396,9 @@ impl MistHandler {
         )
         .map_err(|error| MistServerError::ClientConstruction(error.to_string()))?;
 
-        // Load change-set coordinator with production path
-        let coordinator = load_coordinator(
-            Some(std::path::Path::new(
-                "/var/lib/rustmistmcp/changeset-state.json",
-            )),
-            lab_mode,
-            evidence.clone(),
-        )?;
+        // Load change-set coordinator at the configured state path (the
+        // `--state-file` CLI flag; production's default lives there too).
+        let coordinator = load_coordinator(Some(state_path), lab_mode, evidence.clone())?;
 
         let origin = validate_mist_endpoint(&config.endpoint)
             .map_err(|_| MistServerError::InvalidEndpoint)?;
