@@ -117,6 +117,7 @@ async fn main() -> Result<()> {
             .as_ref()
             .map(mecmcp_audit::EvidenceService::recorder),
         approval_digest_key,
+        std::time::Duration::from_secs(args.approval_timeout_secs),
     )
     .context("constructing Mist handler with HTTP client")?;
     tracing::info!(

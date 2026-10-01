@@ -250,6 +250,11 @@ fn change_set_limits() -> mecmcp_changeset::OperationLimits {
     }
 }
 
+/// Approval timeout used where no CLI value is available (in-memory test and
+/// example constructors). Production always threads the parsed
+/// `--approval-timeout-secs` value through instead.
+const DEFAULT_APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// Load the coordinator for a handler.
 ///
 /// `None` keeps state in memory, which is what tests want. Production passes
@@ -259,6 +264,7 @@ fn load_coordinator(
     lab_mode: bool,
     evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
     approval_digest_key: Option<mecmcp_changeset::ApprovalDigestKey>,
+    approval_timeout: std::time::Duration,
 ) -> Result<Arc<mecmcp_changeset::ChangesetCoordinator>, MistServerError> {
     // `load_with_key` verifies any on-disk v6 approval digest against the key
     // and stores it on the returned coordinator for future signs; it must not
@@ -267,7 +273,7 @@ fn load_coordinator(
     let mut coordinator = mecmcp_changeset::ChangesetCoordinator::load_with_key(
         path,
         change_set_limits(),
-        std::time::Duration::from_secs(3600),
+        approval_timeout,
         lab_mode,
         approval_digest_key,
     )
@@ -365,7 +371,15 @@ impl MistHandler {
         sites: BTreeMap<String, String>,
         state_path: &std::path::Path,
     ) -> Result<Self, MistServerError> {
-        Self::from_config_with_lab_mode(config, sites, state_path, false, None, None)
+        Self::from_config_with_lab_mode(
+            config,
+            sites,
+            state_path,
+            false,
+            None,
+            None,
+            DEFAULT_APPROVAL_TIMEOUT,
+        )
     }
 
     /// Construct a production handler with optional lab mode.
@@ -384,6 +398,7 @@ impl MistHandler {
         lab_mode: bool,
         evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
         approval_digest_key: Option<mecmcp_changeset::ApprovalDigestKey>,
+        approval_timeout: std::time::Duration,
     ) -> Result<Self, MistServerError> {
         // Load credential using mecmcp-secret (enforces mode 0600)
         let credential = mecmcp_secret::load_from_file(
@@ -409,6 +424,7 @@ impl MistHandler {
             lab_mode,
             evidence.clone(),
             approval_digest_key,
+            approval_timeout,
         )?;
 
         let origin = validate_mist_endpoint(&config.endpoint)
@@ -487,7 +503,13 @@ impl MistHandler {
             sites: Arc::new(std::sync::RwLock::new(sites)),
             catalog: Arc::new(Catalog::embedded()?),
             client,
-            coordinator: load_coordinator(state_path, lab_mode, None, None)?,
+            coordinator: load_coordinator(
+                state_path,
+                lab_mode,
+                None,
+                None,
+                DEFAULT_APPROVAL_TIMEOUT,
+            )?,
             evidence: None,
             lab_mode,
             tool_router: Self::mist_tool_router(),
@@ -514,7 +536,13 @@ impl MistHandler {
             sites: Arc::new(std::sync::RwLock::new(sites)),
             catalog: Arc::new(Catalog::embedded()?),
             client,
-            coordinator: load_coordinator(None, false, Some(evidence.clone()), None)?,
+            coordinator: load_coordinator(
+                None,
+                false,
+                Some(evidence.clone()),
+                None,
+                DEFAULT_APPROVAL_TIMEOUT,
+            )?,
             evidence: Some(evidence),
             lab_mode: false,
             tool_router: Self::mist_tool_router(),
@@ -5288,6 +5316,23 @@ mod tests {
         );
     }
 
+    /// `--approval-timeout-secs` must not be silently ignored: `load_coordinator`
+    /// must use the timeout it is given rather than a hardcoded default.
+    #[tokio::test]
+    async fn an_approval_timeout_passed_to_load_coordinator_is_honored() {
+        let non_default = std::time::Duration::from_secs(120);
+        assert_ne!(non_default, DEFAULT_APPROVAL_TIMEOUT);
+
+        let coordinator = load_coordinator(None, false, None, None, non_default)
+            .expect("coordinator with a configured approval timeout");
+
+        assert_eq!(
+            coordinator.approval_ttl(),
+            non_default,
+            "load_coordinator must use the timeout passed to it, not a hardcoded default"
+        );
+    }
+
     /// `--approval-digest-key-file` must not be silently ignored (Percy's
     /// MEC-1217 review of #145, finding 1): a coordinator built with a key via
     /// `load_coordinator` has to actually produce the keyed v6 approval
@@ -5304,6 +5349,7 @@ mod tests {
             false,
             None,
             Some(mecmcp_changeset::ApprovalDigestKey::new(key)),
+            DEFAULT_APPROVAL_TIMEOUT,
         )
         .expect("coordinator with a configured key");
 
