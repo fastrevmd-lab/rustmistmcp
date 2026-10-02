@@ -4979,6 +4979,18 @@ mod tests {
         )
         .expect("handler");
 
+        // MEC-1236 item 4 / MEC-1448: the fixture-leak assertions above only
+        // ever looked at each call's rendered `CallToolResult`. A secret
+        // could still reach the `tracing` output (plain log lines) or the
+        // `audit` target (`mecmcp_audit::AuditScope`, which emits via
+        // `tracing::info!(target: "audit", ...)` -- see
+        // `mecmcp_audit::scope`) without either assertion ever seeing it.
+        // Capturing here means every `sweep!` call below, and the
+        // change-set lifecycle after it, has its log and audit output
+        // checked too, not just its tool response.
+        let capture = CapturingWriter::default();
+        let _capture_guard = install_audit_capture(capture.clone());
+
         let mut covered = std::collections::BTreeSet::new();
         let ext = extensions(full_sweep_caller());
 
@@ -5307,12 +5319,50 @@ mod tests {
             );
         }
 
+        // MEC-1236 item 4 / MEC-1448: the fixture secret must not have
+        // reached logs or audit records for *any* tool exercised above,
+        // mirroring `assert_no_secret_leak`'s per-tool check but against
+        // everything captured for the whole sweep.
+        let logged = String::from_utf8(capture.0.lock().expect("capture").clone())
+            .expect("captured log/audit output is UTF-8");
+        for (name, secret) in FIXTURE_SECRETS {
+            assert!(
+                !logged.contains(secret),
+                "fixture secret {name} leaked into logs or audit records during the sweep"
+            );
+        }
+
         let expected: std::collections::BTreeSet<&str> = KNOWN_TOOLS.iter().copied().collect();
         assert_eq!(
             covered, expected,
             "every tool in KNOWN_TOOLS must be swept for fixture-secret leakage; \
              a tool present in one set but not the other means this test was not \
              updated alongside the registry"
+        );
+    }
+
+    /// Negative control for the log/audit capture added above: proves the
+    /// capture mechanism itself would catch a leaked secret, rather than
+    /// passing merely because nothing was ever planted in the log stream.
+    /// Without this, a regression that silently broke `install_audit_capture`
+    /// (wrong target, wrong level, wrong thread) would make
+    /// `every_known_tool_redacts_fixture_secrets` pass for the wrong reason.
+    #[tokio::test]
+    async fn planted_log_secret_is_caught_by_the_capture_harness() {
+        const PLANTED_SECRET: &str = "FAKE-PLANTED-LOG-SECRET-7a8b9c0d";
+
+        let capture = CapturingWriter::default();
+        let _capture_guard = install_audit_capture(capture.clone());
+
+        tracing::info!(target: "audit", secret = PLANTED_SECRET, "planted for negative control");
+
+        let logged = String::from_utf8(capture.0.lock().expect("capture").clone())
+            .expect("captured log/audit output is UTF-8");
+        assert!(
+            logged.contains(PLANTED_SECRET),
+            "capture harness did not observe a secret logged on its own thread; \
+             the assertions in every_known_tool_redacts_fixture_secrets would \
+             pass vacuously if this broke"
         );
     }
 
