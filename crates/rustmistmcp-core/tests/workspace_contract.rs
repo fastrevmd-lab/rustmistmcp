@@ -8,9 +8,9 @@ const SERVER_MANIFEST: &str = include_str!("../../rustmistmcp/Cargo.toml");
 
 /// The commit `MECMCP_TAG` must resolve to. Checked against the lockfile so a
 /// moved tag cannot silently change the code this server links.
-const MECMCP_REVISION: &str = "6bd42f89f8b0311526e773434a811b390557f81f";
+const MECMCP_REVISION: &str = "927361a755ceb5a43289275ab5f5f00d66359cc3";
 /// The released tag every shared crate is pinned to.
-const MECMCP_TAG: &str = "v0.25.0";
+const MECMCP_TAG: &str = "v0.26.0";
 /// Lockfile text, for verifying the tag resolved to `MECMCP_REVISION`.
 const LOCKFILE: &str = include_str!("../../../Cargo.lock");
 
