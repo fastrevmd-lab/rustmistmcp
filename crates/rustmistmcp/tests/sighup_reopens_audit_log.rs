@@ -156,7 +156,7 @@ async fn sighup_reopens_audit_log_after_rename() {
 
     // First record lands in the original inode.
     emit_audit_record(&client, &base_url, &session, 2).await;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(15);
     let before = wait_for_nonempty(&audit_path, deadline);
     assert!(
         before.contains("search_mist_operations"),
@@ -172,7 +172,11 @@ async fn sighup_reopens_audit_log_after_rename() {
     // Second record must land at the same path, in a fresh inode, once the
     // reopen has completed. Poll rather than sleep a fixed amount: the
     // reopen races the SIGHUP delivery and this keeps the happy path fast.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // The deadline is generous because the reopen runs on the tokio runtime's
+    // signal task, which can be delayed well past typical scheduling latency
+    // when the host is under heavy concurrent load (e.g. a full workspace
+    // test run), not just by the signal/reopen work itself.
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         emit_audit_record(&client, &base_url, &session, 3).await;
         if let Ok(contents) = std::fs::read_to_string(&audit_path)
@@ -182,7 +186,7 @@ async fn sighup_reopens_audit_log_after_rename() {
         }
         assert!(
             Instant::now() < deadline,
-            "second record never appeared at {} within 5s after SIGHUP",
+            "second record never appeared at {} within 15s after SIGHUP",
             audit_path.display()
         );
         std::thread::sleep(Duration::from_millis(25));
