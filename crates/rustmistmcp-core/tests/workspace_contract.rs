@@ -8,18 +8,11 @@ const SERVER_MANIFEST: &str = include_str!("../../rustmistmcp/Cargo.toml");
 
 /// The commit `MECMCP_TAG` must resolve to. Checked against the lockfile so a
 /// moved tag cannot silently change the code this server links.
-const MECMCP_REVISION: &str = "f19b3b4c2730b3813304562039132a3d4bb9a6ee";
+const MECMCP_REVISION: &str = "6bd42f89f8b0311526e773434a811b390557f81f";
 /// The released tag every shared crate is pinned to.
-const MECMCP_TAG: &str = "v0.24.1";
+const MECMCP_TAG: &str = "v0.25.0";
 /// Lockfile text, for verifying the tag resolved to `MECMCP_REVISION`.
 const LOCKFILE: &str = include_str!("../../../Cargo.lock");
-
-/// `mecmcp-redact` landed on `mecmcp`'s `main` branch after `MECMCP_TAG` was
-/// cut and has not shipped in a tagged release yet, so it is the one shared
-/// crate pinned by exact commit instead of by tag (see the comment beside its
-/// `[workspace.dependencies]` entry). Swap this to `MECMCP_TAG`'s generic
-/// check, and drop this exception, once a tag exists that includes it.
-const MECMCP_REDACT_REVISION: &str = "b549d258829fc69da2d139e73094cffd1a55dee1";
 
 #[test]
 fn workspace_metadata_lints_and_shared_revision_are_locked() {
@@ -112,23 +105,6 @@ fn assert_workspace_mecmcp_dependencies_are_pinned(manifest: &str) {
             Some("https://github.com/mechubsec/mecmcp"),
             "{crate_name} must use the approved mecmcp Git source"
         );
-
-        // `mecmcp-redact` is the one exception: see `MECMCP_REDACT_REVISION`.
-        // It is pinned by exact commit, not tag, and is not resolved through
-        // `MECMCP_TAG` at all, so it is checked on its own and skips the
-        // tag/lockfile assertions below.
-        if crate_name == "mecmcp-redact" {
-            assert_eq!(
-                dependency.get("rev").and_then(toml::Value::as_str),
-                Some(MECMCP_REDACT_REVISION),
-                "{crate_name} must pin the exact documented commit"
-            );
-            assert!(
-                dependency.get("tag").is_none(),
-                "{crate_name} is not tagged yet and must not claim a tag"
-            );
-            continue;
-        }
 
         // Tag, not rev, since the family standardised on tags at v0.9.1 — but a
         // tag can be moved, and the original rev pin existed precisely so

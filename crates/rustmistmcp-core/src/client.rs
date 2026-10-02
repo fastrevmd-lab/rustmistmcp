@@ -544,8 +544,15 @@ impl MistClient for HttpMistClient {
 
         let mut retries_used: u8 = 0;
         let http_response = loop {
-            let mut http_request = mecmcp_http::HttpRequest::new(method, url.as_str())
-                .map_err(|_| MistError::Service("failed to build HTTP request".to_owned()))?;
+            // `with_base_and_path` cannot express this request: Mist operations
+            // carry query parameters (pagination, filters) and mecmcp-http 0.25
+            // has no way to attach a query to a path-templated request. `url` is
+            // already assembled and validated by `build_url` above from the
+            // catalog's path template, so this is the same shape `HttpRequest::new`
+            // took pre-MEC-510, not a new bypass.
+            let mut http_request =
+                mecmcp_http::HttpRequest::from_absolute_url(method, url.as_str())
+                    .map_err(|_| MistError::Service("failed to build HTTP request".to_owned()))?;
             http_request = http_request
                 .secret_header("Authorization", &auth_secret)
                 .map_err(|_| MistError::Service("failed to set auth header".to_owned()))?;
@@ -989,7 +996,7 @@ mod tests {
 
     /// Generate a self-signed `localhost` certificate and a matching rustls
     /// server config, mirroring the pattern mecmcp-http's own tests use to
-    /// exercise `HttpRequest::new`'s https-only enforcement.
+    /// exercise `HttpRequest::from_absolute_url`'s https-only enforcement.
     fn tls_material() -> (String, rustls::ServerConfig) {
         ensure_crypto_provider();
         let key_pair = rcgen::KeyPair::generate().expect("key pair");

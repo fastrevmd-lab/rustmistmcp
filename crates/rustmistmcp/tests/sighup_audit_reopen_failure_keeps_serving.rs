@@ -130,6 +130,7 @@ async fn sighup_audit_reopen_failure_keeps_server_alive() {
         audit_log_file: Some(audit_path.clone()),
         redaction: None,
         journald: false,
+        otel: None,
     })
     .expect("initializing audit tracing")
     .expect("this call installs the subscriber and configured a file sink");
