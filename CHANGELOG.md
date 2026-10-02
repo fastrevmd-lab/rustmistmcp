@@ -10,6 +10,15 @@ visible rather than looking like those versions never existed.
 
 ## [Unreleased]
 
+### Changed
+
+- **Re-pinned the `mecmcp-*` crates from `v0.25.0` to `v0.26.0`** (MEC-1236).
+  Brings in mecmcp's `Profile` extension hooks for vendor-specific redaction
+  rules and a fix for a reachable panic in `mecmcp-redact`'s text redaction
+  path. No behavior change in this server; this crate's existing
+  denylist-driven redaction coverage already subsumed the local
+  Mist-specific rules removed in #147.
+
 ### Added
 
 - **Threat model and token-role guidance docs** (#120). `docs/THREAT_MODEL.md`
