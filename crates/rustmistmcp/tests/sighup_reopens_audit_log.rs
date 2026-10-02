@@ -131,6 +131,7 @@ async fn sighup_reopens_audit_log_after_rename() {
         audit_log_file: Some(audit_path.clone()),
         redaction: None,
         journald: false,
+        otel: None,
     })
     .expect("initializing audit tracing")
     .expect("this call installs the subscriber and configured a file sink");

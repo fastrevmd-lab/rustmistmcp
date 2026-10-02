@@ -9,8 +9,8 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use mecmcp_auth::CallerCtx;
 use mecmcp_server::{
-    ResultFormat, ResultLimits, audit_scope, authorize_call, caller_from_extensions,
-    filter_tools_for_scope, tool_result,
+    OutputRedaction, ResultFormat, ResultLimits, audit_scope, authorize_call,
+    caller_from_extensions, filter_tools_for_scope, tool_result,
 };
 use rmcp::{
     RoleServer, ServerHandler,
@@ -105,7 +105,12 @@ where
     E: std::fmt::Display,
 {
     let domain_error = result.as_ref().err().map(ToString::to_string);
-    let output = tool_result(result, ResultFormat::PrettyJson, RESULT_LIMITS);
+    let output = tool_result(
+        result,
+        ResultFormat::PrettyJson,
+        RESULT_LIMITS,
+        OutputRedaction::Apply,
+    );
     if output.is_error == Some(true) {
         audit.fail(domain_error.unwrap_or_else(|| {
             "successful domain result failed bounded MCP result conversion".to_owned()
@@ -245,6 +250,11 @@ fn change_set_limits() -> mecmcp_changeset::OperationLimits {
     }
 }
 
+/// Approval timeout used where no CLI value is available (in-memory test and
+/// example constructors). Production always threads the parsed
+/// `--approval-timeout-secs` value through instead.
+const DEFAULT_APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// Load the coordinator for a handler.
 ///
 /// `None` keeps state in memory, which is what tests want. Production passes
@@ -253,12 +263,19 @@ fn load_coordinator(
     path: Option<&std::path::Path>,
     lab_mode: bool,
     evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
+    approval_digest_key: Option<mecmcp_changeset::ApprovalDigestKey>,
+    approval_timeout: std::time::Duration,
 ) -> Result<Arc<mecmcp_changeset::ChangesetCoordinator>, MistServerError> {
-    let mut coordinator = mecmcp_changeset::ChangesetCoordinator::load(
+    // `load_with_key` verifies any on-disk v6 approval digest against the key
+    // and stores it on the returned coordinator for future signs; it must not
+    // also be passed to `with_approval_digest_key` afterwards, or the two
+    // copies could drift (see mecmcp_runtime::cli::Cli::approval_digest_key_file).
+    let mut coordinator = mecmcp_changeset::ChangesetCoordinator::load_with_key(
         path,
         change_set_limits(),
-        std::time::Duration::from_secs(3600),
+        approval_timeout,
         lab_mode,
+        approval_digest_key,
     )
     .map_err(|error| MistServerError::ChangeSetState(error.to_string()))?;
     if let Some(recorder) = evidence {
@@ -352,8 +369,17 @@ impl MistHandler {
     pub fn from_config(
         config: &rustmistmcp_core::MistConfig,
         sites: BTreeMap<String, String>,
+        state_path: &std::path::Path,
     ) -> Result<Self, MistServerError> {
-        Self::from_config_with_lab_mode(config, sites, false, None)
+        Self::from_config_with_lab_mode(
+            config,
+            sites,
+            state_path,
+            false,
+            None,
+            None,
+            DEFAULT_APPROVAL_TIMEOUT,
+        )
     }
 
     /// Construct a production handler with optional lab mode.
@@ -368,8 +394,11 @@ impl MistHandler {
     pub fn from_config_with_lab_mode(
         config: &rustmistmcp_core::MistConfig,
         sites: BTreeMap<String, String>,
+        state_path: &std::path::Path,
         lab_mode: bool,
         evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
+        approval_digest_key: Option<mecmcp_changeset::ApprovalDigestKey>,
+        approval_timeout: std::time::Duration,
     ) -> Result<Self, MistServerError> {
         // Load credential using mecmcp-secret (enforces mode 0600)
         let credential = mecmcp_secret::load_from_file(
@@ -388,13 +417,14 @@ impl MistHandler {
         )
         .map_err(|error| MistServerError::ClientConstruction(error.to_string()))?;
 
-        // Load change-set coordinator with production path
+        // Load change-set coordinator at the configured state path (the
+        // `--state-file` CLI flag; production's default lives there too).
         let coordinator = load_coordinator(
-            Some(std::path::Path::new(
-                "/var/lib/rustmistmcp/changeset-state.json",
-            )),
+            Some(state_path),
             lab_mode,
             evidence.clone(),
+            approval_digest_key,
+            approval_timeout,
         )?;
 
         let origin = validate_mist_endpoint(&config.endpoint)
@@ -473,7 +503,13 @@ impl MistHandler {
             sites: Arc::new(std::sync::RwLock::new(sites)),
             catalog: Arc::new(Catalog::embedded()?),
             client,
-            coordinator: load_coordinator(state_path, lab_mode, None)?,
+            coordinator: load_coordinator(
+                state_path,
+                lab_mode,
+                None,
+                None,
+                DEFAULT_APPROVAL_TIMEOUT,
+            )?,
             evidence: None,
             lab_mode,
             tool_router: Self::mist_tool_router(),
@@ -500,7 +536,13 @@ impl MistHandler {
             sites: Arc::new(std::sync::RwLock::new(sites)),
             catalog: Arc::new(Catalog::embedded()?),
             client,
-            coordinator: load_coordinator(None, false, Some(evidence.clone()))?,
+            coordinator: load_coordinator(
+                None,
+                false,
+                Some(evidence.clone()),
+                None,
+                DEFAULT_APPROVAL_TIMEOUT,
+            )?,
             evidence: Some(evidence),
             lab_mode: false,
             tool_router: Self::mist_tool_router(),
@@ -562,6 +604,7 @@ impl MistHandler {
                     Err(error),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 );
             }
         };
@@ -574,6 +617,7 @@ impl MistHandler {
                     Err(error),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 );
             }
         };
@@ -599,6 +643,7 @@ impl MistHandler {
                 Err(error),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
         if caller.is_none() && operation.capability == MistCapability::PrivilegedRead {
@@ -610,6 +655,7 @@ impl MistHandler {
                 Err(error),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
         if let Err(error) = authorize_call(
@@ -623,6 +669,7 @@ impl MistHandler {
                 Err(MistCallError::Authorization(error.to_string())),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
         if let Err(error) =
@@ -633,6 +680,7 @@ impl MistHandler {
                 Err(error),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
         if let Some(target) = &target {
@@ -676,6 +724,7 @@ impl MistHandler {
                     Err(error),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 );
             }
         }
@@ -685,6 +734,7 @@ impl MistHandler {
                 Err(error),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
 
@@ -703,6 +753,7 @@ impl MistHandler {
                     Err(MistCallError::Mist(error)),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 );
             }
         };
@@ -718,6 +769,7 @@ impl MistHandler {
                     Err(MistCallError::Mist(error)),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 );
             }
         };
@@ -732,6 +784,7 @@ impl MistHandler {
                 Err(MistCallError::Mist(error)),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
         let mut response = match response.validate(&self.catalog, &self.origin) {
@@ -742,6 +795,7 @@ impl MistHandler {
                     Err(MistCallError::Mist(error)),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 );
             }
         };
@@ -762,6 +816,7 @@ impl MistHandler {
                 Err(MistCallError::Mist(error)),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
         if let Some(cursor) = response.cursor.take() {
@@ -774,6 +829,7 @@ impl MistHandler {
                             Err(MistCallError::Mist(error)),
                             ResultFormat::PrettyJson,
                             RESULT_LIMITS,
+                            OutputRedaction::Apply,
                         );
                     }
                 };
@@ -799,6 +855,7 @@ impl MistHandler {
                     Err(error),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 );
             }
         };
@@ -839,6 +896,7 @@ impl MistHandler {
                 Err(error),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
         let (path, query, cursor) = match args.cursor {
@@ -869,6 +927,7 @@ impl MistHandler {
                         Err(error),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     );
                 };
                 let Some((path, query, stored_target)) = cursor.request_context() else {
@@ -886,6 +945,7 @@ impl MistHandler {
                         Err(error),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     );
                 };
                 let path = path.clone();
@@ -911,6 +971,7 @@ impl MistHandler {
                         Err(error),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     );
                 }
                 (path, query, Some(cursor))
@@ -1730,6 +1791,7 @@ impl MistHandler {
                 Err(MistCallError::Authorization(error.to_string())),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
         let operation = self.catalog.operation(&args.operation_id);
@@ -1748,6 +1810,7 @@ impl MistHandler {
                     ))),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ))
             }
         }
@@ -1976,6 +2039,7 @@ impl MistHandler {
                 Err(MistCallError::AmbiguousScope),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
         let resolved = wan::applications(args.source.into(), args.mode.into());
@@ -2007,6 +2071,7 @@ impl MistHandler {
                 Err(MistCallError::Authorization(error.to_string())),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
         let organizations = self
@@ -2126,6 +2191,7 @@ impl MistHandler {
                     Err(MistCallError::AmbiguousScope),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -2165,6 +2231,7 @@ impl MistHandler {
                     Err(MistCallError::AmbiguousScope),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -2216,6 +2283,7 @@ impl MistHandler {
                     Err(MistCallError::AmbiguousScope),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -2287,6 +2355,7 @@ impl MistHandler {
                     Err(MistCallError::AmbiguousScope),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -2380,6 +2449,7 @@ impl MistHandler {
                 Err(MistCallError::Authorization(error.to_string())),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
         let limit = usize::from(args.limit.unwrap_or(20));
@@ -2390,6 +2460,7 @@ impl MistHandler {
                 Err(error),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
         let query = args.query.to_ascii_lowercase();
@@ -2530,6 +2601,7 @@ impl MistHandler {
                 ),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
 
@@ -2549,6 +2621,7 @@ impl MistHandler {
                 ),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
 
@@ -2566,6 +2639,7 @@ impl MistHandler {
                 )),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
 
@@ -2583,6 +2657,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>("update requires object_id"),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -2624,6 +2699,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>("read result was not text"),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -2637,6 +2713,7 @@ impl MistHandler {
                         )),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -2648,6 +2725,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>("read response missing data field"),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             }
@@ -2675,6 +2753,7 @@ impl MistHandler {
                     Err::<serde_json::Value, _>(error.to_string()),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -2710,6 +2789,7 @@ impl MistHandler {
                     Err::<serde_json::Value, _>(format!("lab mode waive failed: {error}")),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         }
@@ -2779,6 +2859,7 @@ impl MistHandler {
                     Err::<serde_json::Value, _>(error.to_string()),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -2793,6 +2874,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>(format!("failed to parse preview: {error}")),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -2941,6 +3023,7 @@ impl MistHandler {
                     Err::<serde_json::Value, _>(error.to_string()),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -3004,6 +3087,7 @@ impl MistHandler {
                     Err::<serde_json::Value, _>(error.to_string()),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -3021,6 +3105,7 @@ impl MistHandler {
                     Err::<serde_json::Value, _>(error.to_string()),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -3037,6 +3122,7 @@ impl MistHandler {
                 )),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
 
@@ -3058,6 +3144,7 @@ impl MistHandler {
                 )),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
 
@@ -3071,6 +3158,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>(format!("failed to parse preview: {error}")),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -3092,6 +3180,7 @@ impl MistHandler {
                         ),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -3102,6 +3191,7 @@ impl MistHandler {
                 Err::<serde_json::Value, _>("change set has no preview"),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         };
 
@@ -3124,6 +3214,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>("update requires object_id"),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             }
@@ -3170,6 +3261,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>("drift check result was not text"),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -3183,6 +3275,7 @@ impl MistHandler {
                         )),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -3194,6 +3287,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>("drift check response missing data field"),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -3209,6 +3303,7 @@ impl MistHandler {
                         )),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             };
@@ -3266,6 +3361,7 @@ impl MistHandler {
                     ),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
             true
@@ -3283,6 +3379,7 @@ impl MistHandler {
                 )),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
 
@@ -3314,6 +3411,7 @@ impl MistHandler {
                 Err::<serde_json::Value, _>(message),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
 
@@ -3345,6 +3443,7 @@ impl MistHandler {
                     Err::<serde_json::Value, _>(error.to_string()),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -3396,6 +3495,7 @@ impl MistHandler {
                     Err::<serde_json::Value, _>(format!("write failed: {error}")),
                     ResultFormat::PrettyJson,
                     RESULT_LIMITS,
+                    OutputRedaction::Apply,
                 ));
             }
         };
@@ -3420,6 +3520,7 @@ impl MistHandler {
                             Err::<serde_json::Value, _>("create response missing id field"),
                             ResultFormat::PrettyJson,
                             RESULT_LIMITS,
+                            OutputRedaction::Apply,
                         ));
                     }
                 },
@@ -3437,6 +3538,7 @@ impl MistHandler {
                         Err::<serde_json::Value, _>("create response was not JSON"),
                         ResultFormat::PrettyJson,
                         RESULT_LIMITS,
+                        OutputRedaction::Apply,
                     ));
                 }
             }
@@ -3520,6 +3622,7 @@ impl MistHandler {
                 Err::<serde_json::Value, _>(format!("failed to persist final state: {error}")),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             ));
         }
 
@@ -5210,6 +5313,92 @@ mod tests {
             "every tool in KNOWN_TOOLS must be swept for fixture-secret leakage; \
              a tool present in one set but not the other means this test was not \
              updated alongside the registry"
+        );
+    }
+
+    /// `--approval-timeout-secs` must not be silently ignored: `load_coordinator`
+    /// must use the timeout it is given rather than a hardcoded default.
+    #[tokio::test]
+    async fn an_approval_timeout_passed_to_load_coordinator_is_honored() {
+        let non_default = std::time::Duration::from_secs(120);
+        assert_ne!(non_default, DEFAULT_APPROVAL_TIMEOUT);
+
+        let coordinator = load_coordinator(None, false, None, None, non_default)
+            .expect("coordinator with a configured approval timeout");
+
+        assert_eq!(
+            coordinator.approval_ttl(),
+            non_default,
+            "load_coordinator must use the timeout passed to it, not a hardcoded default"
+        );
+    }
+
+    /// A security-relevant configuration flag must not be silently ignored:
+    /// a coordinator built with a key via `load_coordinator` has to actually
+    /// produce the stronger, keyed approval digest, not the weaker default
+    /// one an operator who thinks the flag protects them would otherwise get.
+    #[tokio::test]
+    async fn an_approval_digest_key_passed_to_load_coordinator_produces_a_v6_digest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_path = dir.path().join("changeset-state.json");
+        let key = b"a-sufficiently-long-test-key".as_slice();
+
+        let coordinator = load_coordinator(
+            Some(&state_path),
+            false,
+            None,
+            Some(mecmcp_changeset::ApprovalDigestKey::new(key)),
+            DEFAULT_APPROVAL_TIMEOUT,
+        )
+        .expect("coordinator with a configured key");
+
+        let created = coordinator
+            .create_change_set(
+                "site/device-a".to_string(),
+                vec![serde_json::json!({"action": "set", "target": "/test"})],
+                "alice".to_string(),
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+                "policy-sig".to_string(),
+            )
+            .await
+            .expect("create");
+        coordinator
+            .approve_change_set(
+                created.change_set_id.clone(),
+                "site/device-a".to_string(),
+                "bob".to_string(),
+                created.digest.clone(),
+                mecmcp_audit::ActorType::Human,
+            )
+            .await
+            .expect("approve");
+
+        let state = mecmcp_changeset::persistence::read_state_with_key(
+            &state_path,
+            change_set_limits().max_state_bytes,
+            Some(key),
+        )
+        .expect("read back with the same key");
+        let approval = state.change_sets[&created.change_set_id]
+            .approval
+            .as_ref()
+            .expect("approval");
+        assert_eq!(
+            approval.digest_version, 6,
+            "a key passed through load_coordinator must actually take effect and produce \
+             the stronger, keyed digest -- otherwise configuring it does nothing"
+        );
+
+        drop(coordinator);
+        let unkeyed_read = mecmcp_changeset::persistence::read_state_with_key(
+            &state_path,
+            change_set_limits().max_state_bytes,
+            None,
+        );
+        assert!(
+            unkeyed_read.is_err(),
+            "a v6 digest produced through load_coordinator must not verify without the key"
         );
     }
 }
