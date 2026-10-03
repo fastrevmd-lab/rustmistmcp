@@ -22,12 +22,20 @@ COPY --from=builder /workspace/target/release/rustmistmcp /usr/local/bin/rustmis
 USER 65532:65532
 EXPOSE 30030
 STOPSIGNAL SIGTERM
+# --audit-hmac-key-file: this image is distroless with no shell, so a
+# shell-script key-generation wrapper (as LXC's install.sh uses) can never
+# run here. Instead the binary itself generates the key file on first run if
+# it is absent (see ensure_audit_hmac_key in src/main.rs) -- the
+# container-image equivalent of install.sh's own key-generation step,
+# closing the "5 of 6 server images run unkeyed audit" gap (mecmcp#376 /
+# MEC-978). The path is under the writable /var/lib/rustmistmcp volume, not
+# /etc/rustmistmcp, which a documented `docker run` may mount read-only.
 ENTRYPOINT [ \
     "/usr/local/bin/rustmistmcp", \
     "--device-mapping", "/etc/rustmistmcp/mist.json", \
     "--tokens-file", "/var/lib/rustmistmcp/tokens.json", \
     "--audit-format", "json", \
     "--audit-redact", "devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac", \
-    "--audit-hmac-key-file", "/etc/rustmistmcp/audit-hmac.key" \
+    "--audit-hmac-key-file", "/var/lib/rustmistmcp/audit-hmac.key" \
 ]
 CMD ["--transport", "streamable-http", "--host", "127.0.0.1", "--port", "30030"]
