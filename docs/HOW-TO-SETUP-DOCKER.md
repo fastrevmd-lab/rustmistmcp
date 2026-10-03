@@ -32,8 +32,16 @@ security-relevant flags:
 --tokens-file /var/lib/rustmistmcp/tokens.json
 --audit-format json
 --audit-redact devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac
---audit-hmac-key-file /etc/rustmistmcp/audit-hmac.key
+--audit-hmac-key-file /var/lib/rustmistmcp/audit-hmac.key
 ```
+
+If `/var/lib/rustmistmcp/audit-hmac.key` is absent or empty on startup, the
+binary generates one itself (mode 0600, from OS entropy) and never rotates an
+existing non-empty key. This closes the gap where a container that never had
+a key mounted ran with a constant, predictable HMAC key. Mount a writable
+volume at `/var/lib/rustmistmcp` so the generated key persists across
+container restarts — a fresh key on every restart makes every prior audit
+record's HMAC unverifiable.
 
 **CMD** carries only operator-tunable flags — bind address, port, transport:
 
@@ -118,6 +126,11 @@ random key:
 openssl rand -hex 32 > audit-hmac.key
 ```
 
+This step is now optional: if you skip it, the server generates a key itself
+on first run (see the ENTRYPOINT note above). Generate it yourself only if you
+want control over the exact moment a key is created, or want to reuse the same
+key across a redeploy without first copying it out of a running container.
+
 **Mint a bearer token.** The binary can do this on the host — no container
 needed, but note the **`-f` flag** because it defaults to `devices.json`, not
 `mist.json`:
@@ -177,7 +190,7 @@ docker run -d --name mist-labmode \
   -p 127.0.0.1:30044:30030 \
   -v "$PWD/mist.json:/etc/rustmistmcp/mist.json:ro" \
   -v "$PWD/mist-api-token:/etc/rustmistmcp/mist-api-token:ro" \
-  -v "$PWD/audit-hmac.key:/etc/rustmistmcp/audit-hmac.key:ro" \
+  -v "$PWD/audit-hmac.key:/var/lib/rustmistmcp/audit-hmac.key:rw" \
   -v "$PWD/tokens.json:/var/lib/rustmistmcp/tokens.json:ro" \
   -v "$PWD/mist-labmode-state:/var/lib/rustmistmcp/state:rw" \
   "$image" \
@@ -218,7 +231,7 @@ docker run -d --name mist-twoperson \
   -p 127.0.0.1:30034:30030 \
   -v "$PWD/mist.json:/etc/rustmistmcp/mist.json:ro" \
   -v "$PWD/mist-api-token:/etc/rustmistmcp/mist-api-token:ro" \
-  -v "$PWD/audit-hmac.key:/etc/rustmistmcp/audit-hmac.key:ro" \
+  -v "$PWD/audit-hmac.key:/var/lib/rustmistmcp/audit-hmac.key:rw" \
   -v "$PWD/tokens.json:/var/lib/rustmistmcp/tokens.json:ro" \
   -v "$PWD/mist-twoperson-state:/var/lib/rustmistmcp/state:rw" \
   "$image" \

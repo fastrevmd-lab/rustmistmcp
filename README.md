@@ -192,16 +192,13 @@ install -d -m 0700 packaging/container/state
 cp examples/mist.example.json packaging/container/runtime/mist.json
 printf '%s\n' '{"version":1,"tokens":[]}' > packaging/container/runtime/tokens.json
 install -m 0600 /dev/null packaging/container/runtime/mist-api-token
-install -m 0600 /dev/null packaging/container/runtime/audit-hmac.key
 sudo chown root:65532 packaging/container/runtime/mist.json
 sudo chmod 0640 packaging/container/runtime/mist.json
 sudo chown 65532:65532 packaging/container/runtime/mist-api-token \
-  packaging/container/runtime/tokens.json \
-  packaging/container/runtime/audit-hmac.key
+  packaging/container/runtime/tokens.json
 sudo chown -R 65532:65532 packaging/container/state
 chmod 0600 packaging/container/runtime/mist-api-token \
-  packaging/container/runtime/tokens.json \
-  packaging/container/runtime/audit-hmac.key
+  packaging/container/runtime/tokens.json
 RUSTMISTMCP_IMAGE='ghcr.io/mechubsec/rustmistmcp@sha256:<verified-64-hex-digest>' \
   docker compose -f packaging/container/compose.example.yaml up
 ```

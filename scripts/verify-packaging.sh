@@ -143,7 +143,7 @@ require_contains "$dockerfile" 'COPY docs/mist-api/catalog.json ./docs/mist-api/
 # all within the ENTRYPOINT block per the visual inspection above).
 require_contains "$dockerfile" '"--audit-format", "json",'
 require_contains "$dockerfile" '"--audit-redact", "devices=hmac,host=hmac,name=hmac,basename=hmac,command=hmac,pfe_command=hmac",'
-require_contains "$dockerfile" '"--audit-hmac-key-file", "/etc/rustmistmcp/audit-hmac.key"'
+require_contains "$dockerfile" '"--audit-hmac-key-file", "/var/lib/rustmistmcp/audit-hmac.key"'
 require_contains "$dockerfile" '"--tokens-file", "/var/lib/rustmistmcp/tokens.json",'
 require_contains "$dockerfile" '"--device-mapping", "/etc/rustmistmcp/mist.json",'
 
